@@ -109,7 +109,7 @@ def _run_stilts(task: str, params: Dict[str, Any],
     except FileNotFoundError:
          raise StiltsError(f"STILTS command failed. 'java' or '{os.getenv('STILTS_JAR', 'stilts.jar')}' not found. Ensure Java is installed and STILTS_JAR environment variable or stilts.jar is accessible.")
     except subprocess.CalledProcessError as e:
-        error_message = f"STILTS task '{task}' failed with exit code {e.returncode}."nFull command: {command_str}"
+        error_message = f"STILTS task '{task}' failed with exit code {e.returncode}.\nFull command: {command_str}"
         if e.stderr:
             error_message += f"\nSTILTS stderr:\n{e.stderr}"
         if e.stdout:
@@ -117,7 +117,7 @@ def _run_stilts(task: str, params: Dict[str, Any],
         logger.error(error_message)
         raise StiltsError(error_message) from e
     except Exception as e:
-        error_message = f"An unexpected error occurred while running STILTS task '{task}': {e}"nFull command: {command_str}"
+        error_message = f"An unexpected error occurred while running STILTS task '{task}': {e}\nFull command: {command_str}"
         logger.exception(error_message)
         raise StiltsError(error_message) from e
 
