@@ -388,7 +388,7 @@ def cdsskymatch(in1, out, ra, dec, cds_id, radius=1.0, join_type='1and2', find='
         out: Output file for the result
         ra: RA column name in the first catalog
         dec: Dec column name in the first catalog
-        catalog: CDS catalog ID (e.g., "I/355/gaiadr3" or "simbad")
+        cds_id: CDS catalog ID (e.g., "I/355/gaiadr3" or "simbad")
         radius: Match radius in arcseconds
         join_type: Type of join ('1and2', '1or2', 'all1', 'all2', etc.)
         find: Finding mode ('best', 'all', 'each')
@@ -402,32 +402,27 @@ def cdsskymatch(in1, out, ra, dec, cds_id, radius=1.0, join_type='1and2', find='
         True if successful
     """
     try:
-        cmd = _get_stilts_base_cmd(stilts_cmd_base, java_opts, tmpdir)
-        
-        # Build the CDS XMatch command
-        cmd.extend(["cdsskymatch",
-                   f"in={infile}",
-                   f"ra={ra}",
-                   f"dec={dec}", 
-                   f"radius={radius}",
-                   f"find={find}",
-                   f"out={out}",
-                   f"cdstable={cds_id}",
-                   f"join={join_type}"])
+        # Build parameters dictionary for STILTS command
+        params = {
+            "in": in1,
+            "ra": ra,
+            "dec": dec,
+            "radius": radius,
+            "find": find,
+            "out": out,
+            "cdstable": cds_id,
+            "join": join_type
+        }
         
         # Add optional columns if specified
         if cdscols:
-            cmd.append(f"cdscols={cdscols}")
+            params["cdscols"] = cdscols
             
         if verbose:
-            logger.info(f"Running STILTS cdsskymatch: {' '.join(cmd)}")
+            logger.info(f"Running STILTS cdsskymatch")
             
-        # Run the command
-        process = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        
-        if process.returncode != 0:
-            logger.error(f"STILTS cdsskymatch error: {process.stderr}")
-            raise StiltsError(f"STILTS cdsskymatch failed: {process.stderr}")
+        # Run the command using existing function
+        _run_stilts("cdsskymatch", params, java_opts, tmpdir, stilts_cmd_base)
             
         return True
         
