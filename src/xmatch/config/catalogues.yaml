@@ -18,7 +18,7 @@ stilts_config:
 catalogues:
   GAIA_CDS_XMATCH:
     description: "Gaia Source Catalogue via Vizier CDSXmatch service"
-    vizier_id: "I/355/gaiadr3"
+    cds_id: "I/355/gaiadr3"
     # https://vizier.cds.unistra.fr/viz-bin/VizieR-3?-source=I/355/gaiadr3
     best_method: stilts_cdsskymatch
     radius_arcsec: 1.0
@@ -62,7 +62,7 @@ catalogues:
 
   GALEX_CDS_XMATCH:
     description: "GALEX All-sky Imaging Survey via Vizier CDSXmatch"
-    vizier_id: "II/335/galex_ais"
+    cds: "II/335/galex_ais"
     best_method: stilts_cdsskymatch 
     radius_arcsec: 3.0
     id_column: "objid" 
@@ -139,7 +139,7 @@ crossmatch_methods:
   stilts_cdsskymatch:
     description: "Cross-match using STILTS 'cdsskymatch' task (queries Vizier X-Match service). Requires STILTS, Java, internet."
     enabled: true
-    requires: ['vizier_id']
+    requires: ['cds_id']
     default_radius_arcsec: 1.0
 
   stilts_tapskymatch:

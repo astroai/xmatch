@@ -18,7 +18,7 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from joblib import Parallel, delayed
 
-from ..utils import stilts, tap, auth # Assuming auth utility exists
+from ..utils import stilts, tap, auth
 from ..utils.stilts import StiltsError
 from ..utils.tap import TapError
 
@@ -736,6 +736,17 @@ class CrossMatch:
             except CrossMatchError:
                 pass
                 
+        # For stilts_cdsskymatch, we don't need a file path as it uses the CDS XMatch service
+        if stilts_method == 'stilts_cdsskymatch' and not catalogue_2_path and isinstance(catalogue_2, str):
+            try:
+                cat2_config = self.get_catalogue_config(str(catalogue_2))
+                if 'cds_id' in cat2_config:
+                    # For cdsskymatch, we'll pass the cds_id directly to the method later
+                    catalogue_2_path = "VIZIER:" + cat2_config['cds_id']
+                    logger.info(f"Using VizieR catalog ID for stilts_cdsskymatch: {cat2_config['cds_id']}")
+            except CrossMatchError:
+                pass
+                
         if not catalogue_2_path:
             raise CrossMatchError(f"Cannot determine path for catalogue_2: {catalogue_2}")
         
@@ -752,7 +763,6 @@ class CrossMatch:
             # Extract parameters for STILTS
             stilts_params = {
                 'in1': temp_in_path,
-                'in2': catalogue_2_path,
                 'out': temp_out_path,
                 'stilts_cmd_base': kwargs.get('stilts_cmd_base'),
                 'java_opts': kwargs.get('java_opts'),
@@ -763,6 +773,7 @@ class CrossMatch:
             if stilts_method == 'stilts_sky':
                 ra_col, dec_col = self._find_coord_cols(catalogue_1_df)
                 stilts_params.update({
+                    'in2': catalogue_2_path,
                     'ra1': ra_col,
                     'dec1': dec_col, 
                     'ra2': kwargs.get('ra_column_2', 'ra'),
@@ -771,8 +782,21 @@ class CrossMatch:
                     'join_type': kwargs.get('join_type', '1and2')
                 })
                 result = stilts.crossmatch_sky(**stilts_params)
+            elif stilts_method == 'stilts_cdsskymatch':
+                ra_col, dec_col = self._find_coord_cols(catalogue_1_df)
+                # For CDS XMatch, we need different parameters
+                cds_id = catalogue_2_path.replace("VIZIER:", "")
+                stilts_params.update({
+                    'ra': ra_col,
+                    'dec': dec_col,
+                    'cdstable': cds_id,
+                    'radius': kwargs.get('radius_arcsec', 1.0),
+                    'find': kwargs.get('find', 'best')  # 'best', 'all', or 'each'
+                })
+                result = stilts.cdsskymatch(**stilts_params)
             elif stilts_method == 'stilts_id':
                 stilts_params.update({
+                    'in2': catalogue_2_path,
                     'id_column_1': kwargs.get('id_column_1'),
                     'id_column_2': kwargs.get('id_column_2'),
                     'join_type': kwargs.get('join_type', '1and2')

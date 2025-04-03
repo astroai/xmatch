@@ -135,7 +135,7 @@ def _prepare_input_table(df: pd.DataFrame, temp_dir: str, filename: str = "input
 @stilts_retry()
 def stilts_cdsskymatch(
     catalogue_1_df: pd.DataFrame, 
-    vizier_id: str, 
+    cds_id: str, 
     radius: float, 
     ra_column_1: str, 
     dec_column_1: str, 
@@ -155,7 +155,7 @@ def stilts_cdsskymatch(
             "ifmt": "fits",
             "ra": ra_column_1,
             "dec": dec_column_1,
-            "vizcat": vizier_id,
+            "cdstable": cds_id,
             "radius": radius,
             "find": kwargs.get('find', 'best'),
             "join": kwargs.get('join', '1and2'),
@@ -377,3 +377,60 @@ def stilts_tapquery(
         shutil.copy2(output_parquet, final_output)
         logger.info(f"STILTS tapquery result saved to: {final_output}")
         return final_output
+
+def cdsskymatch(in1, out, ra1, dec1, catalog, radius=1.0, join_type='1and2', find='best', cdscols=None,
+              stilts_cmd_base=None, java_opts=None, tmpdir=None, verbose=True):
+    """
+    Cross-match with a VizieR catalog using the CDS XMatch service.
+    
+    Args:
+        in1: Input file for the first catalog
+        out: Output file for the result
+        ra1: RA column name in the first catalog
+        dec1: Dec column name in the first catalog
+        catalog: VizieR catalog ID (e.g., "I/355/gaiadr3")
+        radius: Match radius in arcseconds
+        join_type: Type of join ('1and2', '1or2', 'all1', 'all2', etc.)
+        find: Finding mode ('best', 'all', 'each')
+        cdscols: Comma-separated list of columns to retrieve from the VizieR catalog
+        stilts_cmd_base: Base STILTS command
+        java_opts: Java options
+        tmpdir: Temporary directory
+        verbose: Whether to output verbose information
+
+    Returns:
+        True if successful
+    """
+    try:
+        cmd = _get_stilts_base_cmd(stilts_cmd_base, java_opts, tmpdir)
+        
+        # Build the CDS XMatch command
+        cmd.extend(["cdsskymatch",
+                   f"in={in1}",
+                   f"ra={ra1}",
+                   f"dec={dec1}", 
+                   f"radius={radius}",
+                   f"find={find}",
+                   f"out={out}",
+                   f"catid={catalog}",
+                   f"join={join_type}"])
+        
+        # Add optional columns if specified
+        if cdscols:
+            cmd.append(f"cdscols={cdscols}")
+            
+        if verbose:
+            logger.info(f"Running STILTS cdsskymatch: {' '.join(cmd)}")
+            
+        # Run the command
+        process = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        
+        if process.returncode != 0:
+            logger.error(f"STILTS cdsskymatch error: {process.stderr}")
+            raise StiltsError(f"STILTS cdsskymatch failed: {process.stderr}")
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error in STILTS cdsskymatch: {str(e)}")
+        raise StiltsError(f"Error during STILTS cdsskymatch: {str(e)}")
