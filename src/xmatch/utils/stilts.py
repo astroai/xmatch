@@ -109,7 +109,7 @@ def _run_stilts(task: str, params: Dict[str, Any],
     except FileNotFoundError:
          raise StiltsError(f"STILTS command failed. 'java' or '{os.getenv('STILTS_JAR', 'stilts.jar')}' not found. Ensure Java is installed and STILTS_JAR environment variable or stilts.jar is accessible.")
     except subprocess.CalledProcessError as e:
-        error_message = f"STILTS task '{task}' failed with exit code {e.returncode}."
+        error_message = f"STILTS task '{task}' failed with exit code {e.returncode}."nFull command: {command_str}"
         if e.stderr:
             error_message += f"\nSTILTS stderr:\n{e.stderr}"
         if e.stdout:
@@ -117,7 +117,7 @@ def _run_stilts(task: str, params: Dict[str, Any],
         logger.error(error_message)
         raise StiltsError(error_message) from e
     except Exception as e:
-        error_message = f"An unexpected error occurred while running STILTS task '{task}': {e}"
+        error_message = f"An unexpected error occurred while running STILTS task '{task}': {e}"nFull command: {command_str}"
         logger.exception(error_message)
         raise StiltsError(error_message) from e
 
@@ -378,7 +378,7 @@ def stilts_tapquery(
         logger.info(f"STILTS tapquery result saved to: {final_output}")
         return final_output
 
-def cdsskymatch(in1, out, ra1, dec1, catalog, radius=1.0, join_type='1and2', find='best', cdscols=None,
+def cdsskymatch(in1, out, ra, dec, cds_id, radius=1.0, join_type='1and2', find='best', cdscols=None,
               stilts_cmd_base=None, java_opts=None, tmpdir=None, verbose=True):
     """
     Cross-match with a VizieR catalog using the CDS XMatch service.
@@ -386,9 +386,9 @@ def cdsskymatch(in1, out, ra1, dec1, catalog, radius=1.0, join_type='1and2', fin
     Args:
         in1: Input file for the first catalog
         out: Output file for the result
-        ra1: RA column name in the first catalog
-        dec1: Dec column name in the first catalog
-        catalog: VizieR catalog ID (e.g., "I/355/gaiadr3")
+        ra: RA column name in the first catalog
+        dec: Dec column name in the first catalog
+        catalog: CDS catalog ID (e.g., "I/355/gaiadr3" or "simbad")
         radius: Match radius in arcseconds
         join_type: Type of join ('1and2', '1or2', 'all1', 'all2', etc.)
         find: Finding mode ('best', 'all', 'each')
@@ -406,13 +406,13 @@ def cdsskymatch(in1, out, ra1, dec1, catalog, radius=1.0, join_type='1and2', fin
         
         # Build the CDS XMatch command
         cmd.extend(["cdsskymatch",
-                   f"in={in1}",
-                   f"ra={ra1}",
-                   f"dec={dec1}", 
+                   f"in={infile}",
+                   f"ra={ra}",
+                   f"dec={dec}", 
                    f"radius={radius}",
                    f"find={find}",
                    f"out={out}",
-                   f"catid={catalog}",
+                   f"cdstable={cds_id}",
                    f"join={join_type}"])
         
         # Add optional columns if specified
@@ -434,3 +434,52 @@ def cdsskymatch(in1, out, ra1, dec1, catalog, radius=1.0, join_type='1and2', fin
     except Exception as e:
         logger.error(f"Error in STILTS cdsskymatch: {str(e)}")
         raise StiltsError(f"Error during STILTS cdsskymatch: {str(e)}")
+
+@stilts_retry()
+def crossmatch_sky(in1, in2, out, ra1, dec1, ra2, dec2, radius=1.0, join_type='1and2',
+                  stilts_cmd_base=None, java_opts=None, tmpdir=None, **kwargs):
+    """
+    Performs spatial cross-matching between two catalogs using STILTS tmatch2.
+    
+    Args:
+        in1: Input file for the first catalog
+        in2: Input file for the second catalog
+        out: Output file for the result
+        ra1: RA column name in the first catalog
+        dec1: Dec column name in the first catalog
+        ra2: RA column name in the second catalog
+        dec2: Dec column name in the second catalog
+        radius: Match radius in arcseconds
+        join_type: Type of join ('1and2', '1or2', 'all1', 'all2', etc.)
+        stilts_cmd_base: Base STILTS command
+        java_opts: Java options
+        tmpdir: Temporary directory
+        **kwargs: Additional parameters to pass to tmatch2
+
+    Returns:
+        Output file path if successful
+    """
+    params = {
+        "in1": in1,
+        "in2": in2,
+        "ifmt1": kwargs.get('ifmt1', 'auto'),
+        "ifmt2": kwargs.get('ifmt2', 'auto'),
+        "matcher": kwargs.get('matcher', 'sky'),
+        "values1": f"{ra1} {dec1}",
+        "values2": f"{ra2} {dec2}",
+        "params": str(radius),
+        "join": join_type,
+        "find": kwargs.get('find', 'best'),
+        "out": out,
+        "ofmt": kwargs.get('ofmt', 'auto')
+    }
+    
+    # Add any additional parameters
+    for k, v in kwargs.items():
+        if k not in ['ifmt1', 'ifmt2', 'matcher', 'find', 'ofmt']:
+            params[k] = v
+    
+    _run_stilts("tmatch2", params, java_opts, tmpdir, stilts_cmd_base)
+    
+    logger.info(f"STILTS crossmatch_sky result saved to: {out}")
+    return out

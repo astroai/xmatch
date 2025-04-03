@@ -789,7 +789,7 @@ class CrossMatch:
                 stilts_params.update({
                     'ra': ra_col,
                     'dec': dec_col,
-                    'cdstable': cds_id,
+                    'cds_id': cds_id,
                     'radius': kwargs.get('radius_arcsec', 1.0),
                     'find': kwargs.get('find', 'best')  # 'best', 'all', or 'each'
                 })
