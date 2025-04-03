@@ -505,3 +505,477 @@ class CrossMatch:
             
         logger.info(f"Using catalogue_1 coordinate columns: RA='{ra_col}', Dec='{dec_col}'")
         return ra_col, dec_col
+
+    def _perform_single_join(
+        self,
+        catalogue_1_df: pd.DataFrame,
+        catalogue_2: Union[str, Path, pd.DataFrame, Table],
+        method_hint: Optional[str] = None,
+        id_column_1_override: Optional[str] = None,
+        id_column_2_override: Optional[str] = None,
+        columns_2_override: Optional[List[str]] = None,
+        radius_override: Optional[float] = None,
+        final_kwargs: Optional[Dict[str, Any]] = None
+    ) -> pd.DataFrame:
+        """
+        Perform a single join operation between two catalogs.
+        
+        Args:
+            catalogue_1_df: DataFrame containing the first catalog data
+            catalogue_2: Second catalog (DataFrame, path, or catalog name from config)
+            method_hint: Specific method to use (overrides automatic selection)
+            id_column_1_override: Column name in catalogue_1 to use as join key
+            id_column_2_override: Column name in catalogue_2 to use as join key
+            columns_2_override: List of columns to keep from catalogue_2
+            radius_override: Match radius in arcseconds (for spatial matches)
+            final_kwargs: Additional parameters for the join operation
+            
+        Returns:
+            DataFrame containing the joined data
+        """
+        # Default to empty dict if None is provided
+        if final_kwargs is None:
+            final_kwargs = {}
+            
+        # Determine if catalogue_2 is a named catalog from config
+        catalogue_2_config = None
+        if isinstance(catalogue_2, str) and not Path(catalogue_2).is_file():
+            try:
+                catalogue_2_config = self.get_catalogue_config(catalogue_2)
+                logger.info(f"Using catalog from config: {catalogue_2}")
+            except CrossMatchError:
+                pass
+                
+        # Determine the join method to use
+        method = method_hint
+        
+        # If no method_hint, try to get from config
+        if not method and catalogue_2_config:
+            method = catalogue_2_config.get('best_method')
+            
+        # Default to STILTS if still no method determined
+        if not method:
+            method = 'stilts'
+            
+        logger.info(f"Using join method: {method}")
+            
+        # Get catalog-specific parameters from config if available
+        join_params = {}
+        if catalogue_2_config:
+            # Extract parameters for the selected method
+            if method in catalogue_2_config:
+                join_params.update(catalogue_2_config[method])
+                
+            # Get ID columns if not overridden
+            if not id_column_1_override and 'id_column_1' in catalogue_2_config:
+                id_column_1 = catalogue_2_config['id_column_1']
+                join_params['id_column_1'] = id_column_1
+            else:
+                join_params['id_column_1'] = id_column_1_override
+                
+            if not id_column_2_override and 'id_column_2' in catalogue_2_config:
+                id_column_2 = catalogue_2_config['id_column_2']
+                join_params['id_column_2'] = id_column_2
+            else:
+                join_params['id_column_2'] = id_column_2_override
+                
+            # Get columns to retrieve if not overridden
+            if not columns_2_override and 'columns' in catalogue_2_config:
+                columns_2 = catalogue_2_config['columns']
+                join_params['columns_2'] = columns_2
+            else:
+                join_params['columns_2'] = columns_2_override
+                
+            # Get radius if not overridden
+            if not radius_override and 'radius_arcsec' in catalogue_2_config:
+                radius = catalogue_2_config['radius_arcsec']
+                join_params['radius_arcsec'] = radius
+            else:
+                join_params['radius_arcsec'] = radius_override
+                
+        else:
+            # Use overrides directly if no config
+            join_params['id_column_1'] = id_column_1_override
+            join_params['id_column_2'] = id_column_2_override
+            join_params['columns_2'] = columns_2_override
+            join_params['radius_arcsec'] = radius_override
+            
+        # Add final_kwargs to join parameters
+        if final_kwargs:
+            join_params.update(final_kwargs)
+            
+        # Validate required parameters based on join method
+        if method in ['id', 'stilts_id'] and (not join_params.get('id_column_1') or not join_params.get('id_column_2')):
+            raise CrossMatchError(f"ID-based join requires both id_column_1 and id_column_2 parameters")
+            
+        if method in ['sky', 'stilts_sky', 'cds', 'xmatch'] and not join_params.get('radius_arcsec'):
+            raise CrossMatchError(f"Sky-based join requires radius_arcsec parameter")
+
+        # Execute join based on method
+        try:
+            if method == 'tap':
+                return self._join_via_tap(catalogue_1_df, catalogue_2, **join_params)
+            elif method == 'cds' or method == 'xmatch':
+                return self._join_via_cds_xmatch(catalogue_1_df, catalogue_2, **join_params)
+            elif method.startswith('stilts'):
+                return self._join_via_stilts(catalogue_1_df, catalogue_2, method, **join_params)
+            elif method == 'pandas' or method == 'id':
+                return self._join_via_pandas(catalogue_1_df, catalogue_2, **join_params)
+            elif method == 'local_sky':
+                return self._join_via_local_sky(catalogue_1_df, catalogue_2, **join_params)
+            else:
+                raise CrossMatchError(f"Unsupported join method: {method}")
+        except Exception as e:
+            logger.error(f"Error performing join using method '{method}': {str(e)}")
+            raise CrossMatchError(f"Join operation failed with method '{method}': {str(e)}")
+            
+    def _join_via_tap(self, catalogue_1_df: pd.DataFrame, catalogue_2: str, **kwargs) -> pd.DataFrame:
+        """Join using TAP protocol against a remote service."""
+        logger.info(f"Performing TAP join against catalog: {catalogue_2}")
+        
+        # Extract TAP-specific parameters
+        tap_service = kwargs.get('tap_service')
+        tap_table = kwargs.get('tap_table')
+        adql_query = kwargs.get('adql_query')
+        
+        if not (tap_service and tap_table):
+            raise CrossMatchError("TAP join requires 'tap_service' and 'tap_table' parameters")
+            
+        # Get auth credentials if available
+        credentials = None
+        if catalogue_2 in self.auth_config:
+            credentials = self.auth_config[catalogue_2]
+            
+        # Extract coordinate columns or ID column for joining
+        radius_arcsec = kwargs.get('radius_arcsec')
+        id_column_1 = kwargs.get('id_column_1')
+        id_column_2 = kwargs.get('id_column_2')
+        
+        if radius_arcsec:
+            # Coordinate-based join
+            try:
+                ra_col, dec_col = self._find_coord_cols(catalogue_1_df)
+            except CrossMatchError:
+                ra_col = kwargs.get('ra_column')
+                dec_col = kwargs.get('dec_column')
+                if not (ra_col and dec_col):
+                    raise CrossMatchError("No RA/Dec columns found or specified for coordinate-based TAP join")
+                    
+            # Process in parallel if large dataset
+            if len(catalogue_1_df) > 10000:
+                return self._process_in_parallel_joblib(
+                    catalogue_1_df,
+                    lambda chunk, **kw: tap.tap_cone_search(
+                        chunk, ra_col, dec_col, tap_service, tap_table,
+                        radius_arcsec=radius_arcsec,
+                        columns=kwargs.get('columns_2'),
+                        credentials=credentials,
+                        adql_query=adql_query,
+                        **kw
+                    ),
+                    n_chunks=kwargs.get('n_chunks', 4),
+                    **kwargs
+                )
+            else:
+                return tap.tap_cone_search(
+                    catalogue_1_df, ra_col, dec_col, tap_service, tap_table,
+                    radius_arcsec=radius_arcsec,
+                    columns=kwargs.get('columns_2'),
+                    credentials=credentials,
+                    adql_query=adql_query,
+                    **kwargs
+                )
+        elif id_column_1 and id_column_2:
+            # ID-based join
+            if len(catalogue_1_df) > 10000:
+                return self._process_in_parallel_joblib(
+                    catalogue_1_df,
+                    lambda chunk, **kw: tap.tap_id_search(
+                        chunk, id_column_1, tap_service, tap_table, id_column_2,
+                        columns=kwargs.get('columns_2'),
+                        credentials=credentials,
+                        adql_query=adql_query,
+                        **kw
+                    ),
+                    n_chunks=kwargs.get('n_chunks', 4),
+                    **kwargs
+                )
+            else:
+                return tap.tap_id_search(
+                    catalogue_1_df, id_column_1, tap_service, tap_table, id_column_2,
+                    columns=kwargs.get('columns_2'),
+                    credentials=credentials,
+                    adql_query=adql_query,
+                    **kwargs
+                )
+        else:
+            raise CrossMatchError("TAP join requires either radius_arcsec or both id_column_1 and id_column_2")
+            
+    def _join_via_stilts(self, catalogue_1_df: pd.DataFrame, catalogue_2: Union[str, pd.DataFrame], 
+                        stilts_method: str, **kwargs) -> pd.DataFrame:
+        """Join using STILTS with various matching methods."""
+        logger.info(f"Performing STILTS join using method: {stilts_method}")
+        
+        # Determine if catalogue_2 is a local file, DataFrame, or remote catalog
+        catalogue_2_path = None
+        temp_file = None
+        
+        if isinstance(catalogue_2, pd.DataFrame):
+            # Create temporary file for DataFrame
+            temp_file = tempfile.NamedTemporaryFile(suffix='.csv', delete=False)
+            catalogue_2.to_csv(temp_file.name, index=False)
+            catalogue_2_path = temp_file.name
+        elif isinstance(catalogue_2, str) and Path(catalogue_2).is_file():
+            catalogue_2_path = str(Path(catalogue_2).resolve())
+        else:
+            # Try to get remote catalog config
+            try:
+                cat2_config = self.get_catalogue_config(str(catalogue_2))
+                if 'file_path' in cat2_config:
+                    catalogue_2_path = cat2_config['file_path']
+            except CrossMatchError:
+                pass
+                
+        if not catalogue_2_path:
+            raise CrossMatchError(f"Cannot determine path for catalogue_2: {catalogue_2}")
+        
+        try:
+            # Create temporary file for input DataFrame
+            with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as temp_in:
+                catalogue_1_df.to_csv(temp_in.name, index=False)
+                temp_in_path = temp_in.name
+                
+            # Create temporary file for output
+            with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as temp_out:
+                temp_out_path = temp_out.name
+                
+            # Extract parameters for STILTS
+            stilts_params = {
+                'in1': temp_in_path,
+                'in2': catalogue_2_path,
+                'out': temp_out_path,
+                'stilts_cmd_base': kwargs.get('stilts_cmd_base'),
+                'java_opts': kwargs.get('java_opts'),
+                'tmpdir': kwargs.get('tmpdir')
+            }
+            
+            # Add method-specific parameters
+            if stilts_method == 'stilts_sky':
+                ra_col, dec_col = self._find_coord_cols(catalogue_1_df)
+                stilts_params.update({
+                    'ra1': ra_col,
+                    'dec1': dec_col, 
+                    'ra2': kwargs.get('ra_column_2', 'ra'),
+                    'dec2': kwargs.get('dec_column_2', 'dec'),
+                    'radius': kwargs.get('radius_arcsec', 1.0),
+                    'join_type': kwargs.get('join_type', '1and2')
+                })
+                result = stilts.crossmatch_sky(**stilts_params)
+            elif stilts_method == 'stilts_id':
+                stilts_params.update({
+                    'id_column_1': kwargs.get('id_column_1'),
+                    'id_column_2': kwargs.get('id_column_2'),
+                    'join_type': kwargs.get('join_type', '1and2')
+                })
+                result = stilts.crossmatch_id(**stilts_params)
+            else:
+                raise CrossMatchError(f"Unsupported STILTS method: {stilts_method}")
+                
+            # Read result
+            result_df = pd.read_csv(temp_out_path)
+            return result_df
+            
+        except Exception as e:
+            raise CrossMatchError(f"STILTS join failed: {str(e)}")
+        finally:
+            # Clean up temporary files
+            try:
+                if temp_file and Path(temp_file.name).exists():
+                    os.unlink(temp_file.name)
+                if 'temp_in_path' in locals() and Path(temp_in_path).exists():
+                    os.unlink(temp_in_path)
+                if 'temp_out_path' in locals() and Path(temp_out_path).exists():
+                    os.unlink(temp_out_path)
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary files: {e}")
+                
+    def _join_via_cds_xmatch(self, catalogue_1_df: pd.DataFrame, catalogue_2: str, **kwargs) -> pd.DataFrame:
+        """Join using CDS XMatch service."""
+        logger.info(f"Performing CDS XMatch against catalog: {catalogue_2}")
+        
+        # Extract parameters
+        radius_arcsec = kwargs.get('radius_arcsec', 1.0)
+        columns_2 = kwargs.get('columns_2')
+        
+        # Get coordinate columns
+        try:
+            ra_col, dec_col = self._find_coord_cols(catalogue_1_df)
+        except CrossMatchError:
+            ra_col = kwargs.get('ra_column')
+            dec_col = kwargs.get('dec_column')
+            if not (ra_col and dec_col):
+                raise CrossMatchError("No RA/Dec columns found or specified for CDS XMatch")
+        
+        # Get catalog configuration if available
+        cat2_name = catalogue_2
+        if isinstance(catalogue_2, str) and not Path(catalogue_2).is_file():
+            try:
+                cat2_config = self.get_catalogue_config(catalogue_2)
+                if 'cds_table' in cat2_config:
+                    cat2_name = cat2_config['cds_table']
+            except CrossMatchError:
+                pass
+                
+        # Process in chunks if large dataset
+        if len(catalogue_1_df) > 5000:
+            return self._process_in_parallel_joblib(
+                catalogue_1_df,
+                lambda chunk, **kw: self._perform_cds_xmatch(
+                    chunk, ra_col, dec_col, cat2_name, radius_arcsec, columns_2, **kw
+                ),
+                n_chunks=kwargs.get('n_chunks', 4),
+                **kwargs
+            )
+        else:
+            return self._perform_cds_xmatch(
+                catalogue_1_df, ra_col, dec_col, cat2_name, radius_arcsec, columns_2, **kwargs
+            )
+            
+    def _perform_cds_xmatch(self, df: pd.DataFrame, ra_col: str, dec_col: str, 
+                           cat2_name: str, radius_arcsec: float, columns_2: Optional[List[str]] = None,
+                           **kwargs) -> pd.DataFrame:
+        """Perform actual CDS XMatch operation on a dataframe."""
+        # Create temporary file for input
+        with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as temp_in:
+            # Ensure columns are formatted properly for CDS XMatch
+            input_df = df.copy()
+            input_df.to_csv(temp_in.name, index=False)
+            
+        try:
+            # Perform XMatch via astroquery
+            result = XMatch.query(
+                cat1=open(temp_in.name, 'r'), 
+                cat2=cat2_name,
+                max_distance=radius_arcsec * u.arcsec,
+                colRA1=ra_col,
+                colDec1=dec_col
+            )
+            
+            # Convert result to DataFrame and filter columns if needed
+            result_df = result.to_pandas()
+            if columns_2:
+                all_columns = list(df.columns) + columns_2
+                result_df = result_df[all_columns]
+                
+            return result_df
+            
+        except Exception as e:
+            raise CrossMatchError(f"CDS XMatch failed: {str(e)}")
+        finally:
+            # Clean up temporary file
+            if 'temp_in' in locals():
+                try:
+                    os.unlink(temp_in.name)
+                except Exception:
+                    pass
+                    
+    def _join_via_pandas(self, catalogue_1_df: pd.DataFrame, catalogue_2: Union[str, pd.DataFrame], **kwargs) -> pd.DataFrame:
+        """Join using pandas merge for simple ID-based joins."""
+        logger.info("Performing pandas-based ID join")
+        
+        # Extract parameters
+        id_column_1 = kwargs.get('id_column_1')
+        id_column_2 = kwargs.get('id_column_2')
+        
+        if not id_column_1 or not id_column_2:
+            raise CrossMatchError("Pandas ID join requires both id_column_1 and id_column_2")
+            
+        # Load catalogue_2 if it's not already a DataFrame
+        if not isinstance(catalogue_2, pd.DataFrame):
+            catalogue_2_df = self._read_catalogue(catalogue_2)
+        else:
+            catalogue_2_df = catalogue_2
+            
+        # Filter catalogue_2 columns if specified
+        columns_2 = kwargs.get('columns_2')
+        if columns_2:
+            cols_to_keep = set(columns_2)
+            cols_to_keep.add(id_column_2)
+            catalogue_2_df = catalogue_2_df[list(cols_to_keep)]
+            
+        # Perform merge
+        result_df = pd.merge(
+            catalogue_1_df,
+            catalogue_2_df,
+            left_on=id_column_1,
+            right_on=id_column_2,
+            how=kwargs.get('join_type', 'inner')
+        )
+        
+        return result_df
+        
+    def _join_via_local_sky(self, catalogue_1_df: pd.DataFrame, catalogue_2: Union[str, pd.DataFrame], **kwargs) -> pd.DataFrame:
+        """Join using local sky coordinate matching with astropy."""
+        logger.info("Performing local sky coordinate matching")
+        
+        # Extract parameters
+        radius_arcsec = kwargs.get('radius_arcsec', 1.0)
+        
+        # Get coordinate columns for catalogue_1
+        try:
+            ra1_col, dec1_col = self._find_coord_cols(catalogue_1_df)
+        except CrossMatchError:
+            ra1_col = kwargs.get('ra_column')
+            dec1_col = kwargs.get('dec_column')
+            if not (ra1_col and dec1_col):
+                raise CrossMatchError("No RA/Dec columns found or specified for catalogue_1")
+                
+        # Load catalogue_2 if it's not already a DataFrame
+        if not isinstance(catalogue_2, pd.DataFrame):
+            catalogue_2_df = self._read_catalogue(catalogue_2)
+        else:
+            catalogue_2_df = catalogue_2
+            
+        # Get coordinate columns for catalogue_2
+        ra2_col = kwargs.get('ra_column_2')
+        dec2_col = kwargs.get('dec_column_2')
+        if not (ra2_col and dec2_col):
+            try:
+                ra2_col, dec2_col = self._find_coord_cols(catalogue_2_df)
+            except CrossMatchError:
+                raise CrossMatchError("No RA/Dec columns found or specified for catalogue_2")
+                
+        # Create SkyCoord objects
+        catalog1_coords = SkyCoord(
+            catalogue_1_df[ra1_col].values * u.degree,
+            catalogue_1_df[dec1_col].values * u.degree
+        )
+        
+        catalog2_coords = SkyCoord(
+            catalogue_2_df[ra2_col].values * u.degree,
+            catalogue_2_df[dec2_col].values * u.degree
+        )
+        
+        # Perform match
+        idx, d2d, _ = match_coordinates_sky(catalog1_coords, catalog2_coords)
+        
+        # Filter by radius
+        mask = d2d.arcsec <= radius_arcsec
+        
+        # Create result DataFrame
+        cat1_matched = catalogue_1_df.loc[mask].copy()
+        cat2_matched = catalogue_2_df.iloc[idx[mask]].reset_index(drop=True)
+        
+        # Filter catalogue_2 columns if specified
+        columns_2 = kwargs.get('columns_2')
+        if columns_2:
+            columns_to_keep = [col for col in cat2_matched.columns if col in columns_2]
+            cat2_matched = cat2_matched[columns_to_keep]
+            
+        # Add separation column
+        cat1_matched['separation_arcsec'] = d2d.arcsec[mask]
+        
+        # Combine results
+        result_df = pd.concat([cat1_matched.reset_index(drop=True), cat2_matched], axis=1)
+        
+        return result_df
