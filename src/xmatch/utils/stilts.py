@@ -17,16 +17,16 @@ class StiltsError(Exception):
 def _build_stilts_command(task: str, params: Dict[str, Any], 
                          java_opts: Optional[str] = None, 
                          tmpdir: Optional[str] = None,
-                         cmd_base_override: Optional[str] = None) -> List[str]:
+                         stilts_cmd_base: Optional[str] = None) -> List[str]:
     """
     Constructs the full STILTS command line arguments.
-    Uses cmd_base_override if provided, otherwise constructs from components.
+    Uses stilts_cmd_base if provided, otherwise constructs from components.
     """
-    
+    dd
     if cmd_base_override:
         # Use the user-provided base command directly
-        logger.debug(f"Using provided stilts_cmd_base: '{cmd_base_override}'")
-        cmd = cmd_base_override.split() # Split the base command string
+        logger.debug(f"Using provided stilts_cmd_base: '{stilts_cmd_base}'")
+        cmd = stile_cmd_base.split() # Split the base command string
     else:
         # Fallback: Construct command from components
         logger.debug("Constructing STILTS command from java_opts/tmpdir/STILTS_JAR.")
@@ -61,10 +61,10 @@ def _build_stilts_command(task: str, params: Dict[str, Any],
 def _run_stilts(task: str, params: Dict[str, Any], 
                java_opts: Optional[str] = None, 
                tmpdir: Optional[str] = None,
-               cmd_base_override: Optional[str] = None):
+               stilts_cmd_base: Optional[str] = None):
     """Runs a STILTS task using subprocess."""
     # Pass cmd_base_override to the builder
-    command_args = _build_stilts_command(task, params, java_opts, tmpdir, cmd_base_override)
+    command_args = _build_stilts_command(task, params, java_opts, tmpdir, stilts_cmd_base)
     command_str = ' '.join(command_args) # For logging
     logger.info(f"Executing STILTS task: {task}...")
     # Avoid logging potentially sensitive info in params if auth is passed
