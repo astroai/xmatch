@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GPL-2"}
 authors = [
-  { name = "Seb Fabbro", email = "your.email@example.com" },
+  { name = "Seb Fabbro", email = "sebfabbro@gmail.com" },
 ]
 keywords = ["astronomy", "crossmatch", "catalogue", "stilts", "tap"]
 classifiers = [
@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
 

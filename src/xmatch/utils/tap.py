@@ -12,12 +12,33 @@ import logging
 import tempfile
 import shutil
 from pathlib import Path
+import random
 
 logger = logging.getLogger(__name__)
 
 class TapError(Exception):
     """Base exception for TAP-related errors."""
     pass
+
+# Add connection pooling for TAP services
+_tap_service_cache = {}
+
+def get_tap_service(tap_url: str, **kwargs) -> pyvo.dal.TAPService:
+    """Get a cached TAP service connection or create a new one."""
+    cache_key = tap_url
+    for k, v in sorted(kwargs.items()):
+        if k in ['user', 'password']:  # Add auth params to cache key
+            cache_key += f"_{k}_{v}"
+    
+    if cache_key not in _tap_service_cache:
+        try:
+            service = pyvo.dal.TAPService(tap_url, **kwargs)
+            _tap_service_cache[cache_key] = service
+            logger.info(f"Created new TAP service connection to {tap_url}")
+        except Exception as e:
+            raise TapError(f"Failed to connect to TAP service {tap_url}: {e}")
+    
+    return _tap_service_cache[cache_key]
 
 def tap_crossmatch(catalogue_1: Union[str, pd.DataFrame, Table],
                   ra: str,
@@ -188,7 +209,7 @@ def tap_crossmatch(catalogue_1: Union[str, pd.DataFrame, Table],
                 else:
                     logger.info(f"Performing TAP ID join on catalogue_1:'{id_column_1}'/catalogue_2:'{join_catalogue_2_id_column}' against {tap_url} / {tap_table}")
                     try:
-                         tap_service = pyvo.dal.TAPService(tap_url, **kwargs)
+                         tap_service = get_tap_service(tap_url, **kwargs)
                     except Exception as e:
                          raise TapError(f"Failed to connect to TAP service {tap_url}: {e}")
                     
@@ -239,7 +260,7 @@ def tap_crossmatch(catalogue_1: Union[str, pd.DataFrame, Table],
                 else:
                     logger.info(f"Performing TAP spatial join (Radius: {radius} arcsec) against {tap_url} / {tap_table}")
                     try:
-                         tap_service = pyvo.dal.TAPService(tap_url, **kwargs)
+                         tap_service = get_tap_service(tap_url, **kwargs)
                     except Exception as e:
                          raise TapError(f"Failed to connect to TAP service {tap_url}: {e}")
 
@@ -669,8 +690,8 @@ def execute_tap_query(tap_service: pyvo.dal.TAPService,
                      retry_delay: int,
                      timeout: int,
                      verbose: bool) -> pd.DataFrame:
-    """Execute TAP query with retries."""
-    max_retries = 3
+    """Execute TAP query with exponential backoff retry strategy."""
+    max_retries = 5
     retries = 0
     
     while retries < max_retries:
@@ -678,19 +699,22 @@ def execute_tap_query(tap_service: pyvo.dal.TAPService,
             if verbose:
                 logging.info(f"Executing query: {query}")
                 
-            result = tap_service.search(query, maxrec=0)
+            result = tap_service.search(query, maxrec=0, timeout=timeout)
             return result.to_table().to_pandas()
             
         except Exception as e:
             retries += 1
+            # Exponential backoff with jitter
+            delay = min(60, retry_delay * (2 ** (retries - 1)) + random.uniform(0, 1))
+            
             if retries == max_retries:
                 raise TapError(f"Query failed after {max_retries} retries: {e}")
                 
             if verbose:
-                logging.warning(f"Query failed, retrying in {retry_delay} seconds: {e}")
+                logging.warning(f"Query failed, retrying in {delay:.1f} seconds: {e}")
                 
-            time.sleep(retry_delay)
-            
+            time.sleep(delay)
+    
     raise TapError("Query failed after maximum retries")
 
 def perform_local_id_join_df(input_df: pd.DataFrame,

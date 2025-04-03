@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 import sys
 import yaml
+import json
 
 from .core.crossmatch import CrossMatch, CrossMatchError
 from .utils.tap import TapError
@@ -65,10 +66,27 @@ def list_catalogues(config_path: str) -> int:
         return 1
 
 def parse_args() -> argparse.Namespace:
-    """Parse command line arguments."""
+    """Parse command line arguments with improved help and examples."""
     parser = argparse.ArgumentParser(
         description="Cross-match astronomical catalogues",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Cross-match Gaia DR3 with GALEX
+  xmatch GAIA_ESA_TAP GALEX_CDS_XMATCH -o gaia_galex.parquet
+
+  # Cross-match with custom radius and specific columns
+  xmatch GAIA_ESA_TAP GALEX_CDS_XMATCH -r 3.0 -c "objid,FUVmag,NUVmag" -o gaia_galex.parquet
+
+  # Perform ID-based cross-match
+  xmatch gaiadr3_data.fits galex_data.fits --id-column-1 source_id --id-column-2 gaia_source_id
+
+  # Use specific method and view detailed logging
+  xmatch GAIA_ESA_TAP UKIDSS_NOAO_TAP -m stilts_tapskymatch --log-level DEBUG
+
+  # List available catalogues
+  xmatch --list-catalogues
+"""
     )
     
     # Create a mutually exclusive group for main operation vs. listing catalogues
@@ -160,7 +178,58 @@ def parse_args() -> argparse.Namespace:
         help="Swap the order of catalogues (use catalogue_2 as catalogue_1 and vice versa)."
     )
     
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help="Use parallel processing for large catalogues where possible."
+    )
+    
+    parser.add_argument(
+        "--save-config",
+        metavar="CONFIG_NAME",
+        help="Save the current command configuration for future use."
+    )
+    
+    parser.add_argument(
+        "--load-config",
+        metavar="CONFIG_NAME",
+        help="Load a previously saved command configuration."
+    )
+    
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        help="Timeout in seconds for operations like TAP queries."
+    )
+    
     return parser.parse_args()
+
+def save_config(args: argparse.Namespace, config_name: str):
+    """Save current command arguments to a configuration file."""
+    config_dir = Path.home() / ".xmatch"
+    config_dir.mkdir(exist_ok=True)
+    
+    config_file = config_dir / f"{config_name}.json"
+    
+    # Convert args to dictionary, excluding None values
+    config = {k: v for k, v in vars(args).items() if v is not None}
+    
+    with open(config_file, 'w') as f:
+        json.dump(config, f, indent=2)
+    
+    logging.info(f"Configuration saved to {config_file}")
+
+def load_config(config_name: str) -> Dict[str, Any]:
+    """Load a saved command configuration."""
+    config_file = Path.home() / ".xmatch" / f"{config_name}.json"
+    
+    if not config_file.exists():
+        logging.error(f"Configuration file not found: {config_file}")
+        return {}
+    
+    with open(config_file, 'r') as f:
+        return json.load(f)
 
 def validate_args(args: argparse.Namespace) -> None:
     """Validate command line arguments."""
@@ -189,7 +258,7 @@ def parse_columns(columns_str: Optional[str]) -> Optional[List[str]]:
     return [col.strip() for col in columns_str.split(',')]
 
 def main() -> int:
-    """Main CLI entry point."""
+    """Main CLI entry point with enhanced configuration handling."""
     try:
         # Parse arguments
         args = parse_args()
@@ -197,6 +266,23 @@ def main() -> int:
         # Set up logging
         log_level = getattr(logging, args.log_level.upper(), logging.INFO)
         setup_logging(level=log_level)
+        
+        # Handle config loading if specified
+        if args.load_config:
+            loaded_config = load_config(args.load_config)
+            if loaded_config:
+                # Update args with loaded config, but command line args take precedence
+                for k, v in loaded_config.items():
+                    if not hasattr(args, k) or getattr(args, k) is None:
+                        setattr(args, k, v)
+                logging.info(f"Loaded configuration: {args.load_config}")
+        
+        # Handle config saving if specified
+        if args.save_config:
+            save_config(args, args.save_config)
+            if args.catalogue_1 is None:
+                # If just saving config without running a command
+                return 0
         
         # Handle --list-catalogues flag
         if args.list_catalogues:
@@ -244,6 +330,10 @@ def main() -> int:
              
         # Add remaining method-specific kwargs
         crossmatch_params["kwargs"] = method_kwargs 
+        
+        # Pass new parameters to crossmatch
+        crossmatch_params["parallel"] = args.parallel if hasattr(args, 'parallel') else False
+        crossmatch_params["timeout"] = args.timeout
         
         # Perform the cross-match
         result_path = cm.crossmatch(**crossmatch_params)
