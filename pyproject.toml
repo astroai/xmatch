@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xmatch"
+version = "0.1.0" 
+description = "A tool for cross-matching astronomical catalogues using various methods."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-2"}
+authors = [
+  { name = "Seb Fabbro", email = "your.email@example.com" },
+]
+keywords = ["astronomy", "crossmatch", "catalogue", "stilts", "tap"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+
+dependencies = [
+    "pandas >= 1.3",
+    "astropy >= 5.0",
+    "pyyaml >= 5.4",
+    "pyvo >= 1.4",
+    "keyring >= 23.0",
+    "astroquery >= 0.4.6",
+    ]
+
+[project.optional-dependencies]
+# Example: optional keyring backends
+keyring_backends = [
+    "keyrings.cryptfile",
+    "keyrings.osx", # If on macOS
+    "keyrings.alt", # Other backends
+]
+# Example: for development
+dev = [
+    "pytest",
+    "ruff", # Example linter/formatter
+    "black", # Code formatter
+    "mypy",  # Type checking
+    "sphinx", # Documentation
+]
+
+[project.scripts]
+# This makes the 'xmatch' command available after installation
+xmatch = "xmatch.__main__:main"
+
+[project.urls] # Optional
+Homepage = "https://github.com/sfabbro/xmatch" # Example
+Repository = "https://github.com/sfabbro/xmatch" # Example
+
+# --- Tool specific configuration (e.g. for linters/formatters) ---
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
