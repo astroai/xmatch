@@ -158,7 +158,6 @@ def stilts_cdsskymatch(
             "cdstable": cds_id,
             "radius": radius,
             "find": kwargs.get('find', 'best'),
-            "join": kwargs.get('join', '1and2'),
             "ocmd": f'keepcols "*"' if not columns_2 else f'keepcols "* { " ".join(columns_2) }"',
             "out": output_parquet,
             "ofmt": "parquet-snappy"
@@ -172,213 +171,7 @@ def stilts_cdsskymatch(
         logger.info(f"STILTS cdsskymatch result saved to: {final_output}")
         return final_output
 
-@stilts_retry()
-def stilts_tapskymatch(
-    catalogue_1_df: pd.DataFrame,
-    tap_url: str,
-    tap_table: str,
-    radius: float,
-    ra_column_1: str,
-    dec_column_1: str,
-    ra_column_2: str,
-    dec_column_2: str,
-    tap_schema: Optional[str] = None,
-    columns_2: Optional[List[str]] = None,
-    java_opts: Optional[str] = None,
-    tmpdir: Optional[str] = None,
-    stilts_cmd_base: Optional[str] = None,
-    **kwargs
-) -> str:
-    """Performs cross-match using STILTS tapskymatch."""
-    with tempfile.TemporaryDirectory(prefix='stilts_tap_') as temp_dir:
-        input_fits = _prepare_input_table(catalogue_1_df, temp_dir, "catalogue_1_tap.fits")
-        output_parquet = str(Path(temp_dir) / "output_tap.parquet")
-        
-        full_tap_table = f"{tap_schema}.{tap_table}" if tap_schema else tap_table
-        
-        adql = f"SELECT * FROM {full_tap_table}" 
-        if columns_2:
-             select_cols = ",".join([ra_column_2, dec_column_2] + columns_2)
-             adql = f"SELECT {select_cols} FROM {full_tap_table}"
-             
-        params = {
-            "in": input_fits,
-            "ifmt": "fits",
-            "ra": ra_column_1,
-            "dec": dec_column_1,
-            "serviceurl": tap_url,
-            "adql": adql,
-            "taptable": f"{tap_url} table: {full_tap_table}",
-            "tra": ra_column_2,
-            "tdec": dec_column_2,
-            "radius": radius,
-            "find": kwargs.get('find', 'best'),
-            "join": kwargs.get('join', '1and2'),
-            "ocmd": f'keepcols "*"' if not columns_2 else f'keepcols "* { " ".join(columns_2) }"',
-            "out": output_parquet,
-            "ofmt": "parquet-snappy"
-        }
-        params.update({k:v for k,v in kwargs.items() if k not in ['find', 'join']}) 
-        
-        auth_keys = ['user', 'password']
-        for key in auth_keys:
-             if key in kwargs:
-                 params[key] = kwargs[key]
-
-        _run_stilts("tapskymatch", params, java_opts, tmpdir, stilts_cmd_base)
-        
-        final_output = tempfile.NamedTemporaryFile(suffix='_tap_result.parquet', delete=False).name
-        shutil.copy2(output_parquet, final_output)
-        logger.info(f"STILTS tapskymatch result saved to: {final_output}")
-        return final_output
-
-@stilts_retry()
-def stilts_tmatch2(
-    catalogue_1_df: pd.DataFrame,
-    radius: float,
-    ra_column_1: str,
-    dec_column_1: str,
-    ra_column_2: str,
-    dec_column_2: str,
-    catalogue_2_path: Optional[Union[str, Path]] = None,
-    catalogue_2_df: Optional[Union[pd.DataFrame, Table]] = None,
-    target_tap_url: Optional[str] = None,
-    target_tap_table: Optional[str] = None,
-    target_tap_schema: Optional[str] = None,
-    columns_2: Optional[List[str]] = None,
-    id_column_1: Optional[str] = None,
-    java_opts: Optional[str] = None,
-    tmpdir: Optional[str] = None,
-    stilts_cmd_base: Optional[str] = None,
-    **kwargs
-) -> str:
-    """Performs cross-match using STILTS tmatch2 (local file or TAP)."""
-    
-    if not ((catalogue_2_path is not None) or (catalogue_2_df is not None) or 
-            (target_tap_url is not None and target_tap_table is not None)):
-        raise StiltsError("tmatch2 requires one of: catalogue_2_path, catalogue_2_df, or target_tap_url+target_tap_table")
-    
-    if (catalogue_2_path is not None and catalogue_2_df is not None) or \
-       ((catalogue_2_path is not None or catalogue_2_df is not None) and 
-        (target_tap_url is not None or target_tap_table is not None)):
-        raise StiltsError("tmatch2 cannot accept multiple catalogue_2 sources (path, df, or TAP)")
-    
-    if id_column_1:
-        logger.warning("ID matching with STILTS tmatch2 not fully implemented. Performing spatial match.")
-         
-    with tempfile.TemporaryDirectory(prefix='stilts_tm2_') as temp_dir:
-        input1_fits = _prepare_input_table(catalogue_1_df, temp_dir, "catalogue_1_tm2.fits")
-        output_parquet = str(Path(temp_dir) / "output_tm2.parquet")
-        
-        params = {
-            "in1": input1_fits,
-            "ifmt1": "fits",
-            "values1": f"{ra_column_1} {dec_column_1}",
-            "matcher": kwargs.get('matcher', 'sky'),
-            "params": str(radius),
-            "find": kwargs.get('find', 'best'),
-            "join": kwargs.get('join', '1and2'),
-            "out": output_parquet,
-            "ofmt": "parquet-snappy"
-        }
-        
-        if catalogue_2_path is not None:
-            catalogue_2_file = Path(catalogue_2_path)
-            suffix = catalogue_2_file.suffix.lower()
-            if suffix == '.fits': target_fmt = 'fits'
-            elif suffix == '.parquet': target_fmt = 'parquet'
-            elif suffix == '.csv': target_fmt = 'csv'
-            else: 
-                logger.warning(f"Cannot determine format for local file {catalogue_2_file}, assuming FITS.")
-                target_fmt = 'fits'
-            params["in2"] = str(catalogue_2_file)
-            params["ifmt2"] = target_fmt
-            params["values2"] = f"{ra_column_2} {dec_column_2}"
-        
-        elif catalogue_2_df is not None:
-            catalogue_2_file = Path(temp_dir) / "catalogue_2_input.fits"
-            if isinstance(catalogue_2_df, pd.DataFrame):
-                Table.from_pandas(catalogue_2_df).write(catalogue_2_file, format='fits', overwrite=True)
-            else:
-                catalogue_2_df.write(catalogue_2_file, format='fits', overwrite=True)
-            params["in2"] = str(catalogue_2_file)
-            params["ifmt2"] = 'fits'
-            params["values2"] = f"{ra_column_2} {dec_column_2}"
-        
-        else:
-            full_tap_table = f"{target_tap_schema}.{target_tap_table}" if target_tap_schema else target_tap_table
-            adql = f"SELECT * FROM {full_tap_table}"
-            select_cols_list = [ra_column_2, dec_column_2]
-            if columns_2:
-                select_cols_list.extend(columns_2)
-            select_cols = ",".join(list(set(select_cols_list)))
-            adql = f"SELECT {select_cols} FROM {full_tap_table}" 
-            
-            params["in2"] = target_tap_url
-            params["icmd2"] = f'tapquery serviceurl={target_tap_url} adql="{adql}"'
-            params["values2"] = f"{ra_column_2} {dec_column_2}"
-            
-            auth_keys = ['user', 'password']
-            for key in auth_keys:
-                if key in kwargs:
-                    params[key] = kwargs[key]
-
-        if columns_2:
-            ocmd_cols = ' '.join([f't2_{col}' for col in columns_2])
-            params["ocmd"] = f'keepcols "* {ocmd_cols}"'
-        else:
-            params["ocmd"] = 'keepcols *'
-        
-        kwargs.pop('matcher', None)
-        kwargs.pop('find', None)
-        kwargs.pop('join', None)
-        params.update(kwargs)
-        
-        _run_stilts("tmatch2", params, java_opts, tmpdir, stilts_cmd_base)
-        
-        final_output = tempfile.NamedTemporaryFile(suffix='_tm2_result.parquet', delete=False).name
-        shutil.copy2(output_parquet, final_output)
-        logger.info(f"STILTS tmatch2 result saved to: {final_output}")
-        return final_output
-
-@stilts_retry()
-def stilts_tapquery(
-    catalogue_1_df: Optional[pd.DataFrame],
-    tap_url: str,
-    adql_query: str,
-    java_opts: Optional[str] = None,
-    tmpdir: Optional[str] = None,
-    stilts_cmd_base: Optional[str] = None,
-    **kwargs
-) -> str:
-    """Executes a TAP query using STILTS tapquery."""
-    if catalogue_1_df is not None:
-         logger.debug("Catalogue 1 DataFrame provided to tapquery, but not directly used by STILTS task.")
-         
-    with tempfile.TemporaryDirectory(prefix='stilts_tquery_') as temp_dir:
-        output_parquet = str(Path(temp_dir) / "output_tquery.parquet")
-        
-        params = {
-            "serviceurl": tap_url,
-            "adql": adql_query,
-            "out": output_parquet,
-            "ofmt": "parquet-snappy"
-        }
-        auth_keys = ['user', 'password']
-        for key in auth_keys:
-             if key in kwargs:
-                 params[key] = kwargs[key]
-                 
-        params.update({k:v for k,v in kwargs.items() if k not in auth_keys}) 
-
-        _run_stilts("tapquery", params, java_opts, tmpdir, stilts_cmd_base)
-        
-        final_output = tempfile.NamedTemporaryFile(suffix='_tquery_result.parquet', delete=False).name
-        shutil.copy2(output_parquet, final_output)
-        logger.info(f"STILTS tapquery result saved to: {final_output}")
-        return final_output
-
-def cdsskymatch(in1, out, ra, dec, cds_id, radius=1.0, join_type='1and2', find='best', cdscols=None,
+def cdsskymatch(in1, out, ra, dec, cds_id, radius=1.0, find='best', cdscols=None,
               stilts_cmd_base=None, java_opts=None, tmpdir=None, verbose=True):
     """
     Cross-match with a VizieR catalog using the CDS XMatch service.
@@ -390,7 +183,6 @@ def cdsskymatch(in1, out, ra, dec, cds_id, radius=1.0, join_type='1and2', find='
         dec: Dec column name in the first catalog
         cds_id: CDS catalog ID (e.g., "I/355/gaiadr3" or "simbad")
         radius: Match radius in arcseconds
-        join_type: Type of join ('1and2', '1or2', 'all1', 'all2', etc.)
         find: Finding mode ('best', 'all', 'each')
         cdscols: Comma-separated list of columns to retrieve from the VizieR catalog
         stilts_cmd_base: Base STILTS command
@@ -410,8 +202,7 @@ def cdsskymatch(in1, out, ra, dec, cds_id, radius=1.0, join_type='1and2', find='
             "radius": radius,
             "find": find,
             "out": out,
-            "cdstable": cds_id,
-            "join": join_type
+            "cdstable": cds_id
         }
         
         # Add optional columns if specified
@@ -477,4 +268,49 @@ def crossmatch_sky(in1, in2, out, ra1, dec1, ra2, dec2, radius=1.0, join_type='1
     _run_stilts("tmatch2", params, java_opts, tmpdir, stilts_cmd_base)
     
     logger.info(f"STILTS crossmatch_sky result saved to: {out}")
+    return out
+
+@stilts_retry()
+def crossmatch_id(in1, in2, out, id_column_1, id_column_2, join_type='1and2',
+                 stilts_cmd_base=None, java_opts=None, tmpdir=None, **kwargs):
+    """
+    Performs ID-based cross-matching between two catalogs using STILTS tmatch2.
+    
+    Args:
+        in1: Input file for the first catalog
+        in2: Input file for the second catalog
+        out: Output file for the result
+        id_column_1: ID column name in the first catalog
+        id_column_2: ID column name in the second catalog
+        join_type: Type of join ('1and2', '1or2', 'all1', 'all2', etc.)
+        stilts_cmd_base: Base STILTS command
+        java_opts: Java options
+        tmpdir: Temporary directory
+        **kwargs: Additional parameters to pass to tmatch2
+
+    Returns:
+        Output file path if successful
+    """
+    params = {
+        "in1": in1,
+        "in2": in2,
+        "ifmt1": kwargs.get('ifmt1', 'auto'),
+        "ifmt2": kwargs.get('ifmt2', 'auto'),
+        "matcher": "exact",
+        "values1": id_column_1,
+        "values2": id_column_2,
+        "join": join_type,
+        "find": "all",
+        "out": out,
+        "ofmt": kwargs.get('ofmt', 'auto')
+    }
+    
+    # Add any additional parameters
+    for k, v in kwargs.items():
+        if k not in ['ifmt1', 'ifmt2', 'find', 'ofmt']:
+            params[k] = v
+    
+    _run_stilts("tmatch2", params, java_opts, tmpdir, stilts_cmd_base)
+    
+    logger.info(f"STILTS ID cross-match result saved to: {out}")
     return out
