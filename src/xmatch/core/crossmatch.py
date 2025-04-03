@@ -339,7 +339,7 @@ class CrossMatch:
         logger.info(f"Performing STILTS cross-match using method: {method}")
         
         # Extract STILTS configuration parameters
-        stilts_cmd_base = kwargs.get('cmd_base_override', self.stilts_cmd_base)
+        stilts_cmd_base = kwargs.get('stilts_cmd_base', self.stilts_cmd_base)
         java_opts = kwargs.get('java_opts', self.stilts_java_opts)
         tmpdir = kwargs.get('tmpdir', self.stilts_tmpdir)
         
@@ -347,7 +347,7 @@ class CrossMatch:
         stilts_kwargs = {
             'java_opts': java_opts,
             'tmpdir': tmpdir,
-            'cmd_base_override': stilts_cmd_base
+            'stilts_cmd_base': stilts_cmd_base
         }
         
         # Add any additional method-specific kwargs
@@ -892,7 +892,7 @@ class CrossMatch:
             final_kwargs_for_steps = {} 
             final_kwargs_for_steps.update(self.stilts_config) 
             final_kwargs_for_steps.update(kwargs) 
-            if self.stilts_cmd_base: final_kwargs_for_steps['cmd_base_override'] = self.stilts_cmd_base
+            if self.stilts_cmd_base: final_kwargs_for_steps['stilts_cmd_base'] = self.stilts_cmd_base
             if self.stilts_java_opts: final_kwargs_for_steps['java_opts'] = self.stilts_java_opts
             if self.stilts_tmpdir: final_kwargs_for_steps['tmpdir'] = self.stilts_tmpdir
             final_kwargs_for_steps['chunk_size'] = self.chunk_size
