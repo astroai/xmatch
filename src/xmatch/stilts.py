@@ -4,11 +4,13 @@ import logging
 import tempfile
 import shutil
 from pathlib import Path
-from typing import Optional, List, Union, Dict, Any
+from typing import Optional, List, Union, Dict, Any, Tuple
 import pandas as pd
 from astropy.table import Table
 import functools
 import time
+import math # Added for unit conversion
+from astropy import units as u
 
 logger = logging.getLogger(__name__)
 
@@ -221,54 +223,211 @@ def cdsskymatch(in1, out, ra, dec, cds_id, radius=1.0, find='best', cdscols=None
         logger.error(f"Error in STILTS cdsskymatch: {str(e)}")
         raise StiltsError(f"Error during STILTS cdsskymatch: {str(e)}")
 
-@stilts_retry()
-def crossmatch_sky(in1, in2, out, ra1, dec1, ra2, dec2, radius=1.0, join_type='1and2',
-                  stilts_cmd_base=None, java_opts=None, tmpdir=None, **kwargs):
+def _get_error_config(config: Dict[str, Any], axis: str) -> Tuple[Optional[str], Optional[str], Optional[float], str]:
     """
-    Performs spatial cross-matching between two catalogs using STILTS tmatch2.
-    
-    Args:
-        in1: Input file for the first catalog
-        in2: Input file for the second catalog
-        out: Output file for the result
-        ra1: RA column name in the first catalog
-        dec1: Dec column name in the first catalog
-        ra2: RA column name in the second catalog
-        dec2: Dec column name in the second catalog
-        radius: Match radius in arcseconds
-        join_type: Type of join ('1and2', '1or2', 'all1', 'all2', etc.)
-        stilts_cmd_base: Base STILTS command
-        java_opts: Java options
-        tmpdir: Temporary directory
-        **kwargs: Additional parameters to pass to tmatch2
+    Extracts error configuration (column name, units, floor error) for a given axis (ra/dec).
+    Prioritizes IVAR columns if available.
 
     Returns:
-        Output file path if successful
+        Tuple: (error_col_name, ivar_col_name, floor_error_arcsec, units)
+           - error_col_name: Name of the direct error column, or None.
+           - ivar_col_name: Name of the inverse variance column, or None.
+           - floor_error_arcsec: Default floor error from catalogue config, or None.
+           - units: Units of the error/ivar column (before conversion), or 'arcsec' if only floor is used.
+    """
+    err_col = config.get(f'{axis}_err_column')
+    ivar_col = config.get(f'{axis}_ivar_column')
+    units = config.get('pos_err_units', 'arcsec') # Default to arcsec if not specified
+    floor = config.get('default_pos_error_arcsec')
+
+    if ivar_col:
+        logger.debug(f"Using IVAR column '{ivar_col}' for {axis} axis.")
+        # Units for ivar are typically arcsec^-2, resulting error is arcsec
+        # But let config override if units are different (e.g., deg^-2)
+        return None, ivar_col, floor, units 
+    elif err_col:
+        logger.debug(f"Using error column '{err_col}' for {axis} axis with units '{units}'.")
+        return err_col, None, floor, units
+    elif floor is not None:
+        logger.debug(f"Using catalogue default floor error {floor} arcsec for {axis} axis.")
+        return None, None, floor, 'arcsec' # Floor error is always arcsec
+    else:
+        logger.warning(f"No error, IVAR, or default floor error configuration found for axis '{axis}' in config: {config.get('name', 'Unknown')}. STILTS may fail if errors are required.")
+        return None, None, None, 'arcsec' # No error info available
+
+
+def _build_error_value_expression(err_col_name: Optional[str], 
+                                 ivar_col_name: Optional[str],
+                                 floor_error_arcsec: Optional[float],
+                                 units: str) -> str:
+    """
+    Builds a STILTS expression to get the error value in degrees.
+    Handles unit conversion, IVAR conversion, NULLs, and floor error fallback.
+    """
+    if not err_col_name and not ivar_col_name and floor_error_arcsec is None:
+        # Should not happen if _get_error_config logic is sound, but defensively return 0
+        logger.error("Error expression builder called with no error source! Returning 0.")
+        return "0.0"
+
+    # Default to catalogue's floor error if primary source is missing/invalid
+    # If no catalogue floor error, use a tiny default? STILTS might handle this.
+    # Let's rely on catalogue floor error first.
+    fallback_floor_deg = (floor_error_arcsec * u.arcsec).to_value(u.deg) if floor_error_arcsec is not None else 1e-9 # Tiny fallback if no floor defined
+    fallback_expr = f"{fallback_floor_deg}"
+
+    if ivar_col_name:
+        # Error = 1 / sqrt(ivar)
+        # Handle units: ivar units are typically value/arcsec^2 or value/deg^2
+        try:
+            # Assuming units are like 'arcsec' or 'deg', inferring ivar units as unit^-2
+            unit_power = -2
+            base_unit = u.Unit(units)
+            ivar_unit = base_unit**unit_power
+            # Factor to convert error (sqrt(1/ivar)) from base_unit to degrees
+            factor_to_deg = (1 * base_unit).to_value(u.deg) 
+        except ValueError:
+             logger.warning(f"Could not parse IVAR units '{units}'. Assuming arcsec^-2.")
+             factor_to_deg = (1 * u.arcsec).to_value(u.deg)
+        
+        # Expression: Convert 1/sqrt(ivar) to degrees.
+        # Handle NULL, zero, or negative IVAR values gracefully.
+        # Use MAX(ivar_col, 1e-18) to avoid sqrt(0) or sqrt(<0). 1e-18 corresponds to ~1e9 arcsec error.
+        # Use COALESCE to provide the floor error if IVAR is NULL.
+        ivar_expr = f"({factor_to_deg} / sqrt(MAX({ivar_col_name}, 1e-18)))" # Error in degrees
+        return f"COALESCE({ivar_expr}, {fallback_expr})"
+
+    elif err_col_name:
+        try:
+            unit = u.Unit(units)
+            factor_to_deg = (1 * unit).to_value(u.deg)
+        except ValueError:
+            logger.warning(f"Could not parse error units '{units}'. Assuming degrees.")
+            factor_to_deg = 1.0
+
+        # Use COALESCE to handle NULL error values, falling back to floor error.
+        # Use ABS in case error is signed (unlikely but possible).
+        err_expr = f"ABS({err_col_name}) * {factor_to_deg}"
+        return f"COALESCE({err_expr}, {fallback_expr})"
+    
+    else: # Only floor error is available
+        return fallback_expr
+
+def _build_correlation_expression(col_name: Optional[str]) -> str:
+    """Builds a STILTS expression for correlation, defaulting to 0 if missing."""
+    if col_name:
+        # Handle NULLs, default to 0 correlation
+        return f"COALESCE({col_name}, 0.0)"
+    else:
+        return "0.0"
+
+def crossmatch_sky(
+    in1: str, 
+    in2: str, 
+    out: str, 
+    ra1: str, dec1: str, 
+    ra2: str, dec2: str,
+    matcher: str, # 'sky', 'skyerr', 'skyellipse'
+    config1: Dict[str, Any],
+    config2: Dict[str, Any],
+    max_error: float = 3.0, # Max separation in units of sigma for error matchers
+    radius_arcsec: float = 1.0, # Fallback radius for 'sky' matcher
+    join_type: str = '1and2', 
+    stilts_cmd_base: Optional[str] = None, 
+    java_opts: Optional[str] = None, 
+    tmpdir: Optional[str] = None, 
+    **kwargs
+) -> str:
+    """
+    Performs spatial cross-matching between two catalogs using STILTS tmatch2.
+    Supports different matchers: sky, skyerr, skyellipse.
+    
+    Args:
+        in1: Input file path for table 1.
+        in2: Input file path for table 2.
+        out: Output file path for the result.
+        ra1, dec1: RA/Dec column names in table 1.
+        ra2, dec2: RA/Dec column names in table 2.
+        matcher: The STILTS matcher to use ('sky', 'skyerr', 'skyellipse').
+        config1: Configuration dictionary for table 1.
+        config2: Configuration dictionary for table 2.
+        max_error: Maximum separation in units of error (sigma) for skyerr/skyellipse.
+        radius_arcsec: Match radius in arcseconds (used only for matcher='sky').
+        join_type: Type of join ('1and2', '1or2', 'all1', 'all2', etc.).
+        stilts_cmd_base: Base STILTS command.
+        java_opts: Java options.
+        tmpdir: Temporary directory.
+        **kwargs: Additional parameters to pass directly to tmatch2.
+
+    Returns:
+        Output file path if successful.
     """
     params = {
         "in1": in1,
         "in2": in2,
-        "ifmt1": kwargs.get('ifmt1', 'auto'),
-        "ifmt2": kwargs.get('ifmt2', 'auto'),
-        "matcher": kwargs.get('matcher', 'sky'),
-        "values1": f"{ra1} {dec1}",
-        "values2": f"{ra2} {dec2}",
-        "params": str(radius),
-        "join": join_type,
-        "find": kwargs.get('find', 'best'),
         "out": out,
-        "ofmt": kwargs.get('ofmt', 'auto')
+        "ofmt": kwargs.pop('ofmt', 'parquet-snappy'), # Default to parquet
+        "join": join_type,
+        "matcher": matcher
     }
-    
-    # Add any additional parameters
-    for k, v in kwargs.items():
-        if k not in ['ifmt1', 'ifmt2', 'matcher', 'find', 'ofmt']:
-            params[k] = v
-    
-    _run_stilts("tmatch2", params, java_opts, tmpdir, stilts_cmd_base)
-    
-    logger.info(f"STILTS crossmatch_sky result saved to: {out}")
-    return out
+
+    # --- Configure matcher-specific parameters --- 
+    if matcher == 'skyerr' or matcher == 'skyellipse':
+        ra_err_col1, ra_ivar_col1, floor1_ra, units1_ra = _get_error_config(config1, 'ra')
+        dec_err_col1, dec_ivar_col1, floor1_dec, units1_dec = _get_error_config(config1, 'dec')
+        # Use the same floor error and units for both axes if derived from ivar/err col
+        floor1 = floor1_ra if floor1_ra is not None else floor1_dec
+        units1 = units1_ra if ra_err_col1 or ra_ivar_col1 else units1_dec
+        
+        ra_err_col2, ra_ivar_col2, floor2_ra, units2_ra = _get_error_config(config2, 'ra')
+        dec_err_col2, dec_ivar_col2, floor2_dec, units2_dec = _get_error_config(config2, 'dec')
+        floor2 = floor2_ra if floor2_ra is not None else floor2_dec
+        units2 = units2_ra if ra_err_col2 or ra_ivar_col2 else units2_dec
+
+        # Get correlation column names
+        corr_col1 = config1.get('corr_column')
+        corr_col2 = config2.get('corr_column')
+
+        # Build values expressions (RA, Dec, ErrRA, ErrDec, [Corr])
+        # Errors must be converted to degrees
+        err_expr_ra1 = _build_error_value_expression(ra_err_col1, ra_ivar_col1, floor1, units1)
+        err_expr_dec1 = _build_error_value_expression(dec_err_col1, dec_ivar_col1, floor1, units1)
+        err_expr_ra2 = _build_error_value_expression(ra_err_col2, ra_ivar_col2, floor2, units2)
+        err_expr_dec2 = _build_error_value_expression(dec_err_col2, dec_ivar_col2, floor2, units2)
+        
+        # Add error parameters for skyerr and skyellipse
+        if matcher == 'skyerr':
+            params["values1"] = f"{ra1} {dec1} {err_expr_ra1} {err_expr_dec1}"
+            params["values2"] = f"{ra2} {dec2} {err_expr_ra2} {err_expr_dec2}"
+            params["params"] = str(max_error) # Separation in units of error
+            logger.info(f"Using {matcher} matcher with max_error={max_error}. Units: deg.")
+            logger.debug(f"  values1: {params['values1']}")
+            logger.debug(f"  values2: {params['values2']}")
+        elif matcher == 'skyellipse':
+            params["values1"] = f"{ra1} {dec1} {err_expr_ra1} {err_expr_dec1} {_build_correlation_expression(corr_col1)}"
+            params["values2"] = f"{ra2} {dec2} {err_expr_ra2} {err_expr_dec2} {_build_correlation_expression(corr_col2)}"
+            params["params"] = str(max_error) # Separation in units of error
+            logger.info(f"Using {matcher} matcher with max_error={max_error}. Units: deg.")
+            logger.debug(f"  values1: {params['values1']}")
+            logger.debug(f"  values2: {params['values2']}")
+
+    elif matcher == 'sky':
+        params["values1"] = f"{ra1} {dec1}"
+        params["values2"] = f"{ra2} {dec2}"
+        params["params"] = str(radius_arcsec) # Separation in arcsec
+        logger.info(f"Using sky matcher with radius={radius_arcsec} arcsec.")
+    else:
+        raise StiltsError(f"Unsupported STILTS matcher specified: '{matcher}'")
+
+    # Add any extra kwargs passed by the user
+    params.update(kwargs)
+
+    try:
+        _run_stilts("tmatch2", params, java_opts, tmpdir, stilts_cmd_base)
+        logger.info(f"STILTS tmatch2 ({matcher}) completed successfully. Output: {out}")
+        return out
+    except StiltsError as e:
+        logger.error(f"STILTS tmatch2 ({matcher}) failed.")
+        raise # Re-raise the specific StiltsError
 
 @stilts_retry()
 def crossmatch_id(in1, in2, out, id_column_1, id_column_2, join_type='1and2',

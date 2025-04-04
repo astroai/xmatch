@@ -7,9 +7,9 @@ import sys
 import yaml
 import json
 
-from .core.crossmatch import CrossMatch, CrossMatchError
-from .utils.tap import TapError
-from .utils.stilts import StiltsError
+from .crossmatch import CrossMatch, CrossMatchError
+from .tap import TapError
+from .stilts import StiltsError
 
 def setup_logging(level=logging.INFO):
     """Configure logging."""

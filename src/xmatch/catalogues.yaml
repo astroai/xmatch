@@ -14,6 +14,10 @@ stilts_config:
   #tmpdir: /scratch
 
 
+# --- Global Crossmatch Defaults ---
+# Global settings can go here, but floor error is now per-catalogue.
+
+
 # Configuration for different astronomical catalogues
 catalogues:
   GAIA_CDS_XMATCH:
@@ -25,11 +29,17 @@ catalogues:
     id_column: "Source"
     ra_column: "RAJ2000"
     dec_column: "DEJ2000"
-    default_columns: ["Source", "RAJ2000", "DEJ2000", "Gmag", "BPmag", "RPmag", "parallax", "pmRA", "pmDE"]
+    # --- Positional Error Configuration ---
+    ra_err_column: "e_RAJ2000" # Assuming CDS uses 'e_' prefix for errors
+    dec_err_column: "e_DEJ2000"
+    corr_column: "RADEcorJ2000" # Updated correlation column name
+    pos_err_units: "mas"      # Gaia errors are typically in mas
+    # default_pos_error_arcsec: 0.05 # Optional: Catalogue-specific floor
+    # --- End Positional Error Configuration ---
+    default_columns: ["Source", "RAJ2000", "DEJ2000", "Gmag", "BPmag", "RPmag", "parallax", "pmRA", "pmDE", "e_RAJ2000", "e_DEJ2000", "RADEcorJ2000"] # Added error columns
     quality_filters:
       parallax_over_error: "> 5"
       phot_bp_rp_excess_factor: "< 1.3 + 0.06 * pow(bp_rp, 2)"
-
 
   GAIA_CDS_TAP:
     description: "Gaia Source Catalogue via Vizier TAP service"
@@ -41,7 +51,13 @@ catalogues:
     ra_column: "RAJ2000"
     dec_column: "DEJ2000"
     id_column: "Source"
-    default_columns: ["Source", "RAJ2000", "DEJ2000", "Gmag", "BPmag", "RPmag", "parallax", "pmRA", "pmDE"]
+    # --- Positional Error Configuration ---
+    ra_err_column: "e_RAJ2000" # Assuming CDS uses 'e_' prefix for errors
+    dec_err_column: "e_DEJ2000"
+    corr_column: "RADEcorJ2000" # Updated correlation column name
+    pos_err_units: "mas"      # Gaia errors are typically in mas
+    # --- End Positional Error Configuration ---
+    default_columns: ["Source", "RAJ2000", "DEJ2000", "Gmag", "BPmag", "RPmag", "parallax", "pmRA", "pmDE", "e_RAJ2000", "e_DEJ2000", "RADEcorJ2000"] # Added error columns
     quality_filters:
       parallax_over_error: "> 5"
 
@@ -55,10 +71,15 @@ catalogues:
     ra_column: "ra" # ESA uses ICRS ra/dec
     dec_column: "dec"
     id_column: "source_id"
-    default_columns: ["source_id", "ra", "dec", "phot_g_mean_mag", "phot_bp_mean_mag", "phot_rp_mean_mag", "parallax", "pmra", "pmdec"]
+    # --- Positional Error Configuration ---
+    ra_err_column: "ra_error"
+    dec_err_column: "dec_error"
+    corr_column: "ra_dec_corr"
+    pos_err_units: "mas"
+    # --- End Positional Error Configuration ---
+    default_columns: ["source_id", "ra", "dec", "phot_g_mean_mag", "phot_bp_mean_mag", "phot_rp_mean_mag", "parallax", "pmra", "pmdec", "ra_error", "dec_error", "ra_dec_corr"] # Added error columns
     quality_filters:
       parallax_over_error: "> 5"
-
 
   GALEX_CDS_XMATCH:
     description: "GALEX All-sky Imaging Survey via Vizier CDSXmatch"
@@ -68,6 +89,8 @@ catalogues:
     id_column: "objid" 
     ra_column: "RAJ2000"
     dec_column: "DEJ2000"
+    # No standard positional error columns expected for GALEX AIS.
+    default_pos_error_arcsec: 3.0 # Use floor error based on resolution
     default_columns: ["objid", "RAJ2000", "DEJ2000", "FUVmag", "NUVmag", "e_FUVmag", "e_NUVmag"]
 
   GALEX_CDS_TAP:
@@ -80,6 +103,8 @@ catalogues:
     id_column: "objid"
     ra_column: "RAJ2000"
     dec_column: "DEJ2000"
+    # No standard positional error columns expected for GALEX AIS.
+    default_pos_error_arcsec: 3.0 # Use floor error based on resolution
     default_columns: ["objid", "RAJ2000", "DEJ2000", "FUVmag", "NUVmag", "e_FUVmag", "e_NUVmag"]
 
   DESILS_X_GAIA_NOAO_TAP:
@@ -89,6 +114,8 @@ catalogues:
     tap_schema: "ls_dr10"
     id_column_1: "id2" # Column matching the catalogue_1's join ID (Gaia ID)
     id_column_2: "id1" # Column matching the catalogue_2's join ID (LS ID)
+    # This is a crossmatch table itself, error columns depend on which side you query from.
+    # Assume no specific error columns needed here, handled by joined tables.
 
   DESILS_NOAO_TAP:
     description: "DESI LS Tractor Catalogue (NOAO Datalab)"
@@ -98,6 +125,13 @@ catalogues:
     id_column: "ls_id" 
     ra_column: "ra"
     dec_column: "dec"
+    # --- Positional Error Configuration (using Inverse Variance) ---
+    ra_ivar_column: "ra_ivar" 
+    dec_ivar_column: "dec_ivar"
+    # Error = 1/sqrt(ivar). Units of ivar are arcsec^-2, so error is arcsec.
+    pos_err_units: "arcsec" # Effective units after conversion
+    default_pos_error_arcsec: 0.2 # Fallback if ivar is missing or zero
+    # --- End Positional Error Configuration ---
     best_method: tap # Use 'tap' method for ID joins
     intermediate_join:
       via_catalogue: "DESILS_X_GAIA_NOAO_TAP" # Reference to the intermediate join
@@ -115,8 +149,15 @@ catalogues:
     ra_column: "ra" 
     dec_column: "dec"
     id_column: "sourceid" 
+    # --- Positional Error Configuration ---
+    # UKIDSS LAS source table uses sigra, sigdec in arcsec
+    ra_err_column: "sigra" 
+    dec_err_column: "sigdec"
+    pos_err_units: "arcsec" # Explicitly state arcsec, though it's often default
+    default_pos_error_arcsec: 0.5 # Fallback if errors are missing
+    # --- End Positional Error Configuration ---
+    default_columns: ["sourceid", "ra", "dec", "yAperMag3", "jAperMag3", "hAperMag3", "kAperMag3", "sigra", "sigdec"] # Example columns, add errors
 
-  
   DELVE_NOAO_TAP:
     description: "DELVE via NOAO Datalab TAP"
     tap_url: "https://datalab.noirlab.edu/tap" 
@@ -128,6 +169,29 @@ catalogues:
     ra_column: "ra" 
     dec_column: "dec"
     id_column: "quick_object_id"
+    # No standard positional error columns found in DELVE DR2 object table.
+    default_pos_error_arcsec: 1.0 # Use floor error
+    default_columns: ["quick_object_id", "ra", "dec", "mag_auto_g", "mag_auto_r", "mag_auto_i", "mag_auto_z"] # Example columns
+
+  VHS_CDS:
+    description: "VISTA Hemisphere Survey"
+    service: cds_xmatch # Use CDS XMatch service
+    cds_id: "II/367/vhs_dr5"
+    ra_column: "RAJ2000" 
+    dec_column: "DEJ2000"
+    id_column: "SrcID" 
+    # --- Positional Error Configuration ---
+    # No reported RA/Dec errors in table, use default floor
+    default_pos_error_arcsec: 0.8 
+    pos_err_units: "arcsec" # Floor error units
+    # --- End Positional Error Configuration ---
+    default_columns: ["SrcID", "RAJ2000", "DEJ2000", "Yap3", "Jap3", "Hap3", "Kap3", "e_Yap3", "e_Jap3", "e_Hap3", "e_Kap3"]
+    quality_filters:
+      # Example: Select only primary detections (pri == 1)
+      # "pri = 1"
+      # Example: Filter on merged class (-1 or -2 are good point sources)
+      # "mergedClass < 0"
+      pass # Add specific quality filters if needed
 
 # Configuration for different cross-matching methods
 crossmatch_methods:
@@ -149,9 +213,21 @@ crossmatch_methods:
     default_radius_arcsec: 1.0
 
   stilts_tmatch2:
-    description: "Cross-match using STILTS 'tmatch2' task (joins two tables, one potentially via TAP). Requires STILTS, Java."
+    description: "Cross-match using STILTS 'tmatch2' task (joins two tables, potentially via TAP) using fixed radius separation."
     enabled: true
-    default_radius_arcsec: 1.0
+    default_radius_arcsec: 1.0 # Used by the default 'sky' matcher
+
+  stilts_tmatch2_skyerr:
+    description: "Cross-match using STILTS 'tmatch2' task with 'skyerr' matcher. Requires error columns defined in catalogue configs. Requires STILTS, Java."
+    enabled: true
+    requires: ['ra_err_column', 'dec_err_column'] # OR ivar columns
+    # default_radius_arcsec: Not directly used by skyerr, but could be a fallback max separation
+
+  stilts_tmatch2_skyellipse:
+    description: "Cross-match using STILTS 'tmatch2' task with 'skyellipse' matcher. Requires error and correlation columns defined in catalogue configs. Requires STILTS, Java."
+    enabled: true
+    requires: ['ra_err_column', 'dec_err_column', 'corr_column'] # Indicate required config keys
+    # default_radius_arcsec: Not directly used by skyellipse, but could be a fallback max separation
 
   stilts_tapquery:
       description: "Query a TAP service using STILTS 'tapquery' task. Not strictly a cross-match. Requires STILTS, Java, internet."

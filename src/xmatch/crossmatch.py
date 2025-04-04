@@ -18,14 +18,14 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from joblib import Parallel, delayed
 
-from ..utils import stilts, tap, auth
-from ..utils.stilts import StiltsError
-from ..utils.tap import TapError
+from . import stilts, tap, auth
+from .stilts import StiltsError
+from .tap import TapError
 
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "config" / "catalogues.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "catalogues.yaml"
 SUPPORTED_INPUT_FORMATS = [".parquet", ".fits", ".csv"]
 
 class CrossMatchError(Exception):
@@ -55,6 +55,13 @@ class CrossMatch:
         self.stilts_java_opts = kwargs.get('java_opts', self.stilts_config.get('java_opts'))
         self.stilts_tmpdir = kwargs.get('tmpdir', self.stilts_config.get('tmpdir'))
         self.chunk_size = kwargs.get('chunk_size', 100000) # Default chunk size
+        
+        # --- Add global config storage ---
+        self.global_config = {
+            'default_floor_error_arcsec': self.config.get('default_floor_error_arcsec')
+            # Add other global settings if needed
+        }
+        # --- End global config storage ---
         
         self.auth_config = auth.load_auth_config() # Load credentials securely
 
