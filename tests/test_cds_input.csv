@@ -1,0 +1,4 @@
+ra_in,dec_in,name
+10.0,20.0,ObjA
+84.3,-5.4,ObjB # Coordinates near Crab Nebula (from 2MASS PSC entry)
+266.4, -29.0, ObjC # Coordinates near Galactic Center (from 2MASS PSC entry) 

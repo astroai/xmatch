@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A tool for cross-matching astronomical catalogues using various methods."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "GPL-2"}
+license = {text = "MIT"}
 authors = [
   { name = "Seb Fabbro", email = "sebfabbro@gmail.com" },
 ]
@@ -31,6 +31,8 @@ dependencies = [
     "pyvo >= 1.4",
     "keyring >= 23.0",
     "astroquery >= 0.4.6",
+    "astropy-healpix >= 0.6",
+    "pyarrow >= 7.0",
     ]
 
 [project.optional-dependencies]
@@ -60,6 +62,8 @@ Repository = "https://github.com/sfabbro/xmatch" # Example
 # --- Tool specific configuration (e.g. for linters/formatters) ---
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
 

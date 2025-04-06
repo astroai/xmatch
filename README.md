@@ -1,51 +1,67 @@
 # xmatch
 
-A flexible tool for cross-matching astronomical catalogues, supporting multiple methods and formats.
+A flexible tool for cross-matching astronomical catalogues using various methods (STILTS, TAP, CDS XMatch).
 
 ## Features
 
-- Support for multiple cross-matching methods:
-  - STILTS (recommended for large catalogues)
-  - TAP (Table Access Protocol)
-  - Astropy (for smaller catalogues)
-  - Astroquery (CDS XMatch service)
-- Automatic method selection based on catalogue size and availability
-- Configuration via YAML file
-- Support for various input/output formats (FITS, Parquet, etc.)
-- Chunked processing for large catalogues
-- Progress tracking and logging
+- Cross-match local files (Parquet, FITS, CSV) or remote catalogues defined in configuration.
+- Supports multiple matching backends:
+  - Local matching via STILTS `tmatch2` (sky, skyerr, skyellipse).
+  - Remote TAP service joins (fixed radius).
+  - Remote CDS XMatch service (requires `astroquery`).
+- Strategy selection based on input types (local/remote) and service capabilities.
+- Handles epoch propagation between catalogues with proper motion (e.g., Gaia J2016.0 vs J2000.0) for local/downloaded matches.
+- Spatial chunking for large remote catalogues using HEALPix (requires `astropy-healpix`).
+- Configuration via YAML files (`catalogues.yaml`, `auth.yaml`).
+- Command-line interface and Python API.
 
 ## Installation
 
+Requires Java (for STILTS) and Python >= 3.10.
+
 ```bash
-pip install xmatch
+# Install from PyPI (if published)
+# pip install xmatch
+
+# Install from source
+git clone https://github.com/sfabbro/xmatch.git
+cd xmatch
+pip install .
+
+# For development
+pip install -e ".[dev]"
 ```
+
+**STILTS Setup:** Ensure the `stilts` command is available in your system PATH, or set the `STILTS_JAR` environment variable, or provide the path via the `stilts_cmd_base` configuration setting in `catalogues.yaml` or Python API.
 
 ## Usage
 
-### Command Line Interface
+### Command Line Interface (`xmatch`)
 
-Basic usage:
 ```bash
-xmatch master_cat target_cat
-```
+# Basic: Match two configured catalogues (e.g., gaia_esa vs delve_noao)
+xmatch gaia_esa delve_noao --output gaia_delve_match.parquet --radius 1.5
 
-Examples:
-```bash
-# Cross-match Gaia DR3 with GALEX
-xmatch gaiadr3 galex
+# Match a local file against a configured remote catalogue
+xmatch /path/to/my_sources.csv gaia_esa --output my_gaia_match.parquet --radius 2.0
 
-# Cross-match with custom radius and output file
-xmatch gaiadr3 galex -r 3.0 -o gaia_galex.parquet
+# Use CDS XMatch service (if remote catalogue configured for it)
+xmatch /path/to/my_sources.csv galex_cds --output my_galex_match.parquet --radius 3.0
 
-# Cross-match with specific columns
-xmatch gaiadr3 galex -c "objid,FUVmag,NUVmag"
+# Specify matcher explicitly (for local/download strategies)
+xmatch gaia_esa ukidsslas_noao --output gaia_ukidss_skyerr.parquet --matcher skyerr --max-error 5.0
 
-# Use specific method
-xmatch gaiadr3 galex -m stilts
+# Run remote spatial chunking (requires ra, dec, radius)
+xmatch gaia_esa vhs_cds --output gaia_vhs_chunked.parquet --radius 1.0 --ra 150.1 --dec 2.5 --strategy remote_spatial_chunked_match --nside 64
 
-# Verbose output
-xmatch gaiadr3 galex -v
+# List available catalogues
+xmatch --list-catalogues
+
+# Describe a catalogue
+xmatch --describe gaia_esa
+
+# See all options
+xmatch --help
 ```
 
 ### Python API
@@ -53,52 +69,38 @@ xmatch gaiadr3 galex -v
 ```python
 from xmatch import CrossMatch
 
-# Initialize cross-matcher
-crossmatcher = CrossMatch()
+# Initialize with default config
+cm = CrossMatch()
 
-# Perform cross-match
-result = crossmatcher.crossmatch(
-    master_cat="gaiadr3",
-    target_cat="galex",
-    radius=3.0,
-    columns=["objid", "FUVmag", "NUVmag"]
+# Perform cross-match (local file vs configured catalogue)
+result_df = cm.crossmatch(
+    catalogue_1_input='my_local_sources.parquet',
+    catalogue_2_input='gaia_esa',
+    output_file='local_vs_gaia.parquet', # Optional: save directly
+    radius_arcsec=1.5,
+    matcher='skyerr', # Optional: suggest matcher for local/download
+    max_error=5.0    # Optional: separation for skyerr/skyellipse
 )
+
+# Perform spatial chunked remote match
+result_df_chunked = cm.crossmatch(
+    catalogue_1_input='gaia_esa',
+    catalogue_2_input='vhs_cds',
+    strategy='remote_spatial_chunked_match', # Force strategy
+    ra=150.1, # Required for spatial chunking
+    dec=2.5,  # Required for spatial chunking
+    radius_arcsec=1.0, # Defines area for chunking
+    nside=64 # Optional: HEALPix nside for chunking
+)
+
+print(result_df_chunked.head())
 ```
 
 ## Configuration
 
-The package uses a YAML configuration file to store catalogue information and cross-matching settings. By default, it looks for `catalogues.yaml` in the package's config directory.
-
-Example configuration:
-```yaml
-catalogues:
-  gaiadr3:
-    name: "Gaia DR3"
-    tap_url: "https://gea.esac.esa.int/tap-server/tap"
-    tap_table: "gaia.dr3_source"
-    vizier_id: "I/355/gaiadr3"
-    ra_column: "ra"
-    dec_column: "dec"
-    id_column: "source_id"
-    chunk_size: 100000
-    max_upload_rows: 50000
-    default_radius: 2.0  # arcseconds
-```
-
-## Supported Catalogues
-
-- Gaia DR3
-- GALEX AIS
-- DESI Legacy Survey DR10
-- VHS (VISTA Hemisphere Survey)
-- UKIDSS DR11plus
-
-More catalogues can be added to the configuration file.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+- `catalogues.yaml`: Defines data archives (TAP/CDS services) and specific catalogues (access details, columns, errors, epoch). See the file for structure and examples.
+- `auth.yaml`: Stores credentials for authenticated services (e.g., NOIRLab Data Lab TAP). Uses the `keyring` library for secure storage. Create this file manually if needed (see `auth.py` for expected format).
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License. 
