@@ -1,6 +1,7 @@
 import argparse
 import sys
 import logging
+import ast
 
 from .crossmatch import CrossMatch, CrossMatchError
 from pathlib import Path # Added for Path handling
@@ -168,15 +169,37 @@ def main():
     # Added: ID Join
     xmatch_group.add_argument(
         '--join-on-ids',
-        metavar='COL1:COL2',
-        type=parse_id_join,
-        help='Perform an ID-based join instead of spatial. Specify columns using format: `col_name_cat1:col_name_cat2`.'
+        metavar='\"{'cat1':'id_col_1', 'cat2':'id_col_2'}\"',
+        help="Perform an ID-based join instead of spatial. \
+            Provide a string dictionary mapping 'cat1' and 'cat2' to the respective ID column names. \
+            Example: \"{'cat1':'source_id', 'cat2':'gaia_dr3_source_id'}\"",
+        default=None,
     )
     # Added: Coordinate Column Overrides
-    xmatch_group.add_argument('--ra1-col', metavar='COL_NAME', help='Override RA column name for first input (e.g., for local files).')
-    xmatch_group.add_argument('--dec1-col', metavar='COL_NAME', help='Override Dec column name for first input.')
-    xmatch_group.add_argument('--ra2-col', metavar='COL_NAME', help='Override RA column name for second input.')
-    xmatch_group.add_argument('--dec2-col', metavar='COL_NAME', help='Override Dec column name for second input.')
+    xmatch_group.add_argument(
+        '--ra1-col',
+        type=str,
+        default="ra",
+        help="RA column name for the first input if it is a local file/DataFrame (default: ra)"
+    )
+    xmatch_group.add_argument(
+        '--dec1-col',
+        type=str,
+        default="dec",
+        help="Dec column name for the first input if it is a local file/DataFrame (default: dec)"
+    )
+    xmatch_group.add_argument(
+        '--ra2-col',
+        type=str,
+        default="ra",
+        help="RA column name for the second input if it is a local file/DataFrame (default: ra)"
+    )
+    xmatch_group.add_argument(
+        '--dec2-col',
+        type=str,
+        default="dec",
+        help="Dec column name for the second input if it is a local file/DataFrame (default: dec)"
+    )
     # Added: Method Hint
     xmatch_group.add_argument(
         '--method',
@@ -411,6 +434,17 @@ def main():
                 log.warning("No --output file specified. Results will be returned as a DataFrame (and potentially lost if not handled).")
 
             # --- Prepare parameters for cross_matcher.crossmatch ---
+            join_on_ids_dict = None
+            if args.join_on_ids:
+                 try:
+                      # Safely evaluate the string representation of the dictionary
+                      join_on_ids_dict = ast.literal_eval(args.join_on_ids)
+                      if not isinstance(join_on_ids_dict, dict) or 'cat1' not in join_on_ids_dict or 'cat2' not in join_on_ids_dict:
+                           raise ValueError("Invalid format for --join-on-ids. Must be a dict string with 'cat1' and 'cat2' keys.")
+                 except (ValueError, SyntaxError) as e:
+                      log.error(f"Invalid --join-on-ids format: {e}")
+                      sys.exit(1)
+
             xmatch_params = {
                 "catalogue_1_input": args.catalog_inputs[0],
                 "catalogue_2_input": args.catalog_inputs[1],
@@ -418,15 +452,16 @@ def main():
                 "radius_arcsec": args.radius,
                 "columns1": args.columns_1, # Pass the list from parse_columns (or None)
                 "columns2": args.columns_2, # Pass the list from parse_columns (or None)
-                "join_on_ids": args.join_on_ids,
+                "join_on_ids": join_on_ids_dict,
                 "method": args.method,
+                # Add local column overrides
                 "ra1_col": args.ra1_col,
                 "dec1_col": args.dec1_col,
                 "ra2_col": args.ra2_col,
                 "dec2_col": args.dec2_col,
             }
-            # Filter out None values, as crossmatch method uses defaults
-            xmatch_params = {k: v for k, v in xmatch_params.items() if v is not None}
+
+            log.debug(f"Crossmatch parameters: {xmatch_params}")
 
             log.info("--- Starting Cross-Match ---")
             log.info(f"Input 1: {args.catalog_inputs[0]}")

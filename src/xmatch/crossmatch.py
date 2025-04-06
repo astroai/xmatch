@@ -3,6 +3,7 @@ import multiprocessing
 import time  # For timing operations
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+from importlib import resources # For accessing package data files
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import tempfile
 
@@ -20,14 +21,29 @@ from astropy_healpix import HEALPix
 from astroquery.xmatch import XMatch # Import CDS XMatch
 
 from . import auth
-from .stilts import StiltsError, crossmatch_sky, _run_stilts # Import the crossmatch function and _run_stilts
+from .stilts import StiltsError, _run_stilts # Removed crossmatch_sky import
 from .tap import TapError, get_tap_service, execute_tap_query
 from .astro_utils import apply_epoch_propagation # Import the new function
 
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-DEFAULT_CONFIG_PATH = Path(__file__).parent / "catalogues.yaml"
+# Use importlib.resources to find the path to the default config within the package
+# Ensures it works correctly after installation.
+try:
+    DEFAULT_CONFIG_PATH = resources.files('xmatch') / 'xmatch.yaml'
+except Exception as e:
+    # Fallback or error handling if resource loading fails (e.g., during development?)
+    logger.error(f"Failed to locate default config via importlib.resources: {e}. Trying relative path as fallback.")
+    # Fallback to relative path (might work in dev, but not ideal)
+    _fallback_path = Path(__file__).parent / "xmatch.yaml"
+    if not _fallback_path.exists():
+        logger.error("Fallback relative path config also not found.")
+        # Set to None or raise an error? Raising might be better at init.
+        DEFAULT_CONFIG_PATH = None
+    else:
+        DEFAULT_CONFIG_PATH = _fallback_path
+
 SUPPORTED_INPUT_FORMATS = [".parquet", ".fits", ".csv"]
 
 
@@ -46,8 +62,13 @@ class CrossMatch:
 
         Args:
             config_file: Path to the YAML configuration file.
+                        If None or DEFAULT_CONFIG_PATH, uses the default packaged config.
             **kwargs: Additional configuration overrides (e.g., java_opts, chunk_size).
         """
+        if config_file is DEFAULT_CONFIG_PATH and DEFAULT_CONFIG_PATH is None:
+            # This case happens if importlib.resources failed AND the fallback failed.
+            raise CrossMatchError("Default configuration file path could not be determined. Ensure the package is installed correctly or provide an explicit --config path.")
+
         self.config_file = Path(config_file)
         self.config = self._load_config()  # Loads the entire YAML
 
@@ -235,7 +256,10 @@ class CrossMatch:
         return resolved_config
 
     def _get_config_for_input(
-        self, cat_input: Union[str, Path, pd.DataFrame, Table]
+        self, cat_input: Union[str, Path, pd.DataFrame, Table],
+        # Add kwargs for column overrides
+        ra_col_override: Optional[str] = None,
+        dec_col_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Gets the appropriate config, handling names, paths, or DataFrames.
 
@@ -245,7 +269,16 @@ class CrossMatch:
 
         It also stores the loaded DataFrame in the config dict under
         '_input_dataframe' if the input was a DataFrame or Table.
+
+        Args:
+            cat_input: The input catalogue (name, path, DataFrame, Table).
+            ra_col_override: RA column name if input is local (overrides default).
+            dec_col_override: Dec column name if input is local (overrides default).
         """
+        # Determine default column names, potentially overridden
+        ra_col_default = ra_col_override or "ra"
+        dec_col_default = dec_col_override or "dec"
+
         if isinstance(cat_input, pd.DataFrame):
             df = cat_input.copy()
             return {
@@ -256,8 +289,8 @@ class CrossMatch:
                 "service_type": "local_file", # Treat DF as local
                 "access_method": "file_system", # Treat DF as local
                 "is_local": True,
-                "ra_column": "ra",  # Assume default column names
-                "dec_column": "dec",
+                "ra_column": ra_col_default,  # Use overridden or default name
+                "dec_column": dec_col_default, # Use overridden or default name
                 "default_pos_error_arcsec": 0.1,
             }
         elif isinstance(cat_input, astropy.table.Table):
@@ -271,8 +304,8 @@ class CrossMatch:
                     "service_type": "local_file",
                     "access_method": "file_system",
                     "is_local": True,
-                    "ra_column": "ra",
-                    "dec_column": "dec",
+                    "ra_column": ra_col_default, # Use overridden or default name
+                    "dec_column": dec_col_default, # Use overridden or default name
                     "default_pos_error_arcsec": 0.1,
                 }
             except Exception as e:
@@ -293,8 +326,8 @@ class CrossMatch:
                         "access_method": "file_system",
                         "estimated_size": "unknown",  # Could estimate from file size
                         "is_local": True,
-                        "ra_column": "ra",  # Assume default column names
-                        "dec_column": "dec",
+                        "ra_column": ra_col_default,  # Use overridden or default name
+                        "dec_column": dec_col_default, # Use overridden or default name
                         "default_pos_error_arcsec": 0.1,
                     }
             except OSError as e:
@@ -509,6 +542,7 @@ class CrossMatch:
                          If provided, 'radius_arcsec' and 'matcher' related to spatial joins are ignored for remote joins.
             **kwargs: Additional parameters passed to the underlying execution methods
                       (e.g., radius_arcsec, find, join_type, columns1, columns2, ra, dec).
+                      Also accepts ra1_col, dec1_col, ra2_col, dec2_col for local input overrides.
 
         Returns:
             A pandas DataFrame with the crossmatch results if output_file is None, otherwise None.
@@ -533,9 +567,13 @@ class CrossMatch:
 
         try:
             # 1. Resolve input configurations
-            # _get_config_for_input also handles loading DF/Table inputs
-            config1 = self._get_config_for_input(catalogue_1_input)
-            config2 = self._get_config_for_input(catalogue_2_input)
+            # Pass column overrides if provided in kwargs
+            ra1_col = kwargs.pop("ra1_col", None)
+            dec1_col = kwargs.pop("dec1_col", None)
+            ra2_col = kwargs.pop("ra2_col", None)
+            dec2_col = kwargs.pop("dec2_col", None)
+            config1 = self._get_config_for_input(catalogue_1_input, ra_col_override=ra1_col, dec_col_override=dec1_col)
+            config2 = self._get_config_for_input(catalogue_2_input, ra_col_override=ra2_col, dec_col_override=dec2_col)
             cat_name1 = config1.get("_catalogue_name", "Input1")
             cat_name2 = config2.get("_catalogue_name", "Input2")
             logger.debug(f"Resolved Config 1 ({cat_name1}): {config1}")
@@ -773,7 +811,8 @@ class CrossMatch:
                      catalogue_to_download = config2.get("_catalogue_name")
 
 
-            # TODO: Handle other remote strategies like cds_xmatch if relevant here?
+            # TODO: Consider CDS XMatch for remote-remote if both catalogues are known to CDS?
+            #       Would require checking if both access_methods are 'cds_xmatch'.
 
         else: # Both local case handled earlier
             raise CrossMatchError("Internal Error: Could not determine strategy based on input types.")
@@ -797,6 +836,143 @@ class CrossMatch:
         params["_catalogue_to_download"] = catalogue_to_download # Track which one to download if needed by caller
         logger.info(f"Final strategy: {strategy}")
         return strategy, params
+
+    # -----------------------------------------------------------
+    # Placeholder Execution Methods - TO BE IMPLEMENTED
+    # -----------------------------------------------------------
+
+    def _execute_remote_join_match(
+        self, config1: Dict[str, Any], config2: Dict[str, Any], **params
+    ) -> pd.DataFrame:
+        """Executes a remote ADQL JOIN query on a single TAP service."""
+        cat_name1 = config1.get("_catalogue_name", "input1")
+        cat_name2 = config2.get("_catalogue_name", "input2")
+        logger.info(f"Executing remote ADQL JOIN strategy ({cat_name1} vs {cat_name2})")
+
+        # Assumes config validation ensures they are on the same TAP service
+        service_config = config1 # Use config1 for service details
+        tap_url = service_config.get("access_url")
+        archive_name = service_config.get("_archive_name") # For auth
+        table1 = config1.get("access_identifier")
+        table2 = config2.get("access_identifier")
+
+        if not all([tap_url, archive_name, table1, table2]):
+            raise CrossMatchError("Missing necessary config (URL, archive, identifiers) for remote join.")
+
+        try:
+            # --- Get TAP Service ---
+            auth_info = self.auth_config.get(archive_name)
+            tap_kwargs = {}
+            if auth_info:
+                tap_kwargs["user"] = auth_info.get("user")
+                tap_kwargs["password"] = auth_info.get("password")
+            tap_service = get_tap_service(tap_url, **tap_kwargs)
+
+            # --- Prepare Query ---
+            alias1 = "t1"
+            alias2 = "t2"
+            select_clause = self._prepare_remote_join_columns(config1, config2, alias1, alias2, params)
+            join_on_clause = self._build_remote_adql_join_clause(config1, config2, alias1, alias2, params)
+            join_type = params.get("join_type", "INNER").upper() # Default to INNER JOIN
+
+            adql_query = f"""
+            SELECT {select_clause}
+            FROM {table1} AS {alias1}
+            {join_type} JOIN {table2} AS {alias2}
+            ON {join_on_clause}
+            """
+            logger.debug(f"Constructed remote ADQL JOIN query:\n{adql_query}")
+
+            # --- Execute Query ---
+            # Pass execution params (timeout, retries) from **params
+            result_df = execute_tap_query(tap_service, adql_query, **params)
+
+            logger.info(f"Remote ADQL JOIN completed. Found {len(result_df)} pairs.")
+            return result_df
+
+        except (TapError, ValueError, ConnectionError, Timeout, RequestException) as e:
+            logger.error(f"Remote ADQL JOIN failed: {e}", exc_info=True)
+            raise CrossMatchError(f"Remote ADQL JOIN failed: {e}") from e
+        except Exception as e:
+            logger.error(f"Unexpected error during remote ADQL JOIN: {e}", exc_info=True)
+            raise CrossMatchError(f"Unexpected remote join error: {e}") from e
+
+
+    def _execute_download_and_match(
+        self, config1: Dict[str, Any], config2: Dict[str, Any], **params
+    ) -> pd.DataFrame:
+        """Downloads remote catalogue(s) and performs a local STILTS match."""
+        cat_name1 = config1.get("_catalogue_name", "input1")
+        cat_name2 = config2.get("_catalogue_name", "input2")
+        which_to_download = params.get("_catalogue_to_download") # Set by strategy logic
+        logger.info(f"Executing download and match strategy for {cat_name1} vs {cat_name2} (downloading: {which_to_download})")
+
+        config1_mod = config1.copy()
+        config2_mod = config2.copy()
+
+        # Helper function to download a single catalogue
+        def download_remote_catalogue(config: Dict[str, Any]) -> Optional[pd.DataFrame]:
+            remote_cat_name = config.get("_catalogue_name")
+            archive_name = config.get("_archive_name")
+            service_id = config.get("_service_id")
+            access_id = config.get("access_identifier") # Table name
+
+            logger.info(f"Attempting to download remote catalogue: {remote_cat_name} ({archive_name}/{service_id}/{access_id})")
+            if not all([archive_name, service_id, access_id]):
+                logger.error(f"Missing config details for downloading {remote_cat_name}.")
+                return None
+
+            try:
+                # Connect to TAP service (reusing creation helper for validation/connection)
+                tap_service, service_conf = self._connect_tap_for_creation(archive_name, service_id)
+                # TODO: Enhance query? Select default columns? Cone search if params available?
+                # For now, download the whole table. WARNING: Can be very large!
+                # Select default columns if available, otherwise *
+                cols_to_select = config.get("default_columns")
+                select_str = ", ".join([f'"{c}"' for c in cols_to_select]) if cols_to_select else "*"
+                adql_query = f"SELECT {select_str} FROM {access_id}"
+                logger.warning(f"Executing potentially large download query: {adql_query}")
+
+                # Execute using standard TAP query function, pass retry/timeout params
+                download_df = execute_tap_query(tap_service, adql_query, **params)
+                logger.info(f"Successfully downloaded {len(download_df)} rows for {remote_cat_name}.")
+                return download_df
+            except (CrossMatchError, TapError, ConnectionError, Timeout, RequestException) as e:
+                logger.error(f"Failed to download remote catalogue {remote_cat_name}: {e}", exc_info=True)
+                # Raise specific error indicating download failure
+                raise CrossMatchError(f"Failed to download remote catalogue {remote_cat_name}: {e}") from e
+            except Exception as e:
+                logger.error(f"Unexpected error downloading {remote_cat_name}: {e}", exc_info=True)
+                raise CrossMatchError(f"Unexpected error downloading {remote_cat_name}: {e}") from e
+
+        try:
+            # --- Download necessary catalogues ---
+            if which_to_download == config1.get("_catalogue_name") or which_to_download == "both":
+                df1 = download_remote_catalogue(config1_mod)
+                if df1 is None: return pd.DataFrame() # Error already logged by helper
+                # Update config to represent the local DataFrame
+                config1_mod["_input_dataframe"] = df1
+                config1_mod["access_method"] = "file_system" # Treat as local now
+                config1_mod.pop("_input_path", None) # Remove path if it existed
+
+            if which_to_download == config2.get("_catalogue_name") or which_to_download == "both":
+                df2 = download_remote_catalogue(config2_mod)
+                if df2 is None: return pd.DataFrame()
+                config2_mod["_input_dataframe"] = df2
+                config2_mod["access_method"] = "file_system"
+                config2_mod.pop("_input_path", None)
+
+            # --- Perform Local Match ---
+            logger.info("Download(s) complete. Proceeding with local STILTS match.")
+            # Pass the modified configs and original params to local stilts
+            return self._execute_local_stilts(config1_mod, config2_mod, **params)
+
+        except CrossMatchError:
+             # Re-raise errors from download or stilts execution
+             raise
+        except Exception as e:
+             logger.error(f"Unexpected error during download and match: {e}", exc_info=True)
+             raise CrossMatchError(f"Unexpected error in download and match: {e}") from e
 
     # -----------------------------------------------------------
     # Placeholder Execution Methods
@@ -1316,22 +1492,6 @@ class CrossMatch:
 
     # --- Main Execution Methods ---
 
-    def _execute_download_and_match(
-        self, config1: Dict[str, Any], config2: Dict[str, Any], **params
-    ) -> pd.DataFrame:
-        cat_name1 = config1.get("_catalogue_name", "input1")
-        cat_name2 = config2.get("_catalogue_name", "input2")
-        logger.info(f"Executing download and match strategy for {cat_name1} and {cat_name2}")
-
-        try:
-            # Implement download and match logic here
-            # This is a placeholder and should be replaced with the actual implementation
-            # For now, we'll return an empty DataFrame
-            return pd.DataFrame()
-        except Exception as e:
-            logger.error(f"Unexpected error fetching remote catalogue {cat_name1}: {e}")
-            raise CrossMatchError(f"Unexpected error fetching remote catalogue {cat_name1}: {e}") from e
-
     def _execute_remote_tap_chunked_spatial_join(
         self,
         config1: Dict[str, Any],
@@ -1756,9 +1916,18 @@ class CrossMatch:
             self._add_entry_to_config_file(new_catalogue_name, new_entry)
 
             # --- Reload internal config state ---           
-            logger.info("Reloading configuration after adding new entry...")
-            self.__init__(self.config_file)
-            logger.info("Configuration reloaded.")
+            logger.info("Reloading internal configuration state after adding new entry...")
+            self.config = self._load_config() # Reload the raw config dict
+            # Re-populate derived attributes
+            self.archives_config = self.config.get("archives", {})
+            self.catalogues_config = self.config.get("catalogues", {})
+            self.methods_config = self.config.get("crossmatch_methods", {})
+            self.stilts_config = self.config.get("stilts_config", {})
+            # Clear cache as it might be outdated
+            self._catalogue_config_cache = {}
+            # Re-validate (optional, but good practice)
+            self._validate_config()
+            logger.info("Internal configuration state reloaded.")
 
             return True
 
@@ -2006,11 +2175,51 @@ class CrossMatch:
         chunk_input_index: int,
         params: Dict[str, Any]
     ) -> Optional[pd.DataFrame]:
-        """Matches a single chunk against the static catalogue."""
-        # Implement matching logic here
-        # This is a placeholder and should be replaced with the actual implementation
-        # For now, we'll return an empty DataFrame
-        return pd.DataFrame()
+        """Matches a single chunk against the static catalogue using local STILTS."""
+        logger.debug(f"Matching chunk ({len(chunk_df)} rows) against static catalogue ({static_config.get('_catalogue_name')}).")
+
+        if chunk_df.empty:
+            logger.debug("Chunk DataFrame is empty, skipping match.")
+            return pd.DataFrame() # Return empty DF, not None
+
+        # Create temporary configs for the STILTS call
+        # The static config should already contain the loaded DataFrame (_input_dataframe)
+        if "_input_dataframe" not in static_config:
+             logger.error(f"Static catalogue config for '{static_config.get('_catalogue_name')}' missing loaded DataFrame.")
+             # Cannot proceed without the static data loaded
+             return None # Indicate error
+
+        # Create a temporary config for the chunk, making it seem like a DataFrame input
+        chunk_temp_config = {
+            **chunk_config, # Copy original config
+            "_input_dataframe": chunk_df, # Override with the actual chunk data
+            "_input_path": None, # Ensure no path is used
+            "access_method": "file_system", # Mark as local
+        }
+        # Static config is used as is (assuming it has _input_dataframe)
+
+        try:
+            # Determine the order for _execute_local_stilts
+            if chunk_input_index == 1:
+                config1_stilts = chunk_temp_config
+                config2_stilts = static_config
+            else: # chunk_input_index == 2
+                config1_stilts = static_config
+                config2_stilts = chunk_temp_config
+
+            # Execute the match using the existing local STILTS logic
+            # Pass relevant params down
+            result_df = self._execute_local_stilts(config1_stilts, config2_stilts, **params)
+            logger.debug(f"Chunk matched, {len(result_df)} pairs found.")
+            return result_df
+
+        except (CrossMatchError, StiltsError) as e:
+             # Log errors specifically related to matching this chunk
+             logger.warning(f"Failed to match chunk: {e}", exc_info=True)
+             return None # Indicate failure for this chunk
+        except Exception as e:
+             logger.error(f"Unexpected error matching chunk: {e}", exc_info=True)
+             return None # Indicate failure for this chunk
 
     # -----------------------------------------------------------
     # CDS XMatch Local-Remote Strategy
@@ -2019,15 +2228,103 @@ class CrossMatch:
     def _execute_cds_xmatch_local_remote(
         self, config1: Dict[str, Any], config2: Dict[str, Any], **params
     ) -> pd.DataFrame:
-        cat_name1 = config1.get("_catalogue_name", "input1")
-        cat_name2 = config2.get("_catalogue_name", "input2")
-        logger.info(f"Executing CDS XMatch Local-Remote strategy for {cat_name1} and {cat_name2}")
+        """Executes crossmatch using CDS service (astroquery) with a local table."""
+        logger.info(f"Executing CDS XMatch Local-Remote strategy.")
+
+        # Identify local and remote configs
+        if config1.get("access_method") == "file_system":
+            local_config = config1
+            remote_config = config2
+        elif config2.get("access_method") == "file_system":
+            local_config = config2
+            remote_config = config1
+        else:
+            # Should not happen if strategy determination is correct
+            raise CrossMatchError("CDS XMatch strategy requires one local input (file/DataFrame).")
+
+        local_cat_name = local_config.get("_catalogue_name", "local_input")
+        remote_cat_name_conf = remote_config.get("_catalogue_name") # Name from our config
+        remote_cds_name = remote_config.get("access_identifier") # Name expected by CDS service
+        radius_arcsec = params.get("radius_arcsec", 1.0) # Default radius
+
+        logger.info(f"Local input: {local_cat_name}")
+        logger.info(f"Remote CDS catalogue: {remote_cds_name} (Config name: {remote_cat_name_conf})")
+        logger.info(f"Search radius: {radius_arcsec} arcsec")
+
+        if not remote_cds_name:
+            raise CrossMatchError(f"Missing 'access_identifier' (CDS table name) for remote catalogue '{remote_cat_name_conf}'.")
 
         try:
-            # Implement CDS XMatch Local-Remote logic here
-            # This is a placeholder and should be replaced with the actual implementation
-            # For now, we'll return an empty DataFrame
-            return pd.DataFrame()
+            # --- Load Local Data ---
+            local_df = None
+            if "_input_dataframe" in local_config:
+                local_df = local_config["_input_dataframe"]
+            elif "_input_path" in local_config:
+                local_df = self._load_local_catalogue(local_config["_input_path"])
+            else:
+                raise CrossMatchError(f"Could not load local input data for {local_cat_name}")
+
+            if local_df is None or local_df.empty:
+                 logger.warning(f"Local input catalogue {local_cat_name} is empty. Returning empty result.")
+                 return pd.DataFrame()
+
+            # --- Prepare Astropy Table for Upload ---
+            # Ensure required columns exist and get their names from config
+            ra_col = local_config.get("ra_column", "ra")
+            dec_col = local_config.get("dec_column", "dec")
+            if ra_col not in local_df.columns or dec_col not in local_df.columns:
+                 raise CrossMatchError(f"Required columns '{ra_col}' or '{dec_col}' not found in local input {local_cat_name}.")
+
+            try:
+                 # Convert relevant part of DataFrame to Astropy Table
+                 # Only needs RA/Dec for the query? Check astroquery docs.
+                 # It's safer to just convert the whole thing if memory allows.
+                 local_table = Table.from_pandas(local_df)
+                 logger.info(f"Converted local data ({len(local_table)} rows) to Astropy Table for CDS XMatch.")
+            except Exception as e:
+                 raise CrossMatchError(f"Failed to convert local DataFrame to Astropy Table: {e}") from e
+
+            # --- Perform CDS XMatch ---
+            try:
+                logger.info(f"Submitting query to CDS XMatch: {remote_cds_name} vs local table...")
+                # Use the column names from the config
+                # Use default find_mode='best'
+                # TODO: Allow configuring find_mode via params?
+                # Note: astroquery expects radius in arcsec
+                result_table = XMatch.query(
+                    cat1=local_table,
+                    cat2=remote_cds_name,
+                    max_distance=radius_arcsec * u.arcsec,
+                    colRA1=ra_col,
+                    colDec1=dec_col,
+                    # colRA2/colDec2 assumed defaults by CDS for the remote table
+                )
+                logger.info(f"CDS XMatch query completed. Received {len(result_table)} matches.")
+
+            except Exception as e:
+                # Catch potential errors from astroquery (network, service issues, etc.)
+                logger.error(f"CDS XMatch query failed: {e}", exc_info=True)
+                raise CrossMatchError(f"CDS XMatch query failed: {e}") from e
+
+            # --- Process Result ---
+            if result_table is None or len(result_table) == 0:
+                 logger.info("CDS XMatch returned no matches.")
+                 return pd.DataFrame()
+            else:
+                 # Convert result Astropy Table to Pandas DataFrame
+                 try:
+                     result_df = result_table.to_pandas()
+                     # TODO: Consider renaming columns for clarity (e.g., distinguishing cat1/cat2 cols)?
+                     # Astroquery often adds suffixes or prefixes, need to check conventions.
+                     logger.info(f"Converted CDS XMatch result to DataFrame ({len(result_df)} rows).")
+                     return result_df
+                 except Exception as e:
+                     logger.error(f"Failed to convert CDS XMatch result Table to DataFrame: {e}", exc_info=True)
+                     raise CrossMatchError(f"Failed to convert CDS XMatch result: {e}") from e
+
+        except (FileNotFoundError, CrossMatchError, ValueError) as e:
+             logger.error(f"Error during CDS XMatch strategy execution: {e}", exc_info=True)
+             raise # Re-raise specific errors
         except Exception as e:
-            logger.error(f"Unexpected error executing CDS XMatch Local-Remote strategy: {e}")
-            raise CrossMatchError(f"Unexpected error executing CDS XMatch Local-Remote strategy: {e}") from e
+             logger.error(f"Unexpected error executing CDS XMatch strategy: {e}", exc_info=True)
+             raise CrossMatchError(f"Unexpected error in CDS XMatch: {e}") from e
