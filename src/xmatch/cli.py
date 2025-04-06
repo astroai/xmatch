@@ -103,6 +103,35 @@ def main():
         help='Show details about a specific archive structure entry from the config file.'
     )
 
+    # --- Catalogue Creation (New Mode) ---
+    create_group = parser.add_argument_group('Catalogue Creation')
+    create_group.add_argument(
+        '--create-catalogue-entry',
+        metavar='NEW_CAT_NAME',
+        help='Automatically create a new catalogue entry in the config file by querying TAP_SCHEMA.'
+    )
+    create_group.add_argument(
+        '--archive',
+        metavar='ARCHIVE_NAME',
+        help='Specify the archive (must be defined in config) containing the table for --create-catalogue-entry.'
+    )
+    create_group.add_argument(
+        '--access-id',
+        metavar='TABLE_NAME',
+        help='Specify the actual table name/access identifier on the remote service for --create-catalogue-entry.'
+    )
+    create_group.add_argument(
+        '--service-id',
+        metavar='SERVICE_ID',
+        default='tap_service',
+        help='Specify the service ID within the archive (default: tap_service) for --create-catalogue-entry.'
+    )
+    create_group.add_argument(
+        '--description',
+        metavar='\"Description Text\"',
+        help='Optionally provide a description for the new catalogue entry, overriding TAP_SCHEMA discovery.'
+    )
+
     # --- Configuration ---
     config_group = parser.add_argument_group('Configuration')
     config_group.add_argument(
@@ -244,15 +273,24 @@ def main():
     ]
     num_info_commands = sum(bool(cmd) for cmd in info_commands_provided) # Count True/non-None values
 
-    is_info_mode = num_info_commands > 0
-    # Assume cross-match mode if no info command is given AND inputs are provided
-    is_potential_xmatch_mode = not is_info_mode and len(args.catalog_inputs) > 0
+    # Check for create mode
+    is_create_mode = args.create_catalogue_entry is not None
 
-    log.debug(f"Info mode: {is_info_mode}, Potential xmatch mode: {is_potential_xmatch_mode}, Num info commands: {num_info_commands}")
+    is_info_mode = num_info_commands > 0 and not is_create_mode # Info mode excludes create mode
+    # Assume cross-match mode if no info/create command is given AND inputs are provided
+    is_potential_xmatch_mode = not is_info_mode and not is_create_mode and len(args.catalog_inputs) > 0
+
+    log.debug(f"Info mode: {is_info_mode}, Create mode: {is_create_mode}, Potential xmatch mode: {is_potential_xmatch_mode}, Num info commands: {num_info_commands}")
 
     # --- Validate Arguments Based on Mode ---
     if num_info_commands > 1:
         parser.error("Please specify only one informational command (--list-*, --describe-*) at a time.")
+    if is_info_mode and is_create_mode:
+        parser.error("Cannot combine informational commands with --create-catalogue-entry.")
+    if is_create_mode and len(args.catalog_inputs) > 0:
+        parser.error("Catalogue inputs should not be provided with --create-catalogue-entry.")
+    if is_create_mode and (not args.archive or not args.access_id):
+        parser.error("--archive and --access-id are required when using --create-catalogue-entry.")
 
     # --- Execute Action ---
     try:
@@ -335,6 +373,24 @@ def main():
                      print_dict_details(cross_matcher.archives_config[archive_name])
 
             sys.exit(0) # Exit cleanly after info command
+
+        elif is_create_mode:
+            log.info(f"--- Creating Catalogue Entry: {args.create_catalogue_entry} ---")
+            # Call the new method on the CrossMatch instance
+            # This method will handle querying TAP_SCHEMA and updating the YAML file
+            success = cross_matcher.create_catalogue_entry(
+                new_catalogue_name=args.create_catalogue_entry,
+                archive_name=args.archive,
+                access_identifier=args.access_id,
+                service_id=args.service_id,
+                description_override=args.description
+            )
+            if success:
+                log.info(f"Successfully created entry '{args.create_catalogue_entry}' in {cross_matcher.config_file}")
+                sys.exit(0)
+            else:
+                log.error(f"Failed to create catalogue entry '{args.create_catalogue_entry}'.")
+                sys.exit(1)
 
         elif is_potential_xmatch_mode:
             # --- Cross-Match Mode ---

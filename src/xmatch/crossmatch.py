@@ -22,7 +22,7 @@ from astroquery.xmatch import XMatch # Import CDS XMatch
 from . import auth
 from .stilts import StiltsError, crossmatch_sky, _run_stilts # Import the crossmatch function and _run_stilts
 from .tap import TapError, get_tap_service, execute_tap_query
-from .astro_utils import propagate_coordinates_to_epoch # Import the new function
+from .astro_utils import apply_epoch_propagation # Import the new function
 
 logger = logging.getLogger(__name__)
 
@@ -351,22 +351,45 @@ class CrossMatch:
             raise CrossMatchError(f"Error reading catalogue file {path}: {e}") from e
 
     def _write_catalogue(self, df: pd.DataFrame, output_path: Union[str, Path]):
-        """Writes a DataFrame to a specified output file path (default Parquet)."""
+        """Writes a DataFrame to a specified output file path.
+
+        Supports Parquet (.parquet), FITS (.fits, .fit), and CSV (.csv).
+        Determines format based on file extension.
+        """
         output_path = Path(output_path)
-        logger.info(f"Writing output to: {output_path}")
+        output_format = output_path.suffix.lower()
+        logger.info(f"Writing output ({output_format}) to: {output_path}")
+
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            # TODO: Support other formats like FITS, CSV based on output filename or arg
-            df.to_parquet(output_path, compression="snappy", index=False)
+
+            if output_format == ".parquet":
+                df.to_parquet(output_path, compression="snappy", index=False)
+            elif output_format in [".fits", ".fit"]:
+                try:
+                    # Convert DataFrame to Astropy Table for FITS writing
+                    table = Table.from_pandas(df)
+                    table.write(output_path, format="fits", overwrite=True)
+                except ImportError:
+                    logger.error("Writing FITS requires 'astropy' library.")
+                    raise CrossMatchError("Writing FITS requires 'astropy' library.")
+                except Exception as e:
+                    logger.error(f"Error writing FITS file {output_path}: {e}")
+                    raise CrossMatchError(f"Error writing FITS file {output_path}: {e}") from e
+            elif output_format == ".csv":
+                # TODO: Add options for CSV writing (sep, header, quoting)?
+                df.to_csv(output_path, index=False)
+            else:
+                # Default to Parquet if extension is unknown/unsupported?
+                logger.warning(f"Unsupported output file extension '{output_format}'. Defaulting to Parquet.")
+                # Change extension for the actual write
+                output_path_parquet = output_path.with_suffix(".parquet")
+                logger.warning(f"Actual output file will be: {output_path_parquet}")
+                df.to_parquet(output_path_parquet, compression="snappy", index=False)
+
+            logger.info(f"Successfully wrote {len(df)} rows to {output_path}" + (f" (as {output_path_parquet})" if output_format not in [".parquet", ".fits", ".fit", ".csv"] else ""))
         except MemoryError as e:
              logger.error(f"Memory error writing output file {output_path}. DataFrame might be too large.")
-             raise CrossMatchError(f"Memory error writing {output_path}") from e
-        except IOError as e:
-             logger.error(f"IO error writing output file {output_path}: {e}")
-             raise CrossMatchError(f"IO error writing {output_path}: {e}") from e
-        except Exception as e:
-            logger.error(f"Unexpected error writing output file {output_path}: {e}", exc_info=True)
-            raise CrossMatchError(f"Unexpected error writing output file {output_path}: {e}") from e
 
     def _process_in_parallel(
         self,
@@ -784,61 +807,36 @@ class CrossMatch:
     ) -> pd.DataFrame:
         """Executes a crossmatch using local STILTS (tmatch2 or tmatch1).
 
-        Handles epoch propagation for sky joins if necessary.
-        Handles both sky-based and ID-based joins.
-        Reads input from files or DataFrames.
-        Writes temporary files for STILTS and reads the output.
+        Handles epoch propagation, sky/ID joins, and temporary file management.
+        Uses helper methods for cleaner logic.
         """
         cat_name1 = config1.get("_catalogue_name", "input1")
         cat_name2 = config2.get("_catalogue_name", "input2")
         join_mode = params.get("join_mode", "sky") # 'sky' or 'id'
+        matcher = params.get("matcher") # User-provided matcher hint?
+        target_epoch = None
 
         if join_mode == 'sky':
-            matcher = params.get("matcher") # Get matcher determined by strategy (sky, skyerr, etc.)
+            # Determine matcher if not provided
             if not matcher:
-                 # Auto-detect best matcher based on available error columns in *both* configs
-                 has_err1 = all(col and col in config1 for col in [config1.get("ra_err_column"), config1.get("dec_err_column")])
-                 has_err2 = all(col and col in config2 for col in [config2.get("ra_err_column"), config2.get("dec_err_column")])
-                 has_corr1 = config1.get("corr_column") and config1.get("corr_column") in config1
-                 has_corr2 = config2.get("corr_column") and config2.get("corr_column") in config2
-
-                 if has_err1 and has_err2:
-                     if has_corr1 and has_corr2:
-                         matcher = "skyellipse"
-                         logger.info("Auto-selected matcher: skyellipse (found RA/Dec errors and correlation in both catalogues)")
-                     else:
-                         matcher = "skyerr"
-                         logger.info("Auto-selected matcher: skyerr (found RA/Dec errors in both catalogues)")
-                 else:
-                     matcher = "sky"
-                     logger.info("Auto-selected matcher: sky (required error columns not found in both catalogues)")
-                 params["matcher"] = matcher # Store auto-detected matcher
-
+                 matcher = self._determine_stilts_matcher(config1, config2)
+                 params["matcher"] = matcher # Store resolved matcher in params
             logger.info(f"Executing local STILTS sky match ({matcher}): {cat_name1} vs {cat_name2}")
-            # --- Epoch Propagation (Sky Joins Only) ---
+
+            # Determine target epoch for propagation
             epoch1 = config1.get("epoch")
             epoch2 = config2.get("epoch")
-            target_epoch = epoch1 # Default to epoch1 if epoch2 is missing or they are the same
-            if epoch1 and epoch2 and abs(epoch1 - epoch2) > 0.01: # Use a small tolerance
-                # Basic logic: propagate the one with proper motion to the epoch of the other
-                # Assumes config has necessary pm columns if propagation is feasible
-                pm_cols1 = config1.get("pm_ra_column") and config1.get("pm_dec_column")
-                pm_cols2 = config2.get("pm_ra_column") and config2.get("pm_dec_column")
-
-                if pm_cols1 and not pm_cols2: target_epoch = epoch2 # Propagate 1 -> 2
-                elif pm_cols2 and not pm_cols1: target_epoch = epoch1 # Propagate 2 -> 1
-                elif pm_cols1 and pm_cols2: # Both have PM? Propagate earlier epoch to later?
-                    target_epoch = max(epoch1, epoch2)
-                else: # Neither has PM, no propagation despite epoch difference
-                    target_epoch = None
-
-                if target_epoch:
-                    logger.info(f"Epochs differ ({epoch1} vs {epoch2}), setting target epoch for propagation: {target_epoch}")
-                else:
-                    logger.info(f"Epochs differ but PM columns missing, skipping propagation.")
-            elif epoch1: target_epoch = epoch1
-            elif epoch2: target_epoch = epoch2
-            else: target_epoch = None # No propagation needed if epochs unknown/same
+            if epoch1 and epoch2 and abs(epoch1 - epoch2) > 0.01:
+                can_propagate1 = all(config1.get(k) for k in ["pm_ra_column", "pm_dec_column", "epoch_column", "epoch"])
+                can_propagate2 = all(config2.get(k) for k in ["pm_ra_column", "pm_dec_column", "epoch_column", "epoch"])
+                if can_propagate1 and not can_propagate2: target_epoch = epoch2
+                elif can_propagate2 and not can_propagate1: target_epoch = epoch1
+                elif can_propagate1 and can_propagate2: target_epoch = max(epoch1, epoch2)
+                else: target_epoch = None
+                if target_epoch: logger.info(f"Target epoch for propagation: {target_epoch}")
+                else: logger.info("Epochs differ but propagation not possible/needed.")
+            elif epoch1: target_epoch = epoch1 # Use epoch1 if only it exists
+            elif epoch2: target_epoch = epoch2 # Use epoch2 if only it exists
 
             if target_epoch is None:
                  logger.info("No epoch propagation needed/possible for local STILTS match.")
@@ -848,60 +846,25 @@ class CrossMatch:
             target_epoch = None # Epoch propagation not used for ID joins
 
         with tempfile.TemporaryDirectory(prefix="stilts_match_") as temp_dir:
-            # --- Prepare Input 1 (Handles potential epoch propagation) ---
-            input1_path = None
-            config1_local = config1.copy() # Use local copies for potential modifications
-            if "_input_dataframe" in config1_local:
-                df1 = config1_local["_input_dataframe"]
-                if join_mode == 'sky' and target_epoch and config1_local.get("epoch") and config1_local.get("epoch") != target_epoch:
-                    df1 = self._apply_epoch_propagation(config1_local, df1, target_epoch)
-                input1_path = self._prepare_stilts_input(df1, temp_dir, "input1.parquet")
-                if "ra_propagated" in df1.columns: config1_local['ra_column'] = 'ra_propagated'
-                if "dec_propagated" in df1.columns: config1_local['dec_column'] = 'dec_propagated'
-            elif "_input_path" in config1_local:
-                input1_path_orig = config1_local["_input_path"]
-                input1_path = input1_path_orig
-                if join_mode == 'sky' and target_epoch and config1_local.get("epoch") and config1_local.get("epoch") != target_epoch:
-                    logger.info(f"Loading {cat_name1} from {input1_path_orig} for epoch propagation...")
-                    df1 = self._load_local_catalogue(input1_path_orig)
-                    df1 = self._apply_epoch_propagation(config1_local, df1, target_epoch)
-                    input1_path = self._prepare_stilts_input(df1, temp_dir, "input1_propagated.parquet")
-                    if "ra_propagated" in df1.columns: config1_local['ra_column'] = 'ra_propagated'
-                    if "dec_propagated" in df1.columns: config1_local['dec_column'] = 'dec_propagated'
-                    logger.info(f"Applied epoch propagation to {cat_name1} from file.")
-            else:
-                raise CrossMatchError(f"Could not find input data for {cat_name1}")
-
-            # --- Prepare Input 2 (Handles potential epoch propagation) ---
-            input2_path = None
-            config2_local = config2.copy()
-            if "_input_dataframe" in config2_local:
-                df2 = config2_local["_input_dataframe"]
-                if join_mode == 'sky' and target_epoch and config2_local.get("epoch") and config2_local.get("epoch") != target_epoch:
-                    df2 = self._apply_epoch_propagation(config2_local, df2, target_epoch)
-                input2_path = self._prepare_stilts_input(df2, temp_dir, "input2.parquet")
-                if "ra_propagated" in df2.columns: config2_local['ra_column'] = 'ra_propagated'
-                if "dec_propagated" in df2.columns: config2_local['dec_column'] = 'dec_propagated'
-            elif "_input_path" in config2_local:
-                input2_path_orig = config2_local["_input_path"]
-                input2_path = input2_path_orig
-                if join_mode == 'sky' and target_epoch and config2_local.get("epoch") and config2_local.get("epoch") != target_epoch:
-                    logger.info(f"Loading {cat_name2} from {input2_path_orig} for epoch propagation...")
-                    df2 = self._load_local_catalogue(input2_path_orig)
-                    df2 = self._apply_epoch_propagation(config2_local, df2, target_epoch)
-                    input2_path = self._prepare_stilts_input(df2, temp_dir, "input2_propagated.parquet")
-                    if "ra_propagated" in df2.columns: config2_local['ra_column'] = 'ra_propagated'
-                    if "dec_propagated" in df2.columns: config2_local['dec_column'] = 'dec_propagated'
-                    logger.info(f"Applied epoch propagation to {cat_name2} from file.")
-            else:
-                raise CrossMatchError(f"Could not find input data for {cat_name2}")
-
-            # --- Define Output ---
-            output_path = str(Path(temp_dir) / "output.parquet")
-
-            # --- Execute STILTS ---
             try:
-                # Prepare common STILTS parameters
+                # --- Prepare Inputs ---
+                input1_path, config1_updated = self._prepare_local_stilts_input(
+                    config1, temp_dir, "input1", target_epoch, join_mode, cat_name1
+                )
+                input2_path, config2_updated = self._prepare_local_stilts_input(
+                    config2, temp_dir, "input2", target_epoch, join_mode, cat_name2
+                )
+
+                # --- Define Output ---
+                output_filename = "output.parquet"
+                output_path = str(Path(temp_dir) / output_filename)
+
+                # --- Build STILTS Parameters ---
+                stilts_cmd, stilts_task_params = self._build_stilts_match_params(
+                    config1_updated, config2_updated, params, matcher
+                )
+
+                # Combine with common STILTS parameters
                 stilts_base_params = {
                     "in1": input1_path,
                     "in2": input2_path,
@@ -912,81 +875,256 @@ class CrossMatch:
                     # Pass STILTS config overrides if present
                     "stilts_cmd_base": self.stilts_cmd_base,
                     "java_opts": self.stilts_java_opts,
-                    "tmpdir": self.stilts_tmpdir,
-                    # Pass any other relevant kwargs from the main call?
-                    **params.get("stilts_options", {}) # Allow passing specific STILTS params
+                    "tmpdir": self.stilts_tmpdir or temp_dir, # Use context temp_dir if specific one not set
+                    # Allow passing specific STILTS params
+                    **params.get("stilts_options", {})
                 }
                 stilts_params = {k: v for k, v in stilts_base_params.items() if v is not None}
+                stilts_params.update(stilts_task_params) # Add task-specific params
 
-                stilts_cmd = ""
-
-                if join_mode == "sky":
-                    # --- Sky Join Parameters (tmatch2) ---
-                    stilts_cmd = "tmatch2"
-                    sky_params = {
-                        "matcher": matcher,
-                        "ra1": config1_local["ra_column"], # Use potentially updated column name
-                        "dec1": config1_local["dec_column"],
-                        "ra2": config2_local["ra_column"],
-                        "dec2": config2_local["dec_column"],
-                    }
-                    # Add error columns if needed by matcher
-                    if matcher in ["skyerr", "skyellipse"]:
-                        sky_params["error1"] = config1_local.get("default_pos_error_arcsec") # Default error
-                        sky_params["error2"] = config2_local.get("default_pos_error_arcsec")
-                        if config1_local.get("ra_err_column") and config1_local.get("dec_err_column"):
-                             # Prefer specific error columns if available
-                             sky_params["error1"] = f"hypot({config1_local['ra_err_column']}, {config1_local['dec_err_column']})" # TODO: Check units!
-                        if config2_local.get("ra_err_column") and config2_local.get("dec_err_column"):
-                             sky_params["error2"] = f"hypot({config2_local['ra_err_column']}, {config2_local['dec_err_column']})"
-                    # Add radius for 'sky' matcher, max_error for error matchers
-                    if matcher == 'sky':
-                        radius = params.get("radius_arcsec", 1.0)
-                        sky_params["params"] = radius # tmatch2 'params' is radius for sky
-                    else: # skyerr, skyellipse
-                        max_error = params.get("max_error", 5.0) # Default sigma separation
-                        sky_params["params"] = max_error # tmatch2 'params' is max error
-
-                    stilts_params.update(sky_params)
-                    logger.info(f"Calling STILTS tmatch2 with sky params: {sky_params}")
-
-                elif join_mode == "id":
-                    # --- ID Join Parameters (tmatch1) ---
-                    stilts_cmd = "tmatch1" # Use tmatch1 for single-column value matching
-                    join_keys = params.get("join_keys")
-                    if not join_keys or 'cat1' not in join_keys or 'cat2' not in join_keys:
-                         raise ValueError("Missing or invalid 'join_keys' for local ID join.")
-                    id_params = {
-                        "values1": join_keys['cat1'],
-                        "values2": join_keys['cat2'],
-                        # 'matcher' for tmatch1 is usually 'exact' or similar, but defaults work
-                    }
-                    stilts_params.update(id_params)
-                    logger.info(f"Calling STILTS tmatch1 with ID params: {id_params}")
-
-                else:
-                    raise ValueError(f"Invalid join_mode '{join_mode}' for local STILTS.")
-
-                # Execute STILTS using the generic runner
+                # --- Execute STILTS ---
                 _run_stilts(stilts_cmd, stilts_params)
 
                 # --- Read Result ---
                 logger.info(f"STILTS {stilts_cmd} completed. Reading result from {output_path}")
+                # Check if output file exists and is not empty before reading
+                if not Path(output_path).exists() or Path(output_path).stat().st_size == 0:
+                     logger.warning(f"STILTS output file {output_filename} is missing or empty.")
+                     return pd.DataFrame() # Return empty DataFrame
+
                 result_df = pd.read_parquet(output_path)
                 logger.info(f"Successfully read {len(result_df)} rows from STILTS output.")
                 return result_df
 
             except StiltsError as e:
                 logger.error(f"STILTS execution failed: {e}", exc_info=True)
-                raise
+                raise # Re-raise StiltsError
             except FileNotFoundError as e:
                 logger.error(f"Input/Output file not found during STILTS execution: {e}")
                 raise CrossMatchError(f"File not found: {e}") from e
+            except ValueError as e:
+                 # Catch specific ValueErrors from param building etc.
+                 logger.error(f"Parameter or configuration error during local STILTS: {e}", exc_info=True)
+                 raise CrossMatchError(f"Parameter error: {e}") from e
             except Exception as e:
-                logger.error(f"Unexpected error during STILTS execution: {e}", exc_info=True)
-                raise CrossMatchError(f"Unexpected STILTS error: {e}") from e
+                logger.error(f"Unexpected error during local STILTS execution: {e}", exc_info=True)
+                raise CrossMatchError(f"Unexpected local STILTS error: {e}") from e
 
-    def _prepare_stilts_input(self, df: pd.DataFrame, temp_dir: str, filename: str) -> str:
+    def _prepare_local_stilts_input(
+        self,
+        config: Dict[str, Any],
+        temp_dir: str,
+        input_suffix: str,
+        target_epoch: Optional[float],
+        join_mode: str,
+        catalogue_name: str
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Prepares a single input for local STILTS.
+
+        Loads data (if path), applies epoch propagation (if needed),
+        saves to a temporary file, and returns the file path and potentially
+        updated configuration (with propagated RA/Dec columns).
+
+        Args:
+            config: The input catalogue configuration.
+            temp_dir: The temporary directory path.
+            input_suffix: Suffix for the temporary file (e.g., 'input1.parquet').
+            target_epoch: The target epoch for propagation (if applicable).
+            join_mode: 'sky' or 'id'.
+            catalogue_name: Name for logging.
+
+        Returns:
+            Tuple: (path_to_temp_file, updated_config_dict)
+
+        Raises:
+            CrossMatchError: If data loading, propagation, or writing fails.
+        """
+        config_local = config.copy()
+        input_df = None
+        propagated = False
+        error_col_added = None # Track name of added error column
+
+        # --- Load or get DataFrame ---
+        if "_input_dataframe" in config_local:
+            input_df = config_local["_input_dataframe"].copy() # Copy to avoid modifying original DF
+        elif "_input_path" in config_local:
+            input_path_orig = config_local["_input_path"]
+            logger.debug(f"Loading {catalogue_name} from {input_path_orig} for STILTS prep...")
+            input_df = self._load_local_catalogue(input_path_orig)
+        else:
+            raise CrossMatchError(f"Could not find input data (DataFrame or path) for {catalogue_name}")
+
+        if input_df is None or input_df.empty:
+            logger.warning(f"Input {catalogue_name} is empty. Creating empty temp file.")
+            input_df = pd.DataFrame()
+        else:
+            # --- Apply Epoch Propagation (if needed) ---
+            if join_mode == 'sky' and target_epoch and config_local.get("epoch") and config_local.get("epoch") != target_epoch:
+                try:
+                    input_df = apply_epoch_propagation(input_df, target_epoch, config_local, catalogue_name)
+                    propagated = True
+                    # Update config with propagated column names if needed
+                    if "ra_propagated" in input_df.columns: config_local['ra_column'] = 'ra_propagated'
+                    if "dec_propagated" in input_df.columns: config_local['dec_column'] = 'dec_propagated'
+                except ValueError as e:
+                    raise CrossMatchError(f"Epoch propagation failed for {catalogue_name}: {e}") from e
+
+            # --- Calculate STILTS Position Error Column (if needed) ---
+            ra_err_col = config_local.get("ra_err_column")
+            dec_err_col = config_local.get("dec_err_column")
+            if ra_err_col and dec_err_col:
+                if ra_err_col in input_df.columns and dec_err_col in input_df.columns:
+                    # Get units, default to arcsec with warning
+                    ra_unit_str = config_local.get("ra_err_unit")
+                    dec_unit_str = config_local.get("dec_err_unit")
+                    if not ra_unit_str:
+                        logger.warning(f"Unit key 'ra_err_unit' missing for {catalogue_name}, assuming arcsec for column '{ra_err_col}'.")
+                        ra_unit_str = 'arcsec'
+                    if not dec_unit_str:
+                        logger.warning(f"Unit key 'dec_err_unit' missing for {catalogue_name}, assuming arcsec for column '{dec_err_col}'.")
+                        dec_unit_str = 'arcsec'
+
+                    try:
+                        logger.debug(f"Calculating combined position error for {catalogue_name} from '{ra_err_col}' [{ra_unit_str}] and '{dec_err_col}' [{dec_unit_str}]")
+                        ra_err = input_df[ra_err_col].values * u.Unit(ra_unit_str)
+                        dec_err = input_df[dec_err_col].values * u.Unit(dec_unit_str)
+                        # Calculate hypotenuse, ensuring result is in degrees for STILTS
+                        pos_err_deg = np.hypot(ra_err, dec_err).to(u.deg).value
+                        error_col_added = "_stilts_pos_error_deg" # Define standard name
+                        input_df[error_col_added] = pos_err_deg
+                        config_local["_stilts_pos_error_col"] = error_col_added # Store name in config
+                        logger.debug(f"Added temporary column '{error_col_added}' with error in degrees.")
+                    except (u.UnitConversionError, ValueError, TypeError, KeyError) as e:
+                        logger.error(
+                            f"Failed to calculate/convert position error for {catalogue_name} from columns "
+                            f"'{ra_err_col}', '{dec_err_col}' with units '{ra_unit_str}', '{dec_unit_str}': {e}"
+                        )
+                        # Don't raise error, STILTS call will use default error later
+                        error_col_added = None # Ensure we don't try to use it
+                    except Exception as e:
+                        logger.error(f"Unexpected error calculating position error: {e}", exc_info=True)
+                        error_col_added = None
+                else:
+                    logger.warning(f"Configured error columns '{ra_err_col}' or '{dec_err_col}' not found in DataFrame for {catalogue_name}.")
+            else:
+                logger.debug(f"No RA/Dec error columns configured for {catalogue_name}.")
+
+        # --- Write DataFrame to temporary file ---
+        # Use parquet as it's generally efficient for STILTS
+        filename = f"{catalogue_name}_{input_suffix}.parquet"
+        # Ensure the temporary error column is included if it was added
+        temp_file_path = self._prepare_stilts_input_file(input_df, temp_dir, filename)
+
+        return temp_file_path, config_local
+
+    def _build_stilts_match_params(
+        self,
+        config1: Dict[str, Any],
+        config2: Dict[str, Any],
+        params: Dict[str, Any],
+        matcher: Optional[str]
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Builds the task-specific parameters for STILTS tmatch1 or tmatch2."""
+        join_mode = params.get("join_mode", "sky")
+        stilts_task_params = {}
+        stilts_cmd = ""
+
+        if join_mode == "sky":
+            stilts_cmd = "tmatch2"
+            if not matcher:
+                 raise ValueError("Matcher parameter is required for sky join.")
+
+            sky_params = {
+                "matcher": matcher,
+                "ra1": config1["ra_column"], # Use potentially updated column name
+                "dec1": config1["dec_column"],
+                "ra2": config2["ra_column"],
+                "dec2": config2["dec_column"],
+            }
+            # Add error columns if needed by matcher
+            if matcher in ["skyerr", "skyellipse"]:
+                # Check if pre-calculated error column exists, otherwise use default
+                err_col1 = config1.get("_stilts_pos_error_col")
+                if err_col1 and err_col1 in config1: # Check config AND df (implicitly via creation)
+                    sky_params["error1"] = err_col1
+                    logger.debug(f"Using pre-calculated error column '{err_col1}' for catalogue 1")
+                else:
+                    default_err_arcsec1 = config1.get("default_pos_error_arcsec", 0.1)
+                    sky_params["error1"] = default_err_arcsec1 / 3600.0 # Convert default to degrees
+                    logger.debug(f"Using default pos error {default_err_arcsec1} arcsec (converted to {sky_params['error1']} deg) for catalogue 1")
+
+                err_col2 = config2.get("_stilts_pos_error_col")
+                if err_col2 and err_col2 in config2:
+                    sky_params["error2"] = err_col2
+                    logger.debug(f"Using pre-calculated error column '{err_col2}' for catalogue 2")
+                else:
+                    default_err_arcsec2 = config2.get("default_pos_error_arcsec", 0.1)
+                    sky_params["error2"] = default_err_arcsec2 / 3600.0 # Convert default to degrees
+                    logger.debug(f"Using default pos error {default_err_arcsec2} arcsec (converted to {sky_params['error2']} deg) for catalogue 2")
+
+                # Add correlation if matcher is skyellipse
+                if matcher == "skyellipse":
+                    corr1_col = config1.get("corr_column")
+                    corr2_col = config2.get("corr_column")
+                    if corr1_col and corr2_col:
+                        sky_params["corr1"] = corr1_col
+                        sky_params["corr2"] = corr2_col
+                    else:
+                        logger.warning(f"Matcher is skyellipse but correlation column missing for one/both inputs. STILTS might default/fail.")
+                        # STILTS might default corr to 0 if column arg is just the name
+                        if corr1_col: sky_params["corr1"] = corr1_col
+                        if corr2_col: sky_params["corr2"] = corr2_col
+
+            # Add radius for 'sky' matcher, max_error for error matchers
+            if matcher == 'sky':
+                radius = params.get("radius_arcsec", 1.0)
+                sky_params["params"] = radius # tmatch2 'params' is radius for sky
+            else: # skyerr, skyellipse
+                max_error = params.get("max_error", 5.0) # Default sigma separation
+                sky_params["params"] = max_error # tmatch2 'params' is max error
+
+            stilts_task_params.update(sky_params)
+            logger.info(f"STILTS tmatch2 parameters prepared: {sky_params}")
+
+        elif join_mode == "id":
+            stilts_cmd = "tmatch1" # Use tmatch1 for single-column value matching
+            join_keys = params.get("join_keys")
+            if not join_keys or 'cat1' not in join_keys or 'cat2' not in join_keys:
+                    raise ValueError("Missing or invalid 'join_keys' for local ID join.")
+            id_params = {
+                "values1": join_keys['cat1'],
+                "values2": join_keys['cat2'],
+                # 'matcher' for tmatch1 is usually 'exact' or similar, but defaults work
+            }
+            stilts_task_params.update(id_params)
+            logger.info(f"STILTS tmatch1 parameters prepared: {id_params}")
+
+        else:
+            raise ValueError(f"Invalid join_mode '{join_mode}' for local STILTS.")
+
+        return stilts_cmd, stilts_task_params
+
+    def _determine_stilts_matcher(self, config1: Dict[str, Any], config2: Dict[str, Any]) -> str:
+        """Auto-detects the best STILTS sky matcher based on available error columns."""
+        # Check for necessary error columns in both configs
+        has_err1 = all(config1.get(k) for k in ["ra_err_column", "dec_err_column"])
+        has_err2 = all(config2.get(k) for k in ["ra_err_column", "dec_err_column"])
+        has_corr1 = bool(config1.get("corr_column")) # Just check existence
+        has_corr2 = bool(config2.get("corr_column"))
+
+        if has_err1 and has_err2:
+            if has_corr1 and has_corr2:
+                matcher = "skyellipse"
+                logger.info("Auto-selected matcher: skyellipse (found RA/Dec errors and correlation in both catalogues)")
+            else:
+                matcher = "skyerr"
+                logger.info("Auto-selected matcher: skyerr (found RA/Dec errors in both catalogues)")
+        else:
+            matcher = "sky"
+            logger.info("Auto-selected matcher: sky (required error columns not found in both catalogues)")
+        return matcher
+
+    def _prepare_stilts_input_file(self, df: pd.DataFrame, temp_dir: str, filename: str) -> str:
         """Writes a DataFrame to a temporary file (Parquet) for STILTS."""
         temp_file_path = Path(temp_dir) / filename
         logger.debug(f"Preparing STILTS input file: {temp_file_path}")
@@ -1006,343 +1144,206 @@ class CrossMatch:
             logger.error(f"Failed to write temporary input file {temp_file_path}: {e}", exc_info=True)
             raise CrossMatchError(f"Unexpected error writing temporary file {temp_file_path}: {e}") from e
 
-    def _apply_epoch_propagation(
-        self, config: Dict[str, Any], df: pd.DataFrame, target_epoch: float
-    ) -> pd.DataFrame:
-        """Applies epoch propagation if configuration and data allow."""
-        ra_col = config.get("ra_column")
-        dec_col = config.get("dec_column")
-        pm_ra_col = config.get("pm_ra_column")
-        pm_dec_col = config.get("pm_dec_column")
-        epoch_col = config.get("epoch_column") # The column containing the source epoch
-        current_epoch = config.get("epoch") # The reference epoch from YAML
+    def _prepare_remote_join_columns(
+        self,
+        config1: Dict[str, Any],
+        config2: Dict[str, Any],
+        alias1: str,
+        alias2: str,
+        params: Dict[str, Any],
+    ) -> str:
+        """Prepares the SELECT clause for a remote ADQL JOIN query."""
+        join_mode = params.get("join_mode", "sky")
 
-        if not all([ra_col, dec_col, pm_ra_col, pm_dec_col, epoch_col, current_epoch]):
-            logger.warning(
-                f"Catalogue {config.get('_catalogue_name')} lacks required columns/config "
-                f"(ra/dec/pm_ra/pm_dec/epoch_col/epoch) for propagation. Using original coordinates."
-            )
-            # Add ra_propagated/dec_propagated columns with original values
-            df_out = df.copy()
-            if ra_col and "ra_propagated" not in df_out.columns:
-                 df_out["ra_propagated"] = df_out[ra_col]
-            if dec_col and "dec_propagated" not in df_out.columns:
-                 df_out["dec_propagated"] = df_out[dec_col]
-            return df_out
-
-        # Add the fixed epoch from YAML as a column if epoch_col doesn't exist in df
-        if epoch_col not in df.columns:
-            logger.debug(f"Adding fixed epoch column '{epoch_col}' = {current_epoch} for propagation.")
-            df[epoch_col] = current_epoch
-
-        logger.info(
-            f"Applying epoch propagation for {config.get('_catalogue_name')} to target epoch {target_epoch}"
-        )
-        try:
-            propagated_df = propagate_coordinates_to_epoch(
-                df,
-                ra_col=ra_col,
-                dec_col=dec_col,
-                pm_ra_col=pm_ra_col,
-                pm_dec_col=pm_dec_col,
-                epoch_col=epoch_col, # Use the column name specified in YAML
-                target_epoch=target_epoch,
-            )
-            return propagated_df
-        except (KeyError, ValueError, TypeError) as e:
-             logger.error(f"Error applying epoch propagation: {e}", exc_info=True)
-             raise CrossMatchError(f"Error during epoch propagation: {e}") from e
-        except Exception as e:
-            logger.error(f"Unexpected error during epoch propagation: {e}", exc_info=True)
-            raise CrossMatchError(f"Unexpected error during epoch propagation: {e}") from e
-
-    def _execute_remote_join_match(
-        self, config1: Dict[str, Any], config2: Dict[str, Any], **params
-    ) -> pd.DataFrame:
-        """Executes a JOIN query on a remote TAP service when both catalogues reside there
-           and the service supports ADQL JOIN. Handles both spatial and ID-based joins.
-        """
-        join_mode = params.get("join_mode", "sky") # Default to sky join if not specified
-        logger.info(f"Executing Remote TAP JOIN strategy (Mode: {join_mode})...")
-
-        cat_name1 = config1.get("_catalogue_name", "input1")
-        cat_name2 = config2.get("_catalogue_name", "input2")
-
-        # --- Get Service and Table Info ---
-        # Assumes _determine_strategy confirmed they are on the same joinable service
-        service_config = config1 # Configs should be the same service
-        tap_url = service_config.get("access_url")
-        if not tap_url:
-            raise CrossMatchError(f"Missing access_url in service config for remote join.")
-
-        table1 = config1.get("access_identifier")
-        table2 = config2.get("access_identifier")
-        if not table1 or not table2:
-             raise CrossMatchError("Missing access_identifier for one or both catalogues in remote join.")
-
-
-        # --- Define Table Aliases ---
-        alias1 = "t1"
-        alias2 = "t2"
-
-        # --- Column Selection ---
         # Get default columns or essential columns if defaults aren't specified
-        cols1_req_raw = params.get("columns1") or config1.get("default_columns") or [config1.get("ra_column"), config1.get("dec_column")]
-        cols2_req_raw = params.get("columns2") or config2.get("default_columns") or [config2.get("ra_column"), config2.get("dec_column")]
+        cols1_req_raw = params.get("columns1") or config1.get("default_columns")
+        cols2_req_raw = params.get("columns2") or config2.get("default_columns")
 
         # Ensure essential columns are always included
         essential_cols1 = {config1.get(c) for c in ["ra_column", "dec_column", "ra_err_column", "dec_err_column", "pm_ra_column", "pm_dec_column", "epoch_column"] if config1.get(c)}
         essential_cols2 = {config2.get(c) for c in ["ra_column", "dec_column", "ra_err_column", "dec_err_column", "pm_ra_column", "pm_dec_column", "epoch_column"] if config2.get(c)}
-
-        cols1_req = list(set(cols1_req_raw) | essential_cols1)
-        cols2_req = list(set(cols2_req_raw) | essential_cols2)
 
         # Ensure required join columns are selected if doing ID join
         if join_mode == 'id':
             join_keys = params.get('join_keys', {})
             id_col1 = join_keys.get('cat1')
             id_col2 = join_keys.get('cat2')
-            if id_col1 and id_col1 not in cols1_req: cols1_req.append(id_col1)
-            if id_col2 and id_col2 not in cols2_req: cols2_req.append(id_col2)
+            if id_col1: essential_cols1.add(id_col1)
+            if id_col2: essential_cols2.add(id_col2)
 
-        # Remove None values from column lists
+        # Combine requested and essential, remove None
+        cols1_req = list((set(cols1_req_raw) if cols1_req_raw else set()) | essential_cols1)
+        cols2_req = list((set(cols2_req_raw) if cols2_req_raw else set()) | essential_cols2)
         cols1_req = [c for c in cols1_req if c is not None]
         cols2_req = [c for c in cols2_req if c is not None]
 
         # Format column selection with aliases to avoid name clashes
-        cols1_select = [f'{alias1}."{c}" AS {alias1}_{c}' for c in set(cols1_req)] # Use set to deduplicate
-        cols2_select = [f'{alias2}."{c}" AS {alias2}_{c}' for c in set(cols2_req)]
+        cols1_select = [f'{alias1}.\"{c}\" AS {alias1}_{c}' for c in set(cols1_req)] # Use set to deduplicate
+        cols2_select = [f'{alias2}.\"{c}\" AS {alias2}_{c}' for c in set(cols2_req)]
 
         # Handle SELECT * case if requested (though aliasing is safer)
-        if "*" in cols1_req_raw: cols1_select = [f"{alias1}.*"]
-        if "*" in cols2_req_raw: cols2_select = [f"{alias2}.*"]
+        # Note: SELECT * might override careful aliasing.
+        select_items = []
+        if "*" in (cols1_req_raw or []): select_items.append(f"{alias1}.*")
+        else: select_items.extend(cols1_select)
+        if "*" in (cols2_req_raw or []): select_items.append(f"{alias2}.*")
+        else: select_items.extend(cols2_select)
 
-        select_clause = ", ".join(cols1_select + cols2_select)
+        select_clause = ", ".join(select_items)
         if not select_clause:
             # Default to selecting all if specific columns failed resolution?
             logger.warning("Could not determine columns to SELECT, defaulting to SELECT *.")
             select_clause = f"{alias1}.*, {alias2}.*"
 
-        # --- Epoch Propagation Check (Only relevant for Sky Joins) ---
-        propagate_gaia_epoch = False
-        target_epoch = None
-        if join_mode == 'sky':
-            epoch1 = config1.get("epoch")
-            epoch2 = config2.get("epoch")
-            is_gaia_service = config1.get("_archive_name") == "esa_gaia" # Assumes same archive
+        return select_clause
 
-            if epoch1 and epoch2 and abs(epoch1 - epoch2) > 0.1: # Check if epochs differ significantly
-                logger.warning(f"Epochs differ ({epoch1} vs {epoch2}) for remote TAP JOIN.")
-                if is_gaia_service:
-                    # Check if necessary columns for EPOCH_PROP are likely available
-                    gaia_cols_present1 = all(config1.get(c) for c in ["ra_column", "dec_column", "pm_ra_column", "pm_dec_column", "epoch_column", "parallax_column"])
-                    if gaia_cols_present1:
-                        propagate_gaia_epoch = True
-                        target_epoch = epoch2 # Target epoch is epoch of table 2
-                        logger.info(f"Attempting ADQL EPOCH_PROP for {cat_name1} to target epoch {target_epoch} (Gaia TAP detected).")
-                    else:
-                         logger.warning("Gaia TAP detected, but catalogue 1 missing required columns (pmra, pmdec, parallax, ref_epoch) for EPOCH_PROP.")
-                else:
-                    logger.warning("Epochs differ, but service is not Gaia TAP or required columns missing. Cannot apply epoch propagation in ADQL query.")
-            else:
-                logger.info("Epochs are the same or not specified for both catalogues, no ADQL epoch propagation needed.")
-
-
-        # --- Construct ADQL JOIN ON Clause ---
-        adql_join_type = params.get("join_type", "INNER").upper() # e.g., INNER, LEFT, RIGHT
+    def _build_remote_adql_join_clause(
+        self,
+        config1: Dict[str, Any],
+        config2: Dict[str, Any],
+        alias1: str,
+        alias2: str,
+        params: Dict[str, Any],
+    ) -> str:
+        """Builds the ADQL JOIN ON clause based on join mode and parameters."""
+        join_mode = params.get("join_mode", "sky")
         join_on_clause = ""
 
         if join_mode == "sky":
-            # --- Spatial Join ---
-            radius_arcsec = params.get("radius_arcsec", 1.0) # Use resolved radius
+            radius_arcsec = params.get("radius_arcsec", 1.0)
             if radius_arcsec <= 0:
                 raise ValueError("Search radius must be positive for sky join.")
             radius_deg = radius_arcsec / 3600.0
 
-            # Get RA/Dec columns from config (already fetched above)
-            ra_col1 = config1.get("ra_column")
-            dec_col1 = config1.get("dec_column")
-            ra_col2 = config2.get("ra_column")
-            dec_col2 = config2.get("dec_column")
-            if not ra_col1 or not dec_col1 or not ra_col2 or not dec_col2:
-                 raise CrossMatchError("Missing RA/Dec column configuration for spatial join.")
+    # --- Chunked Execution Helpers ---
 
-            ra_expr1 = f'{alias1}."{ra_col1}"'
-            dec_expr1 = f'{alias1}."{dec_col1}"'
+    def _setup_healpix_chunking(
+        self,
+        nside: int,
+        center_coord: SkyCoord,
+        search_radius: u.Quantity
+    ) -> Tuple[HEALPix, np.ndarray]:
+        """Initializes HEALPix and finds pixels within the search cone."""
+        try:
+            hp = HEALPix(nside=nside, order="nested", frame="icrs")
+            # Add buffer to cone search radius for robust pixel coverage
+            buffer = hp.pixel_resolution.to(u.arcsec) * 1.5
+            logger.debug(f"Using search radius {search_radius.arcsec:.2f} + buffer {buffer.arcsec:.2f} arcsec for pixel identification.")
+            pixels = hp.cone_search_skycoord(center_coord, search_radius + buffer)
+            logger.info(f"Identified {len(pixels)} HEALPix pixels (nside={nside}) covering the search area + buffer.")
+            if len(pixels) == 0:
+                 logger.warning("No HEALPix pixels found in the search cone.")
+                 # Return empty pixel array, caller should handle
+            return hp, pixels
+        except ImportError:
+            logger.error("'astropy-healpix' library is required for chunked matching.")
+            raise CrossMatchError(
+                "'astropy-healpix' library is required for this strategy. Please install it."
+            )
+        except Exception as e:
+            logger.error(f"Error during HEALPix pixel determination: {e}", exc_info=True)
+            raise CrossMatchError(f"Error during HEALPix pixel determination: {e}") from e
 
-            # Handle epoch propagation complexity (as before) - disable for now
-            if propagate_gaia_epoch:
-                 logger.warning("ADQL EPOCH_PROP usage within JOIN ON clause is complex/non-standard. Falling back to using original coordinates.")
-                 propagate_gaia_epoch = False # Disable propagation due to complexity
+    def _get_healpix_adql_box(self, hp: HEALPix, pix_id: int) -> Optional[str]:
+        """Calculates the ADQL BOX string for a given HEALPix pixel."""
+        try:
+            corners = hp.boundaries_skycoord([pix_id])[0]
+            # Use degrees directly for ADQL
+            ra_corners = corners.ra.wrap_at(180 * u.deg).deg
+            dec_corners = corners.dec.deg
+            ra_min, ra_max = np.min(ra_corners), np.max(ra_corners)
+            dec_min, dec_max = np.min(dec_corners), np.max(dec_corners)
 
-            # Spatial join clause using DISTANCE
-            join_on_clause = f'DISTANCE({ra_expr1}, {dec_expr1}, {alias2}."{ra_col2}", {alias2}."{dec_col2}") <= {radius_deg}'
-            logger.info(f"Constructing ADQL spatial JOIN with radius {radius_arcsec} arcsec ({radius_deg} deg).")
+            # ADQL BOX: center and width/height
+            # Handle RA wrap-around: If min > max after wrap_at(180), it crosses 0/360.
+            # Center calculation needs care. Width is simpler: max - min + 360 if wrapped.
+            ra_cen = (ra_min + ra_max) / 2.0
+            if ra_min > ra_max: # Wrapped around 180
+                ra_cen = (ra_min + ra_max + 360) / 2.0
+                # Normalize center back to [0, 360) or (-180, 180)? ADQL usually takes 0-360.
+                ra_cen = ra_cen % 360
 
-        elif join_mode == "id":
-            # --- ID-based Join ---
-            join_keys = params.get("join_keys")
-            if not join_keys or not isinstance(join_keys, dict) or 'cat1' not in join_keys or 'cat2' not in join_keys:
-                 raise ValueError("Missing or invalid 'join_keys' dictionary in params for ID join. Expected {'cat1': 'col_name_1', 'cat2': 'col_name_2'}.")
-            id_col1 = join_keys['cat1']
-            id_col2 = join_keys['cat2']
-            # ID join clause (ensure proper quoting for identifiers)
-            join_on_clause = f'{alias1}."{id_col1}" = {alias2}."{id_col2}"'
-            logger.info(f"Constructing ADQL ID JOIN on {alias1}.\"{id_col1}\" = {alias2}.\"{id_col2}\"")
-            # Cannot do epoch propagation for ID joins
-            if propagate_gaia_epoch:
-                logger.warning("Epoch propagation is not applicable for ID-based joins. Ignoring.")
-                propagate_gaia_epoch = False
+            dec_cen = (dec_min + dec_max) / 2.0
+            width = ra_max - ra_min
+            if width < 0: width += 360 # Adjust width for wrap
+            height = dec_max - dec_min
 
-        else:
-            raise ValueError(f"Unsupported join_mode: '{join_mode}'. Must be 'sky' or 'id'.")
+            # Check for degenerate pixels (zero width/height)
+            if width <= 1e-9 or height <= 1e-9: # Use small tolerance for float issues
+                logger.warning(f"Skipping degenerate pixel {pix_id} (width={width:.2e}, height={height:.2e}).")
+                return None
 
-        # --- Final ADQL Query ---
+            # Ensure positive width/height for ADQL BOX
+            width = max(width, 1e-9)
+            height = max(height, 1e-9)
+
+            adql_box = f"BOX('ICRS', {ra_cen}, {dec_cen}, {width}, {height})"
+            logger.debug(f"Pixel {pix_id} ADQL Box: {adql_box}")
+            return adql_box
+        except Exception as e:
+            logger.error(f"Error calculating ADQL BOX for pixel {pix_id}: {e}", exc_info=True)
+            # Let caller skip this pixel
+            return None
+
+    def _build_chunked_tap_join_adql(
+        self,
+        select_clause: str,
+        join_on_clause: str,
+        table1: str, table2: str,
+        alias1: str, alias2: str,
+        adql_box_clause: str,
+        ra_col1: str, dec_col1: str,
+        ra_col2: str, dec_col2: str,
+        join_type: str
+    ) -> str:
+        """Constructs the full ADQL query for a single TAP spatial join chunk."""
+        # WHERE clause requires both points to be within the ADQL box
+        where_clause = (
+            f"CONTAINS(POINT('ICRS', {alias1}.\"{ra_col1}\", {alias1}.\"{dec_col1}\"), {adql_box_clause}) = 1"
+            f" AND CONTAINS(POINT('ICRS', {alias2}.\"{ra_col2}\", {alias2}.\"{dec_col2}\"), {adql_box_clause}) = 1"
+        )
+        # Note: Some TAP services might prefer INTERSECTS(REGION, BOX)
+        # Note: Applying spatial constraint in WHERE after JOIN might be slow on some systems.
+
         adql_query = f"""
         SELECT {select_clause}
         FROM {table1} AS {alias1}
-        {adql_join_type} JOIN {table2} AS {alias2}
+        {join_type} JOIN {table2} AS {alias2}
         ON {join_on_clause}
+        WHERE {where_clause}
         """
+        return adql_query
 
-        logger.info(f"Executing ADQL JOIN on {tap_url}:\n{adql_query}")
-
-        # --- Execute Query ---
-        try:
-            # Get authenticated TAP service if needed
-            auth_info = self.auth_config.get(archive1) # Use archive name
-            tap_kwargs = {}
-            if auth_info:
-                tap_kwargs["user"] = auth_info.get("user")
-                tap_kwargs["password"] = auth_info.get("password")
-
-            tap_service = get_tap_service(tap_url, **tap_kwargs)
-
-            # Execute query using tap.py function (handles retries etc.)
-            # TODO: Make retry_delay and timeout configurable via params?
-            results_df = execute_tap_query(
-                 tap_service, adql_query, retry_delay=60, timeout=600, verbose=True
-            )
-
-
-            logger.info(f"ADQL JOIN completed, received {len(results_df)} rows.")
-            if results_df is None or results_df.empty:
-                logger.warning(f"ADQL JOIN returned 0 rows for {cat_name1} x {cat_name2}.")
-                return pd.DataFrame()  # Return empty DataFrame
-
-            return results_df
-
-        except (TapError, ConnectionError, Timeout) as e:
-            logger.error(f"Network or TAP error during remote JOIN for {cat_name1} x {cat_name2}: {e}", exc_info=True)
-            raise # Re-raise TAP/network errors
-        except Exception as e:
-            # Catch potential ADQL syntax errors etc.
-            logger.error(
-                f"Unexpected error executing ADQL JOIN for {cat_name1} x {cat_name2}: {e}", exc_info=True
-            )
-            raise CrossMatchError(f"Failed TAP JOIN for {cat_name1} x {cat_name2}: {e}") from e
+    # --- Main Execution Methods ---
 
     def _execute_download_and_match(
         self, config1: Dict[str, Any], config2: Dict[str, Any], **params
     ) -> pd.DataFrame:
-        """Downloads remote catalogue(s) and then performs a local match."""
-        logger.info("Executing Download & Local Match strategy...")
         cat_name1 = config1.get("_catalogue_name", "input1")
         cat_name2 = config2.get("_catalogue_name", "input2")
-        config1_local = config1.copy()  # Create copies to modify for local execution
-        config2_local = config2.copy()
-
-        is_remote1 = config1.get("access_method") != "file_system"
-        is_remote2 = config2.get("access_method") != "file_system"
+        logger.info(f"Executing download and match strategy for {cat_name1} and {cat_name2}")
 
         try:
-            # Extract potential spatial constraints from params for download filtering
-            cone_params = None
-            box_params = None # Add box params possibility
-            if params.get("join_mode") == "sky" and all(k in params for k in ["ra", "dec", "radius_arcsec"]):
-                cone_params = {
-                    "ra": params["ra"],
-                    "dec": params["dec"],
-                    "radius_deg": params["radius_arcsec"] / 3600.0
-                }
-                logger.info(f"Found spatial constraints (cone) in params for download filtering: {cone_params}")
-            # TODO: Add logic to extract box_params if needed
-
-            # --- Download Remote Catalogues (if needed) ---
-            if is_remote1:
-                logger.info(f"Downloading remote catalogue 1: {cat_name1}")
-                # Pass spatial constraints if available
-                remote_df1 = self._fetch_remote_catalogue(
-                    config1_local,
-                    columns=params.get("columns1"),
-                    cone_params=cone_params,
-                    box_params=box_params # Pass box params too
-                )
-                if remote_df1 is None or remote_df1.empty:
-                    logger.warning(
-                        f"Failed to download or received empty data for remote catalogue: {cat_name1}. Result will be empty."
-                    )
-                    return pd.DataFrame()
-                # Update config to point to the downloaded DataFrame
-                config1_local["_input_dataframe"] = remote_df1
-                config1_local["access_method"] = "file_system"  # Mark as local now
-                config1_local.pop("_input_path", None)  # Remove original path if any
-                logger.info(f"Successfully downloaded {len(remote_df1)} rows for {cat_name1}.")
-
-            if is_remote2:
-                logger.info(f"Downloading remote catalogue 2: {cat_name2}")
-                # Pass spatial constraints if available
-                remote_df2 = self._fetch_remote_catalogue(
-                    config2_local,
-                    columns=params.get("columns2"),
-                    cone_params=cone_params,
-                    box_params=box_params
-                )
-                if remote_df2 is None or remote_df2.empty:
-                     logger.warning(
-                        f"Failed to download or received empty data for remote catalogue: {cat_name2}. Result will be empty."
-                    )
-                     return pd.DataFrame()
-                config2_local["_input_dataframe"] = remote_df2
-                config2_local["access_method"] = "file_system"
-                config2_local.pop("_input_path", None)
-                logger.info(f"Successfully downloaded {len(remote_df2)} rows for {cat_name2}.")
-
-            # --- Execute Local Match ---
-            # Now that required data is local (as DataFrames or files), run local STILTS
-            logger.info("Proceeding with local STILTS match on downloaded/local data.")
-            # _execute_local_stilts handles DataFrames, file paths, and propagation
-            result_df = self._execute_local_stilts(config1_local, config2_local, **params)
-
-            logger.info("Download & Local Match completed.")
-            return result_df
-
-        except (CrossMatchError, TapError, StiltsError, ConnectionError, Timeout, RequestException, FileNotFoundError, ValueError, MemoryError) as e:
-            logger.error(f"Download & Local Match failed: {e}", exc_info=True)
-            # Re-raise specific known errors
-            raise
+            # Implement download and match logic here
+            # This is a placeholder and should be replaced with the actual implementation
+            # For now, we'll return an empty DataFrame
+            return pd.DataFrame()
         except Exception as e:
-            logger.error(f"Unexpected error during Download & Local Match: {e}", exc_info=True)
-            raise CrossMatchError(f"Unexpected error in _execute_download_and_match: {e}") from e
+            logger.error(f"Unexpected error fetching remote catalogue {cat_name1}: {e}")
+            raise CrossMatchError(f"Unexpected error fetching remote catalogue {cat_name1}: {e}") from e
 
-    def _execute_remote_spatial_chunked_match(
+    def _execute_remote_tap_chunked_spatial_join(
         self,
         config1: Dict[str, Any],
         config2: Dict[str, Any],
         nside: int = 32, # Default HEALPix nside for chunking
         **params,
     ) -> pd.DataFrame:
-        """Executes remote-remote match by chunking the sky area using HEALPix.
-
-        Downloads data for each catalogue within each spatial chunk (pixel bounding box)
-        and performs a local STILTS match on the chunks.
-
-        Requires 'ra', 'dec', 'radius_arcsec' in params to define the area.
-        """
+        """Executes remote-remote spatial match using chunked TAP queries."""
         cat_name1 = config1.get("_catalogue_name", "input1")
         cat_name2 = config2.get("_catalogue_name", "input2")
         logger.info(
-            f"Executing Remote Spatial Chunked Match ({cat_name1} vs {cat_name2}) using HEALPix nside={nside}"
+            f"Executing Remote TAP Chunked Spatial JOIN ({cat_name1} vs {cat_name2}) using HEALPix nside={nside}"
         )
 
         # --- Validate and Extract Parameters ---
@@ -1355,112 +1356,420 @@ class CrossMatch:
             search_radius = params["radius_arcsec"] * u.arcsec
         except (ValueError, TypeError, u.UnitConversionError) as e:
             raise CrossMatchError(f"Invalid spatial parameters (ra/dec/radius): {e}") from e
-        # Add a buffer to search radius to account for pixel boundaries? Maybe half pixel size?
-        # Simplified for now.
+
+        # --- Get Service and Table Info ---
+        service_config = config1 # Assumes same service
+        tap_url = service_config.get("access_url")
+        if not tap_url:
+            raise CrossMatchError("Missing access_url in service config for remote chunked join.")
+        archive_name = config1.get("_archive_name") # For auth
+        table1 = config1.get("access_identifier")
+        table2 = config2.get("access_identifier")
+        if not table1 or not table2:
+             raise CrossMatchError("Missing access_identifier for one or both catalogues.")
 
         # --- Determine HEALPix Pixels ---
+        hp, pixels = self._setup_healpix_chunking(nside, center_coord, search_radius)
+        if len(pixels) == 0:
+            return pd.DataFrame()
+
+        # --- Prepare Common Query Parts ---
+        alias1 = "t1"
+        alias2 = "t2"
         try:
-            hp = HEALPix(nside=nside, order="nested", frame="icrs")
-            pixels = hp.cone_search_skycoord(center_coord, search_radius)
-            logger.info(f"Identified {len(pixels)} HEALPix pixels (nside={nside}) covering the search area.")
-            if len(pixels) == 0:
-                 logger.warning("No HEALPix pixels found in the search cone. Returning empty result.")
-                 return pd.DataFrame()
-        except ImportError:
-            logger.error("'astropy-healpix' library is required for chunked matching.")
-            raise CrossMatchError(
-                "'astropy-healpix' library is required for remote_spatial_chunked_match strategy. Please install it."
-            )
-        except Exception as e:
-            logger.error(f"Error during HEALPix pixel determination: {e}", exc_info=True)
-            raise CrossMatchError(f"Error during HEALPix pixel determination: {e}") from e
+            select_clause = self._prepare_remote_join_columns(config1, config2, alias1, alias2, params)
+            # We specifically need the spatial join ON clause here
+            spatial_join_params = {**params, "join_mode": "sky"} # Force sky mode
+            join_on_clause = self._build_remote_adql_join_clause(config1, config2, alias1, alias2, spatial_join_params)
+            adql_join_type = params.get("join_type", "INNER").upper()
+        except (ValueError, CrossMatchError) as e:
+            logger.error(f"Failed to prepare common ADQL query parts: {e}", exc_info=True)
+            raise
+
+        # Required column names for the WHERE clause builder
+        ra_col1 = config1.get("ra_column")
+        dec_col1 = config1.get("dec_column")
+        ra_col2 = config2.get("ra_column")
+        dec_col2 = config2.get("dec_column")
+        if not ra_col1 or not dec_col1 or not ra_col2 or not dec_col2:
+            raise CrossMatchError("Missing RA/Dec column config needed for chunked WHERE clause.")
 
         # --- Process Chunks ---       
         all_results = []
+        # Note: TAP connection is established per query in _execute_tap_join_query helper
+
         for i, pix_id in enumerate(pixels):
             logger.info(f"Processing chunk {i+1}/{len(pixels)} (Pixel ID: {pix_id})...")
             try:
-                # Get pixel boundaries and approximate with bounding box
-                corners = hp.boundaries_skycoord([pix_id])[0]
-                # Simple bounding box (handle RA wrap)
-                ra_corners = corners.ra.wrap_at(180 * u.deg).deg
-                dec_corners = corners.dec.deg
-                box_params = {
-                    "ra_min": np.min(ra_corners),
-                    "ra_max": np.max(ra_corners),
-                    "dec_min": np.min(dec_corners),
-                    "dec_max": np.max(dec_corners),
-                }
-                # Convert back to 0-360 range if needed? ADQL BOX might handle wrap?
-                # Let's assume ADQL BOX handles wrap/center correctly for now.
-                # TODO: Verify ADQL BOX behavior with different services.
-                logger.debug(f"Pixel {pix_id} Bounding Box: {box_params}")
-
-                # Fetch chunk for catalogue 1
-                logger.debug(f"Fetching chunk {i+1} for {cat_name1}...")
-                df1_chunk = self._fetch_remote_catalogue(
-                    config1, columns=params.get("columns1"), box_params=box_params
-                )
-                if df1_chunk is None or df1_chunk.empty:
-                    logger.info(f"Skipping chunk {i+1}: No data found for {cat_name1} in this area.")
+                # Get ADQL BOX string for the current pixel
+                adql_box = self._get_healpix_adql_box(hp, pix_id)
+                if adql_box is None: # Skip if box calculation failed or pixel degenerate
                     continue
-                logger.debug(f"Fetched {len(df1_chunk)} rows for {cat_name1} chunk {i+1}.")
 
-                # Fetch chunk for catalogue 2
-                logger.debug(f"Fetching chunk {i+1} for {cat_name2}...")
-                df2_chunk = self._fetch_remote_catalogue(
-                    config2, columns=params.get("columns2"), box_params=box_params
+                # --- Construct ADQL Query for the Chunk ---
+                adql_query = self._build_chunked_tap_join_adql(
+                    select_clause, join_on_clause,
+                    table1, table2, alias1, alias2,
+                    adql_box,
+                    ra_col1, dec_col1, ra_col2, dec_col2,
+                    adql_join_type
                 )
-                if df2_chunk is None or df2_chunk.empty:
-                    logger.info(f"Skipping chunk {i+1}: No data found for {cat_name2} in this area.")
-                    continue
-                logger.debug(f"Fetched {len(df2_chunk)} rows for {cat_name2} chunk {i+1}.")
+                logger.debug(f"Chunk {i+1} ADQL Query:\n{adql_query}")
 
-                # Match the chunks locally
-                logger.info(f"Matching chunk {i+1} ({len(df1_chunk)} vs {len(df2_chunk)} rows)..." )
-                # Create temporary configs pointing to the dataframes
-                config1_chunk = {**config1, "_input_dataframe": df1_chunk, "access_method": "file_system"}
-                config2_chunk = {**config2, "_input_dataframe": df2_chunk, "access_method": "file_system"}
-                config1_chunk.pop("_input_path", None)
-                config2_chunk.pop("_input_path", None)
-
-                # Execute local stilts match on the chunk data
-                chunk_result_df = self._execute_local_stilts(config1_chunk, config2_chunk, **params)
+                # --- Execute Query for the Chunk ---
+                # Pass original params dict for execution settings (timeout, retries)
+                chunk_result_df = self._execute_tap_join_query(
+                    tap_url, adql_query, archive_name, **params
+                )
 
                 if chunk_result_df is not None and not chunk_result_df.empty:
-                    logger.info(f"Chunk {i+1} matched {len(chunk_result_df)} pairs.")
+                    logger.info(f"Chunk {i+1} TAP JOIN yielded {len(chunk_result_df)} pairs.")
                     all_results.append(chunk_result_df)
                 else:
-                     logger.info(f"Chunk {i+1} yielded no matches.")
+                     logger.info(f"Chunk {i+1} yielded no results from TAP JOIN.")
 
-            except (CrossMatchError, TapError, StiltsError, ConnectionError, Timeout, RequestException) as e:
+            except (TapError, ConnectionError, Timeout, RequestException) as e:
+                # Log TAP/network errors for the chunk but continue processing others
                 logger.warning(
-                    f"Failed to process chunk {i+1} (Pixel {pix_id}): {e}. Skipping chunk.", exc_info=True # Log stack trace for warnings too
+                    f"TAP query failed for chunk {i+1} (Pixel {pix_id}): {e}. Skipping chunk.", exc_info=True
                 )
-                continue # Skip to the next chunk
+                continue
+            except (ValueError, CrossMatchError) as e:
+                 # Log other config/logic errors for the chunk but continue
+                 logger.warning(
+                    f"Error processing chunk {i+1} (Pixel {pix_id}): {e}. Skipping chunk.", exc_info=True
+                 )
+                 continue
             except Exception as e:
+                # Log unexpected errors but continue
                 logger.error(
                     f"Unexpected error processing chunk {i+1} (Pixel {pix_id}): {e}", exc_info=True
                 )
-                continue # Skip to the next chunk
+                continue
 
         # --- Combine Results ---       
         if not all_results:
-            logger.warning("Spatial chunked match resulted in no matches across all chunks.")
+            logger.warning("Remote TAP Chunked Spatial Join resulted in no matches across all chunks.")
             return pd.DataFrame()
         else:
-            logger.info(f"Concatenating results from {len(all_results)} chunks...")
+            logger.info(f"Concatenating results from {len(all_results)} successful chunks...")
             try:
                 final_df = pd.concat(all_results, ignore_index=True)
-                # TODO: Add deduplication step? Matches near chunk borders might be duplicated.
-                logger.info(f"Spatial chunked match completed. Total pairs found: {len(final_df)}")
+                # Optional: Deduplicate based on primary keys if overlaps might cause issues?
+                logger.info(f"Remote TAP Chunked Spatial Join completed. Total pairs found: {len(final_df)}")
+                # TODO: Add deduplication if necessary
+                # Example: if 't1_id' in final_df.columns and 't2_id' in final_df.columns:
+                #     final_df = final_df.drop_duplicates(subset=['t1_id', 't2_id'], keep='first')
+                #     logger.info(f"DataFrame deduplicated, final count: {len(final_df)}")
                 return final_df
             except MemoryError as e:
-                logger.error("Memory error combining chunked match results.")
-                raise CrossMatchError("Memory error combining chunked match results") from e
+                logger.error("Memory error combining chunked TAP JOIN results.")
+                raise CrossMatchError("Memory error combining chunked TAP JOIN results") from e
             except Exception as e:
-                logger.error(f"Error combining chunked match results: {e}", exc_info=True)
-                raise CrossMatchError(f"Error combining chunked match results: {e}") from e
+                logger.error(f"Error combining chunked TAP JOIN results: {e}", exc_info=True)
+                raise CrossMatchError(f"Error combining chunked TAP JOIN results: {e}") from e
+
+    # -----------------------------------------------------------
+    # Catalogue Creation Helpers
+    # -----------------------------------------------------------
+
+    def _connect_tap_for_creation(self, archive_name: str, service_id: str) -> Tuple[TAPService, Dict[str, Any]]:
+        """Validates config and connects to the TAP service for catalogue creation."""
+        logger.debug(f"Validating archive '{archive_name}' and service '{service_id}' for TAP connection.")
+        if archive_name not in self.archives_config:
+            raise CrossMatchError(f"Archive '{archive_name}' not found in configuration.")
+        archive_conf = self.archives_config[archive_name]
+        if service_id not in archive_conf:
+            raise CrossMatchError(f"Service ID '{service_id}' not found in archive '{archive_name}'.")
+        service_conf = archive_conf[service_id]
+        if service_conf.get("access_method") != "tap":
+            raise CrossMatchError(f"Service '{service_id}' in archive '{archive_name}' is not a TAP service.")
+        tap_url = service_conf.get("access_url")
+        if not tap_url:
+            raise CrossMatchError(f"TAP Service '{service_id}' in archive '{archive_name}' has no access_url.")
+
+        try:
+            logger.info(f"Connecting to TAP service at {tap_url}...")
+            auth_info = self.auth_config.get(archive_name)
+            tap_kwargs = {}
+            if auth_info:
+                # Assuming user/password auth
+                tap_kwargs["user"] = auth_info.get("user")
+                tap_kwargs["password"] = auth_info.get("password")
+            tap_service = get_tap_service(tap_url, **tap_kwargs)
+            return tap_service, service_conf # Return service and its config
+        except (TapError, ConnectionError, Timeout, RequestException) as e:
+            logger.error(f"Failed to connect to TAP service for archive '{archive_name}': {e}", exc_info=True)
+            raise CrossMatchError(f"Failed to connect to TAP service '{tap_url}': {e}") from e
+
+    def _query_tap_schema_table(self, tap_service: TAPService, table_name: str) -> Optional[str]:
+        """Queries TAP_SCHEMA.tables for the table description."""
+        try:
+            table_query = f"SELECT description FROM TAP_SCHEMA.tables WHERE table_name = '{table_name}'"
+            logger.info(f"Querying TAP_SCHEMA.tables for description: {table_query}")
+            desc_result = execute_tap_query(tap_service, table_query, max_retries=1)
+            if not desc_result.empty and 'description' in desc_result.columns and desc_result.iloc[0]['description']:
+                description = desc_result.iloc[0]['description']
+                logger.info(f"Found table description: {description}")
+                return description
+            else:
+                logger.warning(f"Could not find description for table '{table_name}' in TAP_SCHEMA.tables.")
+                return None
+        except (TapError, Exception) as e:
+            logger.warning(f"Failed to query TAP_SCHEMA.tables for description: {e}.")
+            return None
+
+    def _query_tap_schema_columns(self, tap_service: TAPService, table_name: str) -> Dict[str, Dict[str, Any]]:
+        """Queries TAP_SCHEMA.columns for metadata."""
+        columns_metadata = {}
+        try:
+            cols_query = (
+                f"SELECT column_name, ucd, unit, datatype, description, principal "
+                f"FROM TAP_SCHEMA.columns WHERE table_name = '{table_name}'"
+            )
+            logger.info(f"Querying TAP_SCHEMA.columns for metadata: {cols_query}")
+            cols_result = execute_tap_query(tap_service, cols_query, max_retries=1)
+            if not cols_result.empty:
+                logger.info(f"Found {len(cols_result)} columns for table '{table_name}'.")
+                for _, row in cols_result.iterrows():
+                    # Clean up potential whitespace in keys/values?
+                    metadata = {k.strip(): v.strip() if isinstance(v, str) else v for k, v in row.to_dict().items()}
+                    columns_metadata[metadata['column_name']] = metadata
+                return columns_metadata
+            else:
+                logger.warning(f"Could not retrieve column metadata for table '{table_name}' from TAP_SCHEMA.columns.")
+                return {}
+        except (TapError, Exception) as e:
+            logger.error(f"Failed to query TAP_SCHEMA.columns: {e}", exc_info=True)
+            # Raise error here, as column metadata is essential
+            raise CrossMatchError(f"Failed to query TAP_SCHEMA.columns for '{table_name}': {e}") from e
+
+    def _detect_standard_columns(self, columns_metadata: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+        """Detects standard columns (RA, Dec, etc.) using UCDs and common names."""
+        detected_cols = {}
+        if not columns_metadata:
+             logger.warning("No column metadata provided, cannot detect standard columns.")
+             return detected_cols
+
+        # Define UCDs and common names maps (as used previously)
+        ucd_map = {
+            "ra_column": ["pos.eq.ra", "POS_EQ_RA_MAIN"],
+            "dec_column": ["pos.eq.dec", "POS_EQ_DEC_MAIN"],
+            "pm_ra_column": ["pos.pm;pos.eq.ra", "stat.mean;pos.pm;pos.eq.ra"], # Added mean
+            "pm_dec_column": ["pos.pm;pos.eq.dec", "stat.mean;pos.pm;pos.eq.dec"], # Added mean
+            "epoch_column": ["time.epoch"],
+            "ra_err_column": ["stat.error;pos.eq.ra"],
+            "dec_err_column": ["stat.error;pos.eq.dec"],
+            "corr_column": ["stat.correlation;pos.eq.ra;pos.eq.dec"],
+            "id_column": ["meta.id", "meta.id;meta.main"],
+            "parallax_column": ["pos.parallax", "pos.parallax;stat.mean"], # Added mean
+        }
+        common_name_map = {
+            "ra_column": ["ra", "ra_icrs", "raj2000", "ra_deg"],
+            "dec_column": ["dec", "dec_icrs", "dej2000", "de_icrs", "dec_deg"],
+            "pm_ra_column": ["pmra", "pm_ra"],
+            "pm_dec_column": ["pmdec", "pm_dec"],
+            "epoch_column": ["epoch", "ref_epoch"],
+            "ra_err_column": ["ra_error", "e_ra", "sigra", "err_maj"],
+            "dec_err_column": ["dec_error", "e_dec", "sigdec", "err_min"],
+            "corr_column": ["ra_dec_corr", "corr"],
+            "id_column": ["id", "source_id", "objid"],
+             "parallax_column": ["plx", "parallax"],
+        }
+
+        logger.info("Attempting to auto-detect standard columns...")
+        # Prioritize UCD matching
+        for standard_name, ucds in ucd_map.items():
+            found_col = None
+            best_match_strength = 0 # 0: no match, 1: secondary ucd, 2: primary ucd
+            for col_name, meta in columns_metadata.items():
+                ucd_str = str(meta.get('ucd', '')).lower()
+                if not ucd_str: continue
+
+                current_match_strength = 0
+                if ucds[0].lower() in ucd_str: current_match_strength = 2 # Primary match
+                elif len(ucds) > 1 and ucds[1].lower() in ucd_str: current_match_strength = 1 # Secondary
+
+                if current_match_strength > best_match_strength:
+                    best_match_strength = current_match_strength
+                    found_col = col_name
+
+            if found_col:
+                 log_msg = f"  Detected {standard_name}: '{found_col}' (using UCD '{ucds[0] if best_match_strength == 2 else ucds[1]}')\""
+                 if best_match_strength == 1: log_msg += " [secondary UCD match]"
+                 logger.info(log_msg)
+                 detected_cols[standard_name] = found_col
+
+        # Fallback to common names if UCD didn't find it
+        for standard_name, names in common_name_map.items():
+            if standard_name not in detected_cols:
+                 found_col = None
+                 for col_name in columns_metadata.keys():
+                     # Simple substring match might be too broad, use exact match for common names
+                     if col_name.lower() in names:
+                        found_col = col_name
+                        break
+                 if found_col:
+                     logger.info(f"  Detected {standard_name}: '{found_col}' (using common name)")
+                     detected_cols[standard_name] = found_col
+
+        # Basic validation: Check if RA/Dec were found
+        if "ra_column" not in detected_cols or "dec_column" not in detected_cols:
+            logger.error("Failed to automatically detect RA and/or Dec columns.")
+            # Don't raise error here, let caller decide
+
+        return detected_cols
+
+    def _build_new_catalogue_entry(
+        self,
+        table_description: str,
+        archive_name: str,
+        service_id: str,
+        access_identifier: str,
+        detected_columns: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """Constructs the dictionary for the new catalogue entry."""
+        new_entry = {
+            "description": table_description,
+            "archive": archive_name,
+            "service_id": service_id,
+            "access_identifier": access_identifier,
+            "table_name": access_identifier, # Assume same for TAP
+            "estimated_size": 'unknown', # Cannot easily estimate size
+            "default_pos_error_arcsec": 0.1, # Sensible default
+        }
+        # Add detected columns to the entry
+        new_entry.update(detected_columns)
+
+        # Add default columns list (use detected ID, RA, Dec if available)
+        default_cols_set = {
+            detected_columns.get("id_column"),
+            detected_columns.get("ra_column"),
+            detected_columns.get("dec_column"),
+        }
+        new_entry["default_columns"] = sorted([c for c in default_cols_set if c is not None])
+        return new_entry
+
+    def _add_entry_to_config_file(
+        self, new_catalogue_name: str, new_entry: Dict[str, Any]
+    ) -> None:
+        """Loads the config, adds the new entry, and saves the file."""
+        try:
+            logger.info(f"Attempting to update config file: {self.config_file}")
+            # Load the whole config again to ensure we have the latest
+            # Use internal _load_config to handle potential errors during load
+            full_config = self._load_config()
+            if 'catalogues' not in full_config:
+                full_config['catalogues'] = {}
+            elif not isinstance(full_config['catalogues'], dict):
+                 logger.error("Invalid config format: 'catalogues' is not a dictionary. Cannot add entry.")
+                 raise CrossMatchError("Config format error: 'catalogues' section invalid.")
+
+            # Check again in case config changed between initial check and write
+            if new_catalogue_name in full_config['catalogues']:
+                 logger.error(f"Catalogue entry '{new_catalogue_name}' already exists (race condition?). Aborting write.")
+                 raise CrossMatchError(f"Catalogue '{new_catalogue_name}' exists (race condition?).")
+
+            # Add the new entry
+            full_config['catalogues'][new_catalogue_name] = new_entry
+
+            # Write back to the file
+            with open(self.config_file, 'w') as f:
+                 yaml.dump(full_config, f, default_flow_style=False, sort_keys=False, indent=2)
+            logger.info(f"Successfully added '{new_catalogue_name}' entry to {self.config_file}")
+
+        except (IOError, yaml.YAMLError) as e:
+            logger.error(f"Failed to write updated configuration to {self.config_file}: {e}", exc_info=True)
+            # Re-raise as CrossMatchError
+            raise CrossMatchError(f"Failed to write config file {self.config_file}: {e}") from e
+        except CrossMatchError: # Catch specific error from _load_config or race condition
+             raise
+        except Exception as e:
+             logger.error(f"Unexpected error updating config file: {e}", exc_info=True)
+             raise CrossMatchError(f"Unexpected error updating config file: {e}") from e
+
+    # -----------------------------------------------------------
+    # Catalogue Creation Method
+    # -----------------------------------------------------------
+    def create_catalogue_entry(
+        self,
+        new_catalogue_name: str,
+        archive_name: str,
+        access_identifier: str,
+        service_id: str = "tap_service",
+        description_override: Optional[str] = None,
+    ) -> bool:
+        """Creates a new catalogue entry in the config file by querying TAP_SCHEMA."""
+        new_catalogue_name = new_catalogue_name.lower()
+        logger.info(
+            f"Attempting to create config entry '{new_catalogue_name}' for table "
+            f"'{access_identifier}' in archive '{archive_name}' (service: {service_id})"
+        )
+
+        # --- Validate Input Name ---
+        if new_catalogue_name in self.catalogues_config:
+            logger.error(f"Catalogue entry '{new_catalogue_name}' already exists in config file.")
+            return False
+
+        try:
+            # --- Connect to TAP Service ---
+            tap_service, _ = self._connect_tap_for_creation(archive_name, service_id)
+
+            # --- Get Table Description ---
+            table_description = description_override
+            if not table_description:
+                table_description = self._query_tap_schema_table(tap_service, access_identifier)
+                if not table_description:
+                    logger.warning(f"Using default description for '{new_catalogue_name}'.")
+                    table_description = f"Table {access_identifier} from {archive_name}"
+
+            # --- Get Column Metadata ---
+            columns_metadata = self._query_tap_schema_columns(tap_service, access_identifier)
+            if not columns_metadata:
+                 # Error already raised by helper if query failed, but check if empty dict returned
+                 logger.error(f"No column metadata retrieved for '{access_identifier}'. Cannot proceed.")
+                 return False
+
+            # --- Auto-detect Essential Columns ---
+            detected_columns = self._detect_standard_columns(columns_metadata)
+
+            # --- Validate Essential Columns (RA/Dec) ---
+            if "ra_column" not in detected_columns or "dec_column" not in detected_columns:
+                logger.error("Failed to automatically detect required RA and/or Dec columns. Cannot create entry.")
+                logger.error("Available columns detected:")
+                for col_name, meta in columns_metadata.items():
+                     ucd = meta.get('ucd', 'N/A')
+                     desc = meta.get('description', 'N/A')
+                     logger.error(f"  - {col_name} (UCD: {ucd}, Desc: {desc})")
+                return False
+
+            # --- Build New Entry Dictionary ---
+            new_entry = self._build_new_catalogue_entry(
+                table_description,
+                archive_name,
+                service_id,
+                access_identifier,
+                detected_columns,
+            )
+
+            # --- Update YAML File ---
+            self._add_entry_to_config_file(new_catalogue_name, new_entry)
+
+            # --- Reload internal config state ---           
+            logger.info("Reloading configuration after adding new entry...")
+            self.__init__(self.config_file)
+            logger.info("Configuration reloaded.")
+
+            return True
+
+        except CrossMatchError as e:
+            # Catch errors raised by helpers or validation
+            logger.error(f"Failed to create catalogue entry '{new_catalogue_name}': {e}", exc_info=True)
+            return False
+        except Exception as e:
+            # Catch any other unexpected errors
+            logger.error(f"Unexpected error creating catalogue entry '{new_catalogue_name}': {e}", exc_info=True)
+            return False
 
     def _execute_chunked_match(
         self,
@@ -1476,32 +1785,21 @@ class CrossMatch:
             config1: Resolved configuration for the first input (local file or DataFrame).
             config2: Resolved configuration for the second input (local file or DataFrame).
             chunk_rows: The number of rows to process per chunk.
-            chunk_input_index: Which input to chunk (1 or 2). Currently simple selection,
-                               could be determined dynamically based on size in the future.
-            params: Additional parameters passed to _execute_local_stilts for each chunk
-                    (e.g., radius_arcsec, matcher, join_type).
+            chunk_input_index: Which input to chunk (1 or 2).
+            params: Additional parameters passed to _execute_local_stilts for each chunk.
 
         Returns:
             A pandas DataFrame containing the concatenated results from all chunks.
-
-        Raises:
-            CrossMatchError: If inputs are not local, chunking fails, or a sub-match fails.
-            ValueError: If chunk_input_index is invalid.
         """
         cat_name1 = config1.get("_catalogue_name", "input1")
         cat_name2 = config2.get("_catalogue_name", "input2")
         logger.info(
-            f"Executing Chunked Local Match strategy between: {cat_name1} and {cat_name2}, chunking input {chunk_input_index}"
+            f"Executing Chunked Local Match strategy: {cat_name1} vs {cat_name2}, chunking input {chunk_input_index}"
         )
 
-        # --- Validate Inputs are Local ---        
-        if (
-            config1.get("access_method") != "file_system"
-            or config2.get("access_method") != "file_system"
-        ):
-            raise CrossMatchError(
-                "Chunked match requires both inputs to be local (file or DataFrame)."
-            )
+        # --- Validate Inputs are Local ---       
+        if config1.get("access_method") != "file_system" or config2.get("access_method") != "file_system":
+            raise CrossMatchError("Chunked match requires both inputs to be local (file or DataFrame).")
 
         # --- Determine which config to chunk and which is static ---
         if chunk_input_index == 1:
@@ -1517,10 +1815,7 @@ class CrossMatch:
         else:
             raise ValueError("chunk_input_index must be 1 or 2")
 
-        chunk_input_path = chunk_config.get("_input_path")
-        chunk_input_df = chunk_config.get("_input_dataframe")
-        
-        # The static input needs to be loaded fully into memory if it's a file
+        # --- Load Static Catalogue into Memory ---
         static_input_df = None
         if static_config.get("_input_dataframe") is not None:
             static_input_df = static_config.get("_input_dataframe")
@@ -1528,703 +1823,211 @@ class CrossMatch:
             logger.info(f"Loading static input catalogue '{static_cat_name}' into memory...")
             try:
                 static_input_df = self._load_local_catalogue(static_config.get("_input_path"))
-                static_config["_input_dataframe"] = static_input_df # Store for reuse by stilts
+                # Store in config only if successfully loaded
+                static_config["_input_dataframe"] = static_input_df
                 static_config.pop("_input_path", None)
             except (FileNotFoundError, MemoryError, CrossMatchError) as e:
                  logger.error(f"Failed to load static catalogue '{static_cat_name}': {e}")
-                 raise
+                 raise # Re-raise critical errors
         else:
              raise CrossMatchError(f"Static input catalogue '{static_cat_name}' has no path or DataFrame.")
-        
+
         if static_input_df is None or static_input_df.empty:
             logger.warning(f"Static input catalogue '{static_cat_name}' is empty. Returning empty result.")
             return pd.DataFrame()
         logger.info(f"Static catalogue '{static_cat_name}' ({len(static_input_df)} rows) ready.")
 
+        # --- Process Chunked Input ---       
         all_results = []
         chunk_num = 0
+        chunk_input_path = chunk_config.get("_input_path")
+        chunk_input_df = chunk_config.get("_input_dataframe")
+        iterator = None
+        file_format = None
 
         try:
-            # --- Handle Chunking from DataFrame ---            
+            # --- Setup Iterator/Source for Chunking ---
             if chunk_input_df is not None:
-                logger.info(
-                    f"Chunking input DataFrame '{chunk_cat_name}' ({len(chunk_input_df)} rows) in chunks of {chunk_rows}..."
-                )
-                for i in range(0, len(chunk_input_df), chunk_rows):
-                    chunk_num += 1
-                    chunk_df = chunk_input_df.iloc[i : i + chunk_rows]
-                    logger.info(
-                        f"Processing chunk {chunk_num} ({len(chunk_df)} rows) for '{chunk_cat_name}' vs '{static_cat_name}'"
-                    )
-
-                    # Prepare configs for this chunk's match
-                    current_chunk_config = chunk_config.copy()
-                    current_chunk_config["_input_dataframe"] = chunk_df
-                    current_chunk_config.pop("_input_path", None)
-
-                    # Determine argument order for _execute_local_stilts
-                    if chunk_input_index == 1:
-                        conf1, conf2 = current_chunk_config, static_config
-                    else:
-                        conf1, conf2 = static_config, current_chunk_config
-                    try:
-                        result_chunk = self._execute_local_stilts(conf1, conf2, **params)
-                        if result_chunk is not None and not result_chunk.empty:
-                            all_results.append(result_chunk)
-                            logger.debug(f"Chunk {chunk_num} match yielded {len(result_chunk)} results.")
-                        else:
-                            logger.debug(f"Chunk {chunk_num} yielded no matches.")
-                    except (StiltsError, CrossMatchError) as e:
-                         logger.warning(f"Failed to match chunk {chunk_num}: {e}. Skipping.", exc_info=True)
-                         continue # Continue to next chunk
-
-            # --- Handle Chunking from File ---            
+                logger.info(f"Chunking input DataFrame '{chunk_cat_name}' ({len(chunk_input_df)} rows) in chunks of {chunk_rows}...")
+                # Use iloc for DataFrame chunking later
+                total_rows = len(chunk_input_df)
             elif chunk_input_path:
                 input_path = Path(chunk_input_path)
                 if not input_path.exists():
                     raise FileNotFoundError(f"Input file for chunking not found: {input_path}")
-                
-                logger.info(
-                    f"Chunking input file '{chunk_cat_name}' ({input_path}) in chunks of {chunk_rows}..."
-                )
-                file_format = input_path.suffix.lower()
 
-                # Use appropriate pandas reader with chunksize                
-                reader = None
+                file_format = input_path.suffix.lower()
+                logger.info(f"Preparing to chunk input file '{chunk_cat_name}' ({input_path}, format: {file_format}) in chunks of {chunk_rows}...")
+
                 if file_format == ".csv":
-                    # TODO: Detect/handle CSV dialect, headers, comments etc.
-                    reader = pd.read_csv(input_path, chunksize=chunk_rows, low_memory=False)
+                    # Use pandas chunked reader for CSV
+                    try:
+                        iterator = pd.read_csv(input_path, chunksize=chunk_rows, low_memory=False)
+                    except Exception as e:
+                         raise CrossMatchError(f"Failed to create CSV reader for {input_path}: {e}") from e
                 elif file_format == ".parquet":
-                    # Actual chunking for parquet might require pyarrow.dataset or iterative reading
-                    logger.warning(
-                        "Direct file chunking for Parquet not fully implemented; reading full file then slicing. This might consume significant memory."
-                    )
-                    # For now, read whole and then treat as DataFrame chunking - INEFFICIENT!
-                    full_df = self._load_local_catalogue(input_path) # Use existing loader
-                    # Re-run the DataFrame chunking logic (could refactor this)
-                    for i in range(0, len(full_df), chunk_rows):
-                        chunk_num += 1
-                        chunk_df = full_df.iloc[i : i + chunk_rows]
-                        logger.info(
-                            f"Processing chunk {chunk_num} ({len(chunk_df)} rows) for '{chunk_cat_name}' vs '{static_cat_name}'"
-                        )
-                        current_chunk_config = chunk_config.copy()
-                        current_chunk_config["_input_dataframe"] = chunk_df
-                        current_chunk_config.pop("_input_path", None)
-                        if chunk_input_index == 1:
-                            conf1, conf2 = current_chunk_config, static_config
-                        else:
-                            conf1, conf2 = static_config, current_chunk_config
-                        try:
-                            result_chunk = self._execute_local_stilts(conf1, conf2, **params)
-                            if result_chunk is not None and not result_chunk.empty:
-                                all_results.append(result_chunk)
-                                logger.debug(
-                                    f"Chunk {chunk_num} match yielded {len(result_chunk)} results."
-                                )
-                            else:
-                                logger.debug(f"Chunk {chunk_num} yielded no matches.")
-                        except (StiltsError, CrossMatchError) as e:
-                            logger.warning(f"Failed to match chunk {chunk_num}: {e}. Skipping.", exc_info=True)
-                            continue
-                    reader = None # Prevent entering the reader loop below
-                elif file_format == ".fits":
-                    # TODO: Handle FITS chunking - Astropy tables might need specific handling
-                    logger.warning("Chunking directly from FITS files not yet implemented.")
-                    # Read full file as fallback? Defeats purpose of chunking...
-                    full_df = self._load_local_catalogue(input_path)
-                    logger.warning(f"Read full FITS file ({len(full_df)} rows) for chunking fallback.")
-                    for i in range(0, len(full_df), chunk_rows):
-                        chunk_num += 1
-                        chunk_df = full_df.iloc[i : i + chunk_rows]
-                        logger.info(
-                            f"Processing chunk {chunk_num} ({len(chunk_df)} rows) for '{chunk_cat_name}' vs '{static_cat_name}'"
-                        )
-                        current_chunk_config = chunk_config.copy()
-                        current_chunk_config["_input_dataframe"] = chunk_df
-                        current_chunk_config.pop("_input_path", None)
-                        if chunk_input_index == 1:
-                            conf1, conf2 = current_chunk_config, static_config
-                        else:
-                            conf1, conf2 = static_config, current_chunk_config
-                        try:
-                            result_chunk = self._execute_local_stilts(conf1, conf2, **params)
-                            if result_chunk is not None and not result_chunk.empty:
-                                all_results.append(result_chunk)
-                                logger.debug(
-                                    f"Chunk {chunk_num} match yielded {len(result_chunk)} results."
-                                )
-                            else:
-                                logger.debug(f"Chunk {chunk_num} yielded no matches.")
-                        except (StiltsError, CrossMatchError) as e:
-                            logger.warning(f"Failed to match chunk {chunk_num}: {e}. Skipping.", exc_info=True)
-                            continue
-                    reader = None
-                    # raise NotImplementedError("Chunking from FITS files needs implementation.")
+                    # Use pyarrow iterator for Parquet
+                    try:
+                        import pyarrow.parquet as pq
+                        parquet_file = pq.ParquetFile(input_path)
+                        iterator = parquet_file.iter_batches(batch_size=chunk_rows)
+                        logger.debug(f"Using pyarrow.iter_batches for Parquet file: {input_path}")
+                    except ImportError:
+                        logger.error("'pyarrow' library required for efficient Parquet chunking.")
+                        raise CrossMatchError("'pyarrow' is required for Parquet chunking. Please install it.")
+                    except Exception as e:
+                         raise CrossMatchError(f"Failed to create Parquet reader for {input_path}: {e}") from e
+                elif file_format in [".fits", ".fit"]:
+                    # FITS chunking is less direct
+                    logger.warning("Attempting FITS chunking via memory mapping; may still use significant memory depending on access patterns.")
+                    try:
+                        from astropy.io import fits
+                        # Open with memmap=True
+                        hdul = fits.open(input_path, memmap=True)
+                        # Find the first table HDU
+                        table_hdu = None
+                        for hdu in hdul:
+                             if isinstance(hdu, (fits.TableHDU, fits.BinTableHDU)):
+                                 table_hdu = hdu
+                                 break
+                        if table_hdu is None:
+                            raise CrossMatchError(f"No table HDU found in FITS file: {input_path}")
+                        total_rows = table_hdu.header['NAXIS2']
+                        # Store HDUList and index for iterative slicing
+                        iterator = (hdul, table_hdu, total_rows) # Tuple indicates FITS mode
+                        logger.debug(f"Prepared FITS file for chunked access: {input_path} ({total_rows} rows)")
+                    except ImportError:
+                        logger.error("'astropy' library required for FITS reading.")
+                        raise CrossMatchError("'astropy' is required for FITS reading.")
+                    except Exception as e:
+                         hdul.close() # Ensure file handle is closed on error
+                         raise CrossMatchError(f"Failed to open/prepare FITS file {input_path} for chunking: {e}") from e
                 else:
                     raise CrossMatchError(f"Unsupported file format for chunking: {file_format}")
-
-                # Process chunks from CSV reader (only if reader was created)
-                if reader:
-                    for chunk_df in reader:
-                        chunk_num += 1
-                        logger.info(
-                            f"Processing chunk {chunk_num} ({len(chunk_df)} rows) for '{chunk_cat_name}' vs '{static_cat_name}'"
-                        )
-                        current_chunk_config = chunk_config.copy()
-                        current_chunk_config["_input_dataframe"] = chunk_df
-                        current_chunk_config.pop("_input_path", None)
-
-                        if chunk_input_index == 1:
-                            conf1, conf2 = current_chunk_config, static_config
-                        else:
-                            conf1, conf2 = static_config, current_chunk_config
-                        
-                        try:
-                            result_chunk = self._execute_local_stilts(conf1, conf2, **params)
-                            if result_chunk is not None and not result_chunk.empty:
-                                all_results.append(result_chunk)
-                                logger.debug(
-                                    f"Chunk {chunk_num} match yielded {len(result_chunk)} results."
-                                )
-                            else:
-                                logger.debug(f"Chunk {chunk_num} yielded no matches.")
-                        except (StiltsError, CrossMatchError) as e:
-                            logger.warning(f"Failed to match chunk {chunk_num}: {e}. Skipping.", exc_info=True)
-                            continue
-
             else:
                 raise CrossMatchError(
-                    f"Cannot chunk input {chunk_input_index} ('{chunk_cat_name}'): No DataFrame or file path provided in config."
+                    f"Cannot chunk input {chunk_input_index} ('{chunk_cat_name}'): No DataFrame or file path provided."
                 )
 
-            # --- Combine Results ---
-            if not all_results:
-                logger.warning("Chunked match completed, but produced no results.")
-                return pd.DataFrame() # Return empty DataFrame
+            # --- Process Chunks ---           
+            if chunk_input_df is not None:
+                 # Iterate over DataFrame chunks
+                 for i in range(0, total_rows, chunk_rows):
+                     chunk_num += 1
+                     current_chunk_df = chunk_input_df.iloc[i : i + chunk_rows]
+                     if current_chunk_df.empty:
+                         continue # Skip empty chunks
 
-            logger.info(f"Concatenating results from {chunk_num} chunks...")
-            final_result_df = pd.concat(all_results, ignore_index=True)
-            logger.info(f"Chunked match completed. Final result has {len(final_result_df)} rows.")
-            return final_result_df
+                     logger.info(f"Processing DataFrame chunk {chunk_num} ({len(current_chunk_df)} rows)...")
+                     # (Logic to match chunk is below the iterator handling)
+                     result_chunk = self._match_chunk_against_static(
+                         chunk_df=current_chunk_df,
+                         chunk_config=chunk_config,
+                         static_config=static_config,
+                         chunk_input_index=chunk_input_index,
+                         params=params
+                     )
+                     if result_chunk is not None: all_results.append(result_chunk)
 
-        except (StiltsError, FileNotFoundError, ValueError, MemoryError) as e:
-            logger.error(f"Error during chunked match execution: {e}", exc_info=True)
-            raise CrossMatchError(f"Chunked match failed: {e}") from e
-        except Exception as e:
-            logger.error(f"Unexpected error during chunked match: {e}", exc_info=True)
-            raise CrossMatchError(f"Unexpected error in chunked match: {e}") from e
+            elif iterator is not None:
+                 # Iterate over file chunks (CSV, Parquet, FITS)
+                 if isinstance(iterator, tuple): # FITS mode
+                     hdul, table_hdu, total_rows = iterator
+                     try:
+                         for i in range(0, total_rows, chunk_rows):
+                             chunk_num += 1
+                             start_row = i
+                             end_row = min(i + chunk_rows, total_rows)
+                             logger.info(f"Processing FITS chunk {chunk_num} (Rows {start_row}-{end_row-1})...")
+                             # Read the slice
+                             try:
+                                 table_slice = Table(table_hdu.data[start_row:end_row])
+                                 current_chunk_df = table_slice.to_pandas()
+                             except Exception as e:
+                                 logger.warning(f"Error reading/converting FITS chunk {chunk_num}: {e}. Skipping chunk.", exc_info=True)
+                                 continue # Skip to next chunk
 
-    def _fetch_remote_catalogue(
-        self,
-        config: Dict[str, Any],
-        columns: Optional[List[str]] = None,
-        query_constraints: Optional[str] = None, # e.g., "WHERE phot_g_mean_mag < 18"
-        cone_params: Optional[Dict[str, float]] = None, # {ra, dec, radius_deg}
-        box_params: Optional[Dict[str, float]] = None, # {ra_min, ra_max, dec_min, dec_max}
-        # TODO: Add support for polygon constraints later?
-    ) -> pd.DataFrame:
-        """Fetches a remote catalogue based on its configuration.
+                             if current_chunk_df.empty:
+                                 continue
+                             logger.debug(f"Read {len(current_chunk_df)} rows for FITS chunk {chunk_num}.")
 
-        Currently supports TAP.
-        Applies epoch propagation if needed based on target_epoch.
+                             result_chunk = self._match_chunk_against_static(
+                                 chunk_df=current_chunk_df,
+                                 chunk_config=chunk_config,
+                                 static_config=static_config,
+                                 chunk_input_index=chunk_input_index,
+                                 params=params
+                             )
+                             if result_chunk is not None: all_results.append(result_chunk)
+                     finally:
+                         # Ensure FITS file handle is closed regardless of loop errors
+                         logger.debug(f"Closing FITS file handle for {chunk_input_path}")
+                         hdul.close()
 
-        Args:
-            config: Resolved configuration for the remote catalogue.
-            columns: List of specific columns to fetch (overrides default_columns).
-            query_constraints: Additional ADQL WHERE clause constraints.
-            cone_params: Parameters for a cone search (ra, dec, radius_deg).
-            box_params: Parameters for a box search (ra_min, ra_max, dec_min, dec_max).
+                 elif file_format == ".parquet": # PyArrow iterator
+                     for batch in iterator:
+                         chunk_num += 1
+                         logger.info(f"Processing Parquet batch {chunk_num} ({len(batch)} rows)...")
+                         result_chunk = self._match_chunk_against_static(
+                             chunk_df=batch,
+                             chunk_config=chunk_config,
+                             static_config=static_config,
+                             chunk_input_index=chunk_input_index,
+                             params=params
+                         )
+                         if result_chunk is not None: all_results.append(result_chunk)
 
-        Returns:
-            DataFrame containing the fetched catalogue data.
-
-        Raises:
-            CrossMatchError: If fetching fails or the access method is unsupported.
-            TapError: For TAP-specific issues.
-        """
-        cat_name = config.get("_catalogue_name", "remote_catalogue")
-        access_method = config.get("access_method")
-        logger.info(f"Fetching remote catalogue: {cat_name} via {access_method}")
-
-        if access_method == "tap":
-            tap_url = config.get("access_url")
-            table_name = config.get("access_identifier")
-            if not tap_url or not table_name:
-                raise CrossMatchError(
-                    f"TAP configuration missing 'access_url' or 'access_identifier' for {cat_name}"
-                )
-
-            # Determine columns to fetch
-            cols_to_fetch_raw = columns or config.get("default_columns")
-            if not cols_to_fetch_raw:
-                # Fetch all columns if none specified (use with caution)
-                logger.warning(
-                    f"No columns specified for {cat_name}, fetching all columns (*). This might be slow."
-                )
-                select_cols = "*"
-            else:
-                # Ensure essential columns (RA, Dec, errors, PM, epoch if available) are included
-                essential_cols = {
-                    config.get("ra_column"),
-                    config.get("dec_column"),
-                    config.get("ra_err_column"),
-                    config.get("dec_err_column"),
-                    config.get("corr_column"),
-                    config.get("pm_ra_column"), # Need to add pm_ra/pm_dec to YAML where applicable
-                    config.get("pm_dec_column"),
-                    config.get("epoch_column"), # Need to add epoch_column to YAML where applicable (e.g., for Gaia)
-                }
-                # Filter out None values from essential_cols
-                essential_cols = {c for c in essential_cols if c is not None}
-                # Use set union to combine requested and essential columns
-                all_cols_set = set(cols_to_fetch_raw) | essential_cols
-                select_cols = ", ".join(f'"{c}"' for c in sorted(list(all_cols_set)))
-
-            # Build ADQL query
-            adql_query = f"SELECT {select_cols} FROM {table_name}"
-            where_clauses = []
-            if query_constraints:
-                # Assume query_constraints already starts with WHERE or AND/OR if needed
-                # Basic check to add WHERE if not present
-                # This logic is tricky, better to require constraints to be valid standalone predicates
-                where_clauses.append(f"({query_constraints})") # Wrap user constraints
-
-            # Add spatial constraints
-            ra_col = config.get("ra_column")
-            dec_col = config.get("dec_column")
-            if not ra_col or not dec_col:
-                 logger.warning(f"RA/Dec columns not defined for {cat_name}, cannot apply spatial constraints.")
-            else:
-                if cone_params:
-                    if all(k in cone_params for k in ["ra", "dec", "radius_deg"]):
-                        clause = (
-                            f"CONTAINS(POINT('ICRS', \"{ra_col}\", \"{dec_col}\"), "
-                            f"CIRCLE('ICRS', {cone_params['ra']}, {cone_params['dec']}, {cone_params['radius_deg']})) = 1"
-                        )
-                        where_clauses.append(clause)
-                    else:
-                        logger.warning("Cone search parameters incomplete, skipping cone constraint.")
-                elif box_params: # Prioritize cone if both provided?
-                     if all(k in box_params for k in ["ra_min", "ra_max", "dec_min", "dec_max"]):
-                        # ADQL BOX function: BOX('ICRS', ra_cen, dec_cen, width, height)
-                        # Need to calculate center and width/height from min/max
-                        # Handle RA wrap-around carefully!
-                        # Simplified: Assume no wrap for now. TODO: Add wrap-around logic.
-                        ra_cen = (box_params['ra_min'] + box_params['ra_max']) / 2
-                        dec_cen = (box_params['dec_min'] + box_params['dec_max']) / 2
-                        width = box_params['ra_max'] - box_params['ra_min']
-                        height = box_params['dec_max'] - box_params['dec_min']
-                        if width < 0 or height < 0:
-                            logger.warning("Invalid box dimensions (max < min?), skipping box constraint.")
-                        else:
-                            clause = (
-                                f"CONTAINS(POINT('ICRS', \"{ra_col}\", \"{dec_col}\"), "
-                                f"BOX('ICRS', {ra_cen}, {dec_cen}, {width}, {height})) = 1"
-                            )
-                            where_clauses.append(clause)
-                     else:
-                        logger.warning("Box search parameters incomplete, skipping box constraint.")
-
-            # Combine WHERE clauses
-            if where_clauses:
-                adql_query += " WHERE " + " AND ".join(where_clauses)
-
-            logger.info(f"Executing ADQL query on {tap_url}:\n{adql_query}")
-
-            try:
-                # Get authenticated TAP service if needed
-                auth_info = self.auth_config.get(config.get("_archive_name"))
-                tap_kwargs = {}
-                if auth_info:
-                    tap_kwargs["user"] = auth_info.get("user")
-                    tap_kwargs["password"] = auth_info.get("password")
-                    # TODO: Add other auth methods (e.g., token) if needed by TAP services
-
-                tap_service = get_tap_service(tap_url, **tap_kwargs)
-
-                # Execute query using tap.py function
-                # Fetch relevant params for execute_tap_query
-                exec_params = {k: v for k, v in params.items() if k in ['retry_delay', 'timeout', 'max_retries', 'verbose']}
-                result_df = execute_tap_query(
-                    tap_service, adql_query, **exec_params
-                )
-                logger.info(f"Successfully fetched {len(result_df)} rows for {cat_name}.")
-                return result_df
-
-            except (TapError, ConnectionError, Timeout) as e:
-                logger.error(f"Failed to fetch {cat_name} from {tap_url}: {e}", exc_info=True)
-                raise  # Re-raise TAP/network errors
-            except Exception as e:
-                logger.error(
-                    f"Unexpected error fetching {cat_name} from {tap_url}: {e}", exc_info=True
-                )
-                raise CrossMatchError(
-                    f"Unexpected error fetching remote catalogue {cat_name}: {e}"
-                ) from e
-
-        elif access_method == "cds_xmatch":
-            # TODO: Implement fetching/querying via CDS X-Match service if needed
-            # This is usually used for crossmatching directly, not fetching full tables.
-            raise NotImplementedError("Fetching via cds_xmatch service is not implemented.")
-        else:
-            raise CrossMatchError(
-                f"Unsupported access method '{access_method}' for remote catalogue {cat_name}"
-            )
-
-    def _execute_cds_xmatch_local_remote(
-        self,
-        config1: Dict[str, Any],
-        config2: Dict[str, Any],
-        **params,
-    ) -> pd.DataFrame:
-        """Executes a crossmatch using the CDS XMatch service (astroquery).
-
-        Assumes one input is local (file or DataFrame) and the other is a remote
-        catalogue configured with access_method: cds_xmatch.
-
-        Args:
-            config1: Resolved configuration for the first input.
-            config2: Resolved configuration for the second input.
-            params: Dictionary of execution parameters, must include 'radius_arcsec'.
-
-        Returns:
-            A pandas DataFrame with the crossmatch results.
-
-        Raises:
-            CrossMatchError: If inputs are not one local/one CDS, astroquery fails,
-                             or required parameters are missing.
-            ImportError: If astroquery is not installed.
-        """
-        logger.info("Executing CDS XMatch (Local vs Remote) strategy...")
-
-        # --- Determine Local and Remote Configs ---
-        if config1.get("access_method") == "file_system":
-            local_config = config1
-            remote_config = config2
-        elif config2.get("access_method") == "file_system":
-            local_config = config2
-            remote_config = config1
-        else:
-            raise CrossMatchError("CDS XMatch strategy requires one local and one remote input.")
-
-        if remote_config.get("access_method") != "cds_xmatch":
-            raise CrossMatchError(
-                f"Remote input {remote_config.get('_catalogue_name')} is not configured for CDS XMatch."
-            )
-
-        local_cat_name = local_config.get("_catalogue_name", "local_input")
-        remote_cat_name = remote_config.get("_catalogue_name", "remote_cds_input")
-        logger.info(f"Matching local '{local_cat_name}' against remote CDS '{remote_cat_name}'")
-
-        # --- Validate Parameters ---
-        if "radius_arcsec" not in params:
-            raise ValueError("Missing required parameter 'radius_arcsec' for CDS XMatch.")
-        radius_arcsec = params["radius_arcsec"]
-
-        # --- Prepare Local Input Data ---       
-        local_table = None
-        local_input_df = local_config.get("_input_dataframe")
-        local_input_path = local_config.get("_input_path")
-
-        if local_input_df is not None:
-            logger.debug(f"Using DataFrame for local input '{local_cat_name}'")
-            # Convert DataFrame to Astropy Table for astroquery
-            try:
-                local_table = Table.from_pandas(local_input_df)
-            except Exception as e:
-                raise CrossMatchError(f"Failed to convert local DataFrame to Astropy Table: {e}") from e
-        elif local_input_path is not None:
-            logger.debug(f"Using file path '{local_input_path}' for local input '{local_cat_name}'")
-            # Astroquery XMatch can often take file paths directly
-            local_table = str(local_input_path)
-            # Ensure file actually exists before passing path
-            if not Path(local_table).is_file():
-                 raise FileNotFoundError(f"Local input file for CDS XMatch not found: {local_table}")
-        else:
-            raise CrossMatchError(f"Local input '{local_cat_name}' has no DataFrame or file path.")
-
-        # --- Get Remote Catalogue Identifier ---
-        # Use the 'access_identifier' which should be the VizieR table name for CDS
-        vizier_table_id = remote_config.get("access_identifier")
-        if not vizier_table_id:
-            raise CrossMatchError(f"Remote CDS config '{remote_cat_name}' missing 'access_identifier'.")
-
-        # --- Execute CDS XMatch ---       
-        try:
-            logger.info(
-                f"Submitting job to CDS XMatch: {local_cat_name} vs {vizier_table_id} (Radius: {radius_arcsec} arcsec)"
-            )
-            xmatch = XMatch()
-            # Need RA/Dec column names from the *local* table
-            ra_col_local = local_config.get("ra_column", "ra") # Default to ra/dec if not in temp config
-            dec_col_local = local_config.get("dec_column", "dec")
-
-            # Use xmatch_local for file paths or astropy Tables
-            result_table = xmatch.query_async(
-                cat1=local_table,
-                cat2=f"vizier:{vizier_table_id}",
-                max_distance=radius_arcsec * u.arcsec,
-                colRA1=ra_col_local,
-                colDec1=dec_col_local,
-            )
-
-            if result_table is None:
-                logger.warning("CDS XMatch query returned no results.")
-                return pd.DataFrame()
-            
-            logger.info(f"CDS XMatch successful, received {len(result_table)} matches.")
-            # Convert result Astropy Table to DataFrame
-            return result_table.to_pandas()
-
-        except ImportError:
-             logger.error("'astroquery' library is required for CDS XMatch.")
-             raise CrossMatchError(
-                 "'astroquery' library is required for cds_xmatch_local_remote strategy. Please install it."
-             )
-        except FileNotFoundError as e:
-             # Catch if a local file path was provided but not found by astroquery
-             logger.error(f"Local input file not found by astroquery: {e}")
-             raise CrossMatchError(f"Local input file not found by astroquery: {local_table}") from e
-        except Exception as e:
-            # Catch potential astroquery errors (connection, query failure, etc.)
-            logger.error(f"CDS XMatch query failed: {e}", exc_info=True)
-            raise CrossMatchError(f"Error during CDS XMatch query: {e}") from e
-
-    def _apply_epoch_propagation(
-        self, config: Dict[str, Any], df: pd.DataFrame, target_epoch: float
-    ) -> pd.DataFrame:
-        """Applies epoch propagation if configuration and data allow."""
-        ra_col = config.get("ra_column")
-        dec_col = config.get("dec_column")
-        pm_ra_col = config.get("pm_ra_column")
-        pm_dec_col = config.get("pm_dec_column")
-        epoch_col = config.get("epoch_column") # The column containing the source epoch
-        current_epoch = config.get("epoch") # The reference epoch from YAML
-
-        if not all([ra_col, dec_col, pm_ra_col, pm_dec_col, epoch_col, current_epoch]):
-            logger.warning(
-                f"Catalogue {config.get('_catalogue_name')} lacks required columns/config "
-                f"(ra/dec/pm_ra/pm_dec/epoch_col/epoch) for propagation. Using original coordinates."
-            )
-            # Add ra_propagated/dec_propagated columns with original values
-            df_out = df.copy()
-            if ra_col and "ra_propagated" not in df_out.columns:
-                 df_out["ra_propagated"] = df_out[ra_col]
-            if dec_col and "dec_propagated" not in df_out.columns:
-                 df_out["dec_propagated"] = df_out[dec_col]
-            return df_out
-
-        # Add the fixed epoch from YAML as a column if epoch_col doesn't exist in df
-        if epoch_col not in df.columns:
-            logger.debug(f"Adding fixed epoch column '{epoch_col}' = {current_epoch} for propagation.")
-            df[epoch_col] = current_epoch
-
-        logger.info(
-            f"Applying epoch propagation for {config.get('_catalogue_name')} to target epoch {target_epoch}"
-        )
-        try:
-            propagated_df = propagate_coordinates_to_epoch(
-                df,
-                ra_col=ra_col,
-                dec_col=dec_col,
-                pm_ra_col=pm_ra_col,
-                pm_dec_col=pm_dec_col,
-                epoch_col=epoch_col, # Use the column name specified in YAML
-                target_epoch=target_epoch,
-            )
-            return propagated_df
-        except (KeyError, ValueError, TypeError) as e:
-             logger.error(f"Error applying epoch propagation: {e}", exc_info=True)
-             raise CrossMatchError(f"Error during epoch propagation: {e}") from e
-        except Exception as e:
-            logger.error(f"Unexpected error during epoch propagation: {e}", exc_info=True)
-            raise CrossMatchError(f"Unexpected error during epoch propagation: {e}") from e
-
-    def _execute_remote_tap_chunked_spatial_join(
-        self,
-        config1: Dict[str, Any],
-        config2: Dict[str, Any],
-        nside: int = 32, # Default HEALPix nside for chunking
-        **params,
-    ) -> pd.DataFrame:
-        """Executes remote-remote spatial match by chunking the sky area using HEALPix.
-
-        Performs a spatial JOIN query on the remote TAP service for each chunk
-        and downloads the results.
-
-        Requires 'ra', 'dec', 'radius_arcsec' in params to define the area.
-        Assumes both catalogues are on the same TAP service.
-        """
-        cat_name1 = config1.get("_catalogue_name", "input1")
-        cat_name2 = config2.get("_catalogue_name", "input2")
-        logger.info(
-            f"Executing Remote TAP Chunked Spatial JOIN ({cat_name1} vs {cat_name2}) using HEALPix nside={nside}"
-        )
-
-        # --- Validate and Extract Parameters ---
-        if not all(k in params for k in ["ra", "dec", "radius_arcsec"]):
-            raise ValueError(
-                "Missing required parameters 'ra', 'dec', 'radius_arcsec' for spatial chunking."
-            )
-        try:
-            center_coord = SkyCoord(ra=params["ra"] * u.deg, dec=params["dec"] * u.deg, frame="icrs")
-            search_radius = params["radius_arcsec"] * u.arcsec
-            radius_deg = search_radius.to(u.deg).value # Radius for JOIN ON clause
-        except (ValueError, TypeError, u.UnitConversionError) as e:
-            raise CrossMatchError(f"Invalid spatial parameters (ra/dec/radius): {e}") from e
-
-        # --- Get Service and Table Info ---
-        service_config = config1 # Assumes same service
-        tap_url = service_config.get("access_url")
-        if not tap_url:
-            raise CrossMatchError("Missing access_url in service config for remote chunked join.")
-
-        table1 = config1.get("access_identifier")
-        table2 = config2.get("access_identifier")
-        if not table1 or not table2:
-             raise CrossMatchError("Missing access_identifier for one or both catalogues in remote chunked join.")
-
-        # --- Determine HEALPix Pixels ---
-        try:
-            hp = HEALPix(nside=nside, order="nested", frame="icrs")
-            # Add buffer to cone search radius? Maybe 1/sqrt(NPIX)*60 arcmin? Safer to search slightly larger area.
-            buffer = hp.pixel_resolution.to(u.arcsec) * 1.5 # Example buffer
-            logger.debug(f"Using search radius {search_radius.arcsec:.2f} + buffer {buffer.arcsec:.2f} arcsec for pixel identification.")
-            pixels = hp.cone_search_skycoord(center_coord, search_radius + buffer)
-            logger.info(f"Identified {len(pixels)} HEALPix pixels (nside={nside}) covering the search area + buffer.")
-            if len(pixels) == 0:
-                 logger.warning("No HEALPix pixels found in the search cone. Returning empty result.")
-                 return pd.DataFrame()
-        except ImportError:
-            logger.error("'astropy-healpix' library is required for chunked matching.")
-            raise CrossMatchError(
-                "'astropy-healpix' library is required for this strategy. Please install it."
-            )
-        except Exception as e:
-            logger.error(f"Error during HEALPix pixel determination: {e}", exc_info=True)
-            raise CrossMatchError(f"Error during HEALPix pixel determination: {e}") from e
-
-        # --- Define Aliases and Column Selection (similar to _execute_remote_join_match) ---
-        alias1 = "t1"
-        alias2 = "t2"
-        cols1_req_raw = params.get("columns1") or config1.get("default_columns")
-        cols2_req_raw = params.get("columns2") or config2.get("default_columns")
-        essential_cols1 = {config1.get(c) for c in ["ra_column", "dec_column"] if config1.get(c)}
-        essential_cols2 = {config2.get(c) for c in ["ra_column", "dec_column"] if config2.get(c)}
-        cols1_req = list((set(cols1_req_raw) if cols1_req_raw else set()) | essential_cols1)
-        cols2_req = list((set(cols2_req_raw) if cols2_req_raw else set()) | essential_cols2)
-        cols1_req = [c for c in cols1_req if c is not None]
-        cols2_req = [c for c in cols2_req if c is not None]
-        cols1_select = [f'{alias1}."{c}" AS {alias1}_{c}' for c in set(cols1_req)]
-        cols2_select = [f'{alias2}."{c}" AS {alias2}_{c}' for c in set(cols2_req)]
-        if "*" in (cols1_req_raw or []): cols1_select = [f"{alias1}.*"]
-        if "*" in (cols2_req_raw or []): cols2_select = [f"{alias2}.*"]
-        select_clause = ", ".join(cols1_select + cols2_select)
-        if not select_clause: select_clause = f"{alias1}.*, {alias2}.*"
-
-        # --- Get RA/Dec Column Names ---
-        ra_col1 = config1.get("ra_column")
-        dec_col1 = config1.get("dec_column")
-        ra_col2 = config2.get("ra_column")
-        dec_col2 = config2.get("dec_column")
-        if not ra_col1 or not dec_col1 or not ra_col2 or not dec_col2:
-            raise CrossMatchError("Missing RA/Dec column configuration for remote chunked spatial join.")
-
-        # --- Process Chunks ---       
-        all_results = []
-        tap_service = None # Initialize TAP service connection
-
-        for i, pix_id in enumerate(pixels):
-            logger.info(f"Processing chunk {i+1}/{len(pixels)} (Pixel ID: {pix_id})...")
-            try:
-                # Get pixel boundaries and approximate with bounding box
-                corners = hp.boundaries_skycoord([pix_id])[0]
-                ra_corners = corners.ra.wrap_at(180 * u.deg).deg
-                dec_corners = corners.dec.deg
-                ra_min, ra_max = np.min(ra_corners), np.max(ra_corners)
-                dec_min, dec_max = np.min(dec_corners), np.max(dec_corners)
-                # ADQL BOX: center and width/height
-                # TODO: Handle RA wrap-around for BOX definition more robustly if needed
-                ra_cen = (ra_min + ra_max) / 2
-                dec_cen = (dec_min + dec_max) / 2
-                width = ra_max - ra_min
-                height = dec_max - dec_min
-                # Ensure width is positive, handle wrap near RA=0/360 if min>max after wrap
-                if width < 0: width += 360
-                if width <= 0 or height <= 0: # Skip degenerate pixels
-                    logger.warning(f"Skipping degenerate pixel {pix_id} (width={width}, height={height}).")
-                    continue
-                
-                adql_box = f"BOX('ICRS', {ra_cen}, {dec_cen}, {width}, {height})"
-                logger.debug(f"Pixel {pix_id} ADQL Box: {adql_box}")
-
-                # --- Construct ADQL Query for the Chunk ---
-                # Join ON distance, WHERE both points are contained in the pixel box
-                adql_query = f"""
-                SELECT {select_clause}
-                FROM {table1} AS {alias1}
-                INNER JOIN {table2} AS {alias2}
-                ON DISTANCE({alias1}."{ra_col1}", {alias1}."{dec_col1}", {alias2}."{ra_col2}", {alias2}."{dec_col2}") <= {radius_deg}
-                WHERE CONTAINS(POINT('ICRS', {alias1}."{ra_col1}", {alias1}."{dec_col1}"), {adql_box}) = 1
-                  AND CONTAINS(POINT('ICRS', {alias2}."{ra_col2}", {alias2}."{dec_col2}"), {adql_box}) = 1
-                """
-                # Note: Some TAP services might prefer INTERSECTS(REGION, BOX)
-                # Note: Applying spatial constraint in WHERE after JOIN might be slow on some systems.
-                # Optimizations depend on the specific TAP service.
-
-                logger.debug(f"Chunk {i+1} ADQL Query:\n{adql_query}")
-
-                # --- Execute Query for the Chunk ---
-                if tap_service is None:
-                    # Get authenticated TAP service on first chunk
-                    auth_info = self.auth_config.get(config1.get("_archive_name"))
-                    tap_kwargs = {}
-                    if auth_info:
-                        if "user" in auth_info and "password" in auth_info:
-                            tap_kwargs["user"] = auth_info.get("user")
-                            tap_kwargs["password"] = auth_info.get("password")
-                    tap_service = get_tap_service(tap_url, **tap_kwargs)
-
-                # Fetch relevant params for execute_tap_query
-                exec_params = {k: v for k, v in params.items() if k in ['retry_delay', 'timeout', 'max_retries', 'verbose']}
-                chunk_result_df = execute_tap_query(
-                    tap_service, adql_query, **exec_params
-                )
-
-                if chunk_result_df is not None and not chunk_result_df.empty:
-                    logger.info(f"Chunk {i+1} TAP JOIN yielded {len(chunk_result_df)} pairs.")
-                    all_results.append(chunk_result_df)
-                else:
-                     logger.info(f"Chunk {i+1} yielded no results from TAP JOIN.")
-
-            except (TapError, ConnectionError, Timeout, RequestException) as e:
-                logger.warning(
-                    f"TAP query failed for chunk {i+1} (Pixel {pix_id}): {e}. Skipping chunk.", exc_info=True
-                )
-                continue # Skip to the next chunk
-            except Exception as e:
-                logger.error(
-                    f"Unexpected error processing chunk {i+1} (Pixel {pix_id}): {e}", exc_info=True
-                )
-                continue # Skip to the next chunk
+        except (ValueError, CrossMatchError) as e:
+            logger.error(f"Error processing chunked match: {e}", exc_info=True)
+            raise CrossMatchError(f"Error processing chunked match: {e}") from e
 
         # --- Combine Results ---       
         if not all_results:
-            logger.warning("Remote TAP Chunked Spatial Join resulted in no matches across all chunks.")
+            logger.warning("No matches found in any chunk.")
             return pd.DataFrame()
         else:
-            logger.info(f"Concatenating results from {len(all_results)} chunks...")
+            logger.info(f"Concatenating results from {len(all_results)} successful chunks...")
             try:
                 final_df = pd.concat(all_results, ignore_index=True)
-                # Optional: Deduplicate based on primary keys if overlaps might cause issues?
-                # Depends on how precise the BOX/CONTAINS is vs the JOIN radius.
-                # E.g., final_df = final_df.drop_duplicates(subset=[f'{alias1}_ID_COL', f'{alias2}_ID_COL'])
-                logger.info(f"Remote TAP Chunked Spatial Join completed. Total pairs found: {len(final_df)}")
+                logger.info(f"Final DataFrame shape: {final_df.shape}")
                 return final_df
             except MemoryError as e:
-                logger.error("Memory error combining chunked TAP JOIN results.")
-                raise CrossMatchError("Memory error combining chunked TAP JOIN results") from e
+                logger.error("Memory error combining chunked match results.")
+                raise CrossMatchError("Memory error combining chunked match results") from e
             except Exception as e:
-                logger.error(f"Error combining chunked TAP JOIN results: {e}", exc_info=True)
-                raise CrossMatchError(f"Error combining chunked TAP JOIN results: {e}") from e
+                logger.error(f"Error combining chunked match results: {e}", exc_info=True)
+                raise CrossMatchError(f"Error combining chunked match results: {e}") from e
+
+    def _match_chunk_against_static(
+        self,
+        chunk_df: pd.DataFrame,
+        chunk_config: Dict[str, Any],
+        static_config: Dict[str, Any],
+        chunk_input_index: int,
+        params: Dict[str, Any]
+    ) -> Optional[pd.DataFrame]:
+        """Matches a single chunk against the static catalogue."""
+        # Implement matching logic here
+        # This is a placeholder and should be replaced with the actual implementation
+        # For now, we'll return an empty DataFrame
+        return pd.DataFrame()
+
+    # -----------------------------------------------------------
+    # CDS XMatch Local-Remote Strategy
+    # -----------------------------------------------------------
+
+    def _execute_cds_xmatch_local_remote(
+        self, config1: Dict[str, Any], config2: Dict[str, Any], **params
+    ) -> pd.DataFrame:
+        cat_name1 = config1.get("_catalogue_name", "input1")
+        cat_name2 = config2.get("_catalogue_name", "input2")
+        logger.info(f"Executing CDS XMatch Local-Remote strategy for {cat_name1} and {cat_name2}")
+
+        try:
+            # Implement CDS XMatch Local-Remote logic here
+            # This is a placeholder and should be replaced with the actual implementation
+            # For now, we'll return an empty DataFrame
+            return pd.DataFrame()
+        except Exception as e:
+            logger.error(f"Unexpected error executing CDS XMatch Local-Remote strategy: {e}")
+            raise CrossMatchError(f"Unexpected error executing CDS XMatch Local-Remote strategy: {e}") from e
