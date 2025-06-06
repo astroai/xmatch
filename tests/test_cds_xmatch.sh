@@ -4,9 +4,14 @@
 
 set -e
 
-OUTPUT_FILE="tests/output_cds_xmatch.parquet"
-CONFIG_FILE="src/xmatch/xmatch.yaml"
-LOCAL_FILE="tests/test_cds_input.csv"
+TEST_NAME="cds_xmatch"
+
+# Get the directory where the script is located
+testdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p "$testdir/outputs"
+
+OUTPUT_FILE="$testdir/outputs/output_cds_xmatch.parquet"
+LOCAL_FILE="$testdir/inputs/test_cds_input.csv"
 
 # Define the remote catalogue configured to use CDS XMatch
 # This entry MUST exist in xmatch.yaml and point to the 'cds' archive's 'xmatch_service'.
@@ -22,23 +27,14 @@ LOCAL_FILE="tests/test_cds_input.csv"
 #     estimated_size: 'huge'
 REMOTE_CATALOGUE="twomass_cds_xmatch"
 
-# Check if the assumed catalogue name exists in the config file
-if ! grep -q "$REMOTE_CATALOGUE:" "$CONFIG_FILE"; then
-    echo "Warning: Catalogue entry '$REMOTE_CATALOGUE' might be missing or named differently in $CONFIG_FILE." >&2
-    echo "         Please ensure it is defined correctly (using archive: cds, service_id: xmatch_service) for this test." >&2
-    # Decide whether to exit or proceed cautiously
-    # exit 1 
-fi
-
 RADIUS_ARCSEC=5.0
 
 # Clean up previous run
 rm -f $OUTPUT_FILE
 
-# Run the xmatch command
+# Run the xmatch command directly
 # Expecting the 'cds_xmatch_local_remote' strategy.
-python -m src.xmatch.cli $LOCAL_FILE $REMOTE_CATALOGUE \
-    --config $CONFIG_FILE \
+xmatch $LOCAL_FILE $REMOTE_CATALOGUE \
     --radius $RADIUS_ARCSEC \
     --ra1-col ra_in \
     --dec1-col dec_in \
@@ -57,4 +53,4 @@ fi
 
 echo "test_cds_xmatch.sh PASSED (Basic check - file created)"
 
-# rm -f $OUTPUT_FILE 
+# rm -f $OUTPUT_FILE

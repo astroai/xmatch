@@ -1,8 +1,17 @@
 #!/bin/bash
+set -e
 
-xmatch my_sources.csv gaia_cds \
-       -o quick_test_output.parquet \
+TEST_NAME="simple"
+
+# Get the directory where the script is located
+testdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p "$testdir/outputs"
+
+# Simple test of basic functionality
+# Run this test with the working directory set to the project root
+
+xmatch "$testdir/inputs/simple_sources.csv" gaia_cds \
+       -o "$testdir/outputs/quick_test_output.parquet" \
        -r 2.0 \
-       --config=$HOME/src/xmatch/src/xmatch/xmatch.yaml \
        -vv \
-       --columns-2 "Source,Gmag,BPmag,RPmag,parallax"
+       --columns-2 "Source,Gmag,BPmag,RPmag,Plx"

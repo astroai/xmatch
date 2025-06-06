@@ -5,18 +5,22 @@ import subprocess
 from unittest.mock import MagicMock, patch, call
 import pandas as pd
 from pathlib import Path
+import tempfile
 
 # Adjust the import based on your project structure
-from src.xmatch.stilts import (
+from xmatch.stilts import (
     _build_stilts_command,
     _get_error_config,
     _build_error_value_expression,
     _build_correlation_expression,
-    StiltsError, # Import StiltsError if needed for testing exceptions
-    _run_stilts,
     _prepare_input_table,
-    crossmatch_sky
+    _run_stilts,
+    cdsskymatch,
+    stilts_cdsskymatch,
+    crossmatch_id, 
+    StiltsError, 
 )
+from xmatch.crossmatch import CrossMatch 
 
 # --- Tests for _build_stilts_command ---
 
@@ -225,14 +229,14 @@ def sample_config_sky_errors():
 
 # --- Tests for crossmatch_sky ---
 
-@patch('src.xmatch.stilts._run_stilts')
-@patch('src.xmatch.stilts._prepare_input_table', side_effect=lambda df, td, fn: str(Path(td) / fn))
+@patch('xmatch.stilts._run_stilts')
+@patch('xmatch.stilts._prepare_input_table', side_effect=lambda df, td, fn: str(Path(td) / fn))
 @patch('shutil.copy2')
 @patch('tempfile.NamedTemporaryFile')
 # Mock the error config helpers to simplify testing crossmatch_sky logic
-@patch('src.xmatch.stilts._get_error_config', return_value=(None, None, 0.1, 'arcsec'))
-@patch('src.xmatch.stilts._build_error_value_expression', return_value='0.1')
-@patch('src.xmatch.stilts._build_correlation_expression', return_value='0')
+@patch('xmatch.stilts._get_error_config', return_value=(None, None, 0.1, 'arcsec'))
+@patch('xmatch.stilts._build_error_value_expression', return_value='0.1')
+@patch('xmatch.stilts._build_correlation_expression', return_value='0')
 def test_crossmatch_sky_basic(m_corr_expr, m_err_expr, m_err_conf, m_tmpf, m_copy, m_prep, m_run, sample_df, sample_config_sky):
     """Test basic crossmatch_sky call (sky matcher)."""
     # Mock NamedTemporaryFile to return a predictable name
@@ -243,7 +247,7 @@ def test_crossmatch_sky_basic(m_corr_expr, m_err_expr, m_err_conf, m_tmpf, m_cop
     method_config = {"params": {"matcher": "sky", "params": "2.0"}} # 2 arcsec radius
     output_suffix = "_sky_match"
 
-    result_path = crossmatch_sky(
+    result_path = crossmatch_id(
         catalogue_1_df=sample_df,
         catalogue_2_df=sample_df, # Use same for simplicity
         config_1=sample_config_sky,
@@ -281,14 +285,14 @@ def test_crossmatch_sky_basic(m_corr_expr, m_err_expr, m_err_conf, m_tmpf, m_cop
     assert m_copy.call_args[0][0].endswith("output_sky_match.parquet")
     assert m_copy.call_args[0][1] == "/tmp/final_output_sky.parquet"
 
-@patch('src.xmatch.stilts._run_stilts')
-@patch('src.xmatch.stilts._prepare_input_table', side_effect=lambda df, td, fn: str(Path(td) / fn))
+@patch('xmatch.stilts._run_stilts')
+@patch('xmatch.stilts._prepare_input_table', side_effect=lambda df, td, fn: str(Path(td) / fn))
 @patch('shutil.copy2')
 @patch('tempfile.NamedTemporaryFile')
 # Mock error config helpers to return error column names etc.
-@patch('src.xmatch.stilts._get_error_config')
-@patch('src.xmatch.stilts._build_error_value_expression')
-@patch('src.xmatch.stilts._build_correlation_expression')
+@patch('xmatch.stilts._get_error_config')
+@patch('xmatch.stilts._build_error_value_expression')
+@patch('xmatch.stilts._build_correlation_expression')
 def test_crossmatch_sky_skyellipse(m_corr_expr, m_err_expr, m_err_conf, m_tmpf, m_copy, m_prep, m_run, sample_df, sample_config_sky_errors):
     """Test crossmatch_sky call with skyellipse matcher and error columns."""
     # Configure mocks for error helpers
@@ -309,7 +313,7 @@ def test_crossmatch_sky_skyellipse(m_corr_expr, m_err_expr, m_err_conf, m_tmpf, 
     columns_1 = ["id", "ra", "dec"]
     columns_2 = ["ra_err", "dec_err"] # Keep only specific cols from cat2
 
-    result_path = crossmatch_sky(
+    result_path = crossmatch_id(
         catalogue_1_df=sample_df,
         catalogue_2_df=sample_df, # Use same df, but different config
         config_1=sample_config_sky_errors, # Config with errors

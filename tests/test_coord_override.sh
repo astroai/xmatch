@@ -1,12 +1,15 @@
 #!/bin/bash
-
-# Test overriding default RA/Dec column names for local files.
-
 set -e
 
-OUTPUT_FILE="tests/output_coord_override.parquet"
-FILE1="tests/test_id_join_1.csv" # Has columns 'ra', 'dec'
-FILE2="tests/test_coord_override_2.csv" # Has columns 'ALPHA_J2000', 'DELTA_J2000'
+TEST_NAME="coord_override"
+
+# Get the directory where the script is located
+testdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p "$testdir/outputs"
+
+OUTPUT_FILE="$testdir/outputs/output_coord_override.parquet"
+FILE1="$testdir/inputs/test_id_join_1.csv" # Has columns 'ra', 'dec'
+FILE2="$testdir/inputs/test_coord_override_2.csv" # Has columns 'ALPHA_J2000', 'DELTA_J2000'
 
 RADIUS_ARCSEC=72 # Large enough radius (0.01 deg ~ 36 arcsec) to ensure matches
 
@@ -14,7 +17,7 @@ RADIUS_ARCSEC=72 # Large enough radius (0.01 deg ~ 36 arcsec) to ensure matches
 rm -f $OUTPUT_FILE
 
 # Run the xmatch command, overriding column names
-python -m src.xmatch.cli $FILE1 $FILE2 \
+xmatch $FILE1 $FILE2 \
     --radius $RADIUS_ARCSEC \
     --ra1-col ra \
     --dec1-col dec \
@@ -34,4 +37,4 @@ fi
 
 echo "test_coord_override.sh PASSED (Basic check - file created)"
 
-# rm -f $OUTPUT_FILE 
+# rm -f $OUTPUT_FILE

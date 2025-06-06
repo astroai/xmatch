@@ -2,516 +2,622 @@ import argparse
 import sys
 import logging
 import ast
+from pathlib import Path
+from typing import List, Optional, Dict, Any
 
+from . import __version__
 from .crossmatch import CrossMatch, CrossMatchError
-from pathlib import Path # Added for Path handling
 
-# Basic logging configuration (can be refined later)
-# Configure logging using standard setup for consistency
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-log = logging.getLogger(__name__) # Use module name for logger
+logger = logging.getLogger(__name__)
 
-def parse_columns(column_str):
-    """Helper function to parse comma-separated column names."""
-    if not column_str:
-        # Return None instead of empty list, potentially easier to handle in crossmatch method
-        return None
-    # Handle potential extra spaces and empty elements
-    cols = [col.strip() for col in column_str.split(',') if col.strip()]
-    return cols if cols else None
+def resolve_catalogue_name(name: str, cm: CrossMatch) -> str:
+    """Resolves a catalogue alias to its full name.
+    
+    Checks if the name is an alias and returns the resolved name,
+    otherwise returns the original name.
+    
+    Args:
+        name: The catalogue name or alias
+        cm: CrossMatch instance with loaded config
+        
+    Returns:
+        The resolved catalogue name
+    """
+    if not hasattr(cm, 'config') or not cm.config:
+        return name
+        
+    # Check catalogue aliases if available
+    aliases = cm.config.get('catalogue_aliases', {})
+    if name.lower() in aliases:
+        return aliases[name.lower()]
+    
+    return name
 
-# Added: Helper to parse ID join argument
-def parse_id_join(join_str):
-    """Parses --join-on-ids COL1:COL2 format."""
-    if not join_str:
-        return None
-    parts = join_str.split(':')
-    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
-        raise argparse.ArgumentTypeError(
-            "Invalid format for --join-on-ids. Expected 'COLUMN_NAME_1:COLUMN_NAME_2'."
-        )
-    return {'cat1': parts[0].strip(), 'cat2': parts[1].strip()}
+def handle_archive_override(name: str, archive_prefix: str, cm: CrossMatch) -> str:
+    """Apply archive override to catalogue name if needed.
+    
+    Args:
+        name: Original catalogue name
+        archive_prefix: Archive prefix to apply (e.g., 'esa', 'cds')
+        cm: CrossMatch instance with config
+        
+    Returns:
+        Updated catalogue name with archive prefix if applicable
+    """
+    resolved = resolve_catalogue_name(name, cm)
+    
+    # Handle the case where a simple name is given but archive override is specified
+    if resolved == name:  # No alias found
+        # Try constructing a catalogue name with archive prefix
+        with_archive = f"{name}_{archive_prefix}"
+        if with_archive in cm.config.get('catalogues', {}):
+            logger.info(f"Using {with_archive} based on archive override")
+            return with_archive
+    
+    return name
 
-# Removed load_config, list_catalogues, list_archives, describe_catalogue, describe_archive
-
-# --- Helper to print dictionary nicely ---
-def print_dict_details(data: dict, indent: str = "  "):
-    """Prints dictionary key-value pairs with indentation."""
-    if not isinstance(data, dict):
-        print(f"{indent}Invalid data format (expected dictionary).")
-        return
-    # Define a preferred order for common keys if desired
-    keys_order = ['description', 'format', 'path', 'ra_col', 'dec_col', 'required_columns', 'type', 'service_url', 'table_name', 'access_method', 'access_identifier', 'epoch']
-    printed_keys = set()
-
-    for key in keys_order:
-        if key in data:
-            print(f"{indent}{key}: {data[key]}")
-            printed_keys.add(key)
-
-    # Print any remaining keys (sorted alphabetically for consistency)
-    remaining_keys = sorted(data.keys() - printed_keys)
-    for key in remaining_keys:
-         print(f"{indent}{key}: {data[key]}")
-
-
-def main():
-    # Define epilog separately for clarity
-    epilog_text = ( # Enclose multi-line string in parentheses
-        "Examples:\n"
-        "  # Spatial match local files, save specific columns, override cat2 RA/Dec cols\n"
-        "  xmatch cat1.fits cat2.csv --radius 5 --columns-1 ra,dec,mag_g --columns-2 ID,RA,DEC --ra2-col RA --dec2-col DEC -o matched.csv\n\n"
-        "  # List configured catalogues\n"
-        "  xmatch --list-catalogues --config my_config.yaml\n\n"
-        "  # Describe a specific catalogue\n"
-        "  xmatch --describe-catalogue gaia_dr3\n\n"
-        "  # Match a local catalogue against a configured one, suggesting STILTS sky match\n"
-        "  xmatch local_cat gaia_dr3 --radius 2 --method stilts_sky -o gaia_local_match.parquet\n\n"
-        "  # Join two configured catalogues based on ID columns\n"
-        "  xmatch catalogue_a catalogue_b --join-on-ids source_id:original_ext_source_id -o id_joined.fits"
-    )
-
+def parse_args(args: List[str] = None) -> argparse.Namespace:
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="xmatch: Cross-match astronomical catalogues using the xmatch library.",
-        epilog=epilog_text,
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    ) # Correctly closed ArgumentParser call
-
-    # --- Informational arguments ---
-    info_group = parser.add_argument_group('Informational Commands')
-    info_group.add_argument(
-        '--list-catalogues',
-        action='store_true',
-        help='List available catalogues defined in the config file.'
-    )
-    info_group.add_argument(
-        '--list-archives',
-        action='store_true',
-        help='List available archives structures defined in the config file.'
-    )
-    info_group.add_argument(
-        '--describe-catalogue',
-        metavar='CATALOGUE_ENTRY',
-        help='Show details about a specific catalogue entry from the config file.'
-    )
-    info_group.add_argument(
-        '--describe-archive',
-        metavar='ARCHIVE_ENTRY',
-        help='Show details about a specific archive structure entry from the config file.'
+        description="Cross-match astronomical catalogues locally or via remote services",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # --- Catalogue Creation (New Mode) ---
-    create_group = parser.add_argument_group('Catalogue Creation')
-    create_group.add_argument(
-        '--create-catalogue-entry',
-        metavar='NEW_CAT_NAME',
-        help='Automatically create a new catalogue entry in the config file by querying TAP_SCHEMA.'
+    # Catalogue inputs (positional arguments)
+    parser.add_argument(
+        "catalogue_1",
+        nargs="?",
+        help="First catalogue: name of configured catalogue (e.g., 'gaia', 'galex') or path to local file",
     )
-    create_group.add_argument(
-        '--archive',
-        metavar='ARCHIVE_NAME',
-        help='Specify the archive (must be defined in config) containing the table for --create-catalogue-entry.'
-    )
-    create_group.add_argument(
-        '--access-id',
-        metavar='TABLE_NAME',
-        help='Specify the actual table name/access identifier on the remote service for --create-catalogue-entry.'
-    )
-    create_group.add_argument(
-        '--service-id',
-        metavar='SERVICE_ID',
-        default='tap_service',
-        help='Specify the service ID within the archive (default: tap_service) for --create-catalogue-entry.'
-    )
-    create_group.add_argument(
-        '--description',
-        metavar='\"Description Text\"',
-        help='Optionally provide a description for the new catalogue entry, overriding TAP_SCHEMA discovery.'
+    parser.add_argument(
+        "catalogue_2",
+        nargs="?",
+        help="Second catalogue: name of configured catalogue (e.g., 'gaia', 'galex') or path to local file",
     )
 
-    # --- Configuration ---
-    config_group = parser.add_argument_group('Configuration')
-    config_group.add_argument(
-        '--config',
-        metavar='PATH',
-        type=str,
-        default=None,
-        help='Path to the xmatch configuration file (e.g., xmatch.yaml). '
-             'If not provided, defaults are checked (see documentation).'
+    # Archive selection for catalogue lookup
+    parser.add_argument(
+        "--archive-1",
+        help="Specify archive for first catalogue (e.g., 'esa', 'cds', 'noao')",
+        dest="archive_1",
+    )
+    parser.add_argument(
+        "--archive-2",
+        help="Specify archive for second catalogue (e.g., 'esa', 'cds', 'noao')",
+        dest="archive_2",
     )
 
-    # --- Cross-match parameters ---
-    xmatch_group = parser.add_argument_group('Cross-match Parameters')
-    xmatch_group.add_argument(
-        '--columns-1',
-        metavar='COLS',
-        type=parse_columns,
-        help='Comma-separated list of columns to keep/select from the first catalogue.'
+    # Column selection for both catalogues
+    parser.add_argument(
+        "--columns-1",
+        help="Comma-separated list of columns to select from first catalogue (e.g., 'ra,dec,mag_g')",
+        dest="columns_1",
     )
-    xmatch_group.add_argument(
-        '--columns-2',
-         metavar='COLS',
-        type=parse_columns,
-        help='Comma-separated list of columns to keep/select from the second catalogue.'
+    parser.add_argument(
+        "--columns-2",
+        help="Comma-separated list of columns to select from second catalogue (e.g., 'ra,dec,mag_r')",
+        dest="columns_2",
     )
-    xmatch_group.add_argument(
-        '--radius',
-        '-r',
-        metavar='ARCSEC',
+    
+    # Option to show default columns
+    parser.add_argument(
+        "--show-default-columns",
+        action="store_true",
+        help="Show default columns for catalogues and proceed with crossmatch",
+        dest="show_default_columns",
+    )
+
+    # Output options
+    parser.add_argument(
+        "-o", 
+        "--output",
+        dest="output_file",
+        help="Output file path (.parquet, .fits, or .csv)",
+    )
+
+    # Matching parameters
+    parser.add_argument(
+        "-r", 
+        "--radius",
+        dest="radius_arcsec",
         type=float,
-        required=False, # Optional, checked later if needed
-        help='Cross-match radius in arcseconds. Required for spatial matching unless --join-on-ids is used.'
+        default=1.0,
+        help="Match radius in arcseconds",
     )
-    # Added: ID Join
-    xmatch_group.add_argument(
-        '--join-on-ids',
-        metavar='\"{'cat1':'id_col_1', 'cat2':'id_col_2'}\"',
-        help="Perform an ID-based join instead of spatial. \
-            Provide a string dictionary mapping 'cat1' and 'cat2' to the respective ID column names. \
-            Example: \"{'cat1':'source_id', 'cat2':'gaia_dr3_source_id'}\"",
-        default=None,
+    
+    # Column overrides for local files
+    parser.add_argument(
+        "--ra1", 
+        dest="ra_column_1", 
+        help="RA column name for first catalogue"
     )
-    # Added: Coordinate Column Overrides
-    xmatch_group.add_argument(
-        '--ra1-col',
-        type=str,
-        default="ra",
-        help="RA column name for the first input if it is a local file/DataFrame (default: ra)"
+    parser.add_argument(
+        "--dec1", 
+        dest="dec_column_1", 
+        help="Dec column name for first catalogue"
     )
-    xmatch_group.add_argument(
-        '--dec1-col',
-        type=str,
-        default="dec",
-        help="Dec column name for the first input if it is a local file/DataFrame (default: dec)"
+    parser.add_argument(
+        "--ra2", 
+        dest="ra_column_2", 
+        help="RA column name for second catalogue"
     )
-    xmatch_group.add_argument(
-        '--ra2-col',
-        type=str,
-        default="ra",
-        help="RA column name for the second input if it is a local file/DataFrame (default: ra)"
+    parser.add_argument(
+        "--dec2", 
+        dest="dec_column_2", 
+        help="Dec column name for second catalogue"
     )
-    xmatch_group.add_argument(
-        '--dec2-col',
-        type=str,
-        default="dec",
-        help="Dec column name for the second input if it is a local file/DataFrame (default: dec)"
+    
+    # For ID-based joins
+    parser.add_argument(
+        "--id1", 
+        dest="id_column_1", 
+        help="ID column name for first catalogue"
     )
-    # Added: Method Hint
-    xmatch_group.add_argument(
-        '--method',
-        help='Suggest a specific cross-match method (e.g., stilts_sky, cds, tap_join). See documentation for available methods.'
+    parser.add_argument(
+        "--id2", 
+        dest="id_column_2", 
+        help="ID column name for second catalogue"
     )
-    xmatch_group.add_argument(
-        '--output',
-        '-o',
-        metavar='OUTPUT_FILE',
-        help='Path to save the cross-matched results (e.g., matched.csv, matched.parquet).'
+    parser.add_argument(
+        "--join-on-ids", 
+        dest="join_on_ids", 
+        action="store_true",
+        help="Perform ID-based join instead of spatial join"
+    )
+    
+    # Join type
+    parser.add_argument(
+        "--join", 
+        dest="join_type", 
+        choices=["1and2", "1or2", "all", "1not2", "2not1", "all1", "all2"],
+        default="1and2",
+        help="Join type: 1and2=inner, 1or2=outer, 1not2=left anti, 2not1=right anti, all=full"
+    )
+    
+    # For specifying spatial region
+    parser.add_argument(
+        "--ra", 
+        dest="ra", 
+        type=float,
+        help="RA of region center in degrees"
+    )
+    parser.add_argument(
+        "--dec", 
+        dest="dec", 
+        type=float,
+        help="Dec of region center in degrees"
+    )
+    
+    # Advanced error handling options
+    parser.add_argument(
+        "--matcher", 
+        dest="matcher", 
+        choices=["sky", "skyerr", "skyellipse"],
+        help="Matcher algorithm: 'sky' for fixed radius, 'skyerr' for symmetric errors, 'skyellipse' for error ellipses"
+    )
+    parser.add_argument(
+        "--max-error", 
+        dest="max_error", 
+        type=float,
+        help="Maximum separation in units of sigma (for skyerr/skyellipse matchers)"
+    )
+    
+    # Strategy selection
+    parser.add_argument(
+        "--strategy", 
+        dest="strategy", 
+        help="Force specific matching strategy"
+    )
+    
+    # Performance tuning
+    parser.add_argument(
+        "--n-workers", 
+        dest="n_workers", 
+        type=int,
+        help="Number of worker processes for parallel matching"
+    )
+    parser.add_argument(
+        "--chunk-size", 
+        dest="chunk_size", 
+        type=int,
+        help="Chunk size for processing large catalogs"
+    )
+    
+    # Info commands
+    parser.add_argument(
+        "--list-catalogues", 
+        dest="list_catalogues", 
+        action="store_true",
+        help="List available catalogues"
+    )
+    parser.add_argument(
+        "--describe", 
+        dest="describe_catalogue",
+        help="Describe a specific catalogue"
     )
 
-    # --- Input Catalogues (Positional) ---
+    # Config handling
     parser.add_argument(
-        'catalog_inputs',
-        metavar='CATALOGUE',
-        nargs='*',
-        help='Input catalogues: Two required for cross-matching. Can be file paths '
-             '(e.g., /path/to/cat.fits) or catalogue entry names defined in config.'
+        "--config", 
+        dest="config_file", 
+        help="Path to config file (default: use builtin config)"
     )
-
-    # --- Other Options ---
+    
+    # Authentication
     parser.add_argument(
-        '--verbose',
-        '-v',
-        action='count',
+        "--auth-config",
+        dest="auth_config",
+        help="Path to authentication config file"
+    )
+    
+    # Verbosity/logging
+    parser.add_argument(
+        "-v", 
+        "--verbose", 
+        dest="verbose", 
+        action="count",
         default=0,
-        help='Increase logging verbosity (-v for INFO, -vv for DEBUG).'
+        help="Increase verbosity (can be used multiple times)"
     )
     parser.add_argument(
-        '--log-file',
-        metavar='LOG_PATH',
-        help='Path to write detailed logs to a file.'
+        "--log-file", 
+        dest="log_file",
+        help="Log file path"
     )
+    
+    # Dry run
+    parser.add_argument(
+        "--dry-run", 
+        dest="dry_run", 
+        action="store_true",
+        help="Show what would be done without executing"
+    )
+    
+    # Version
+    parser.add_argument(
+        "--version", 
+        action="version", 
+        version=f"%(prog)s {__version__}"
+    )
+    
+    # Parse args
+    parsed_args = parser.parse_args(args)
+    
+    # Add default output file if not provided but catalogues are
+    if (parsed_args.catalogue_1 and parsed_args.catalogue_2 and 
+        not parsed_args.output_file and
+        not parsed_args.list_catalogues and
+        not parsed_args.describe_catalogue):
+        # Generate default output name based on input catalogues
+        cat1_name = Path(parsed_args.catalogue_1).stem if Path(parsed_args.catalogue_1).suffix else parsed_args.catalogue_1
+        cat2_name = Path(parsed_args.catalogue_2).stem if Path(parsed_args.catalogue_2).suffix else parsed_args.catalogue_2
+        parsed_args.output_file = f"{cat1_name}_{cat2_name}.parquet"
+        logger.info(f"No output file specified, using default: {parsed_args.output_file}")
+    
+    return parsed_args
 
-
-    # --- Parse Arguments ---
-    args = parser.parse_args()
-
-    # --- Setup Logging ---
-    log_level = logging.WARNING # Default level if not verbose
+def setup_logging(args: argparse.Namespace) -> None:
+    """Set up logging based on command-line arguments."""
+    log_level = logging.WARNING
     if args.verbose == 1:
         log_level = logging.INFO
     elif args.verbose >= 2:
         log_level = logging.DEBUG
 
+    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    
     # Configure root logger
     logging.basicConfig(
         level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=[logging.StreamHandler(sys.stdout)] # Ensure logs go to stdout
+        format=log_format,
+        handlers=[logging.StreamHandler()]
     )
-
-    # Configure file logging if requested
+    
+    # Add file handler if specified
     if args.log_file:
-        try:
-            log_path = Path(args.log_file).resolve()
-            log_path.parent.mkdir(parents=True, exist_ok=True) # Ensure directory exists
-            file_handler = logging.FileHandler(log_path, mode='a') # Append mode
-            file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            file_handler.setFormatter(file_formatter)
-            # Log DEBUG level and above to file
-            file_handler.setLevel(logging.DEBUG)
-            logging.getLogger().addHandler(file_handler) # Add handler to root logger
-            logging.getLogger().setLevel(min(log_level, logging.DEBUG)) # Ensure root level is low enough for file handler
-            log.info(f"Logging DEBUG+ level output to {log_path}")
-        except Exception as e:
-            log.error(f"Failed to set up log file handler for {args.log_file}: {e}")
-            # Continue without file logging
+        file_handler = logging.FileHandler(args.log_file)
+        file_handler.setFormatter(logging.Formatter(log_format))
+        logging.getLogger().addHandler(file_handler)
+        
+    # Set level for some noisy libraries
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("pyvo").setLevel(max(logging.INFO, log_level))
 
-    log.debug(f"Parsed arguments: {vars(args)}")
+def list_catalogues(cm: CrossMatch) -> None:
+    """Print a list of available catalogues."""
+    catalogues = {}
+    
+    # Get catalogue definitions
+    if hasattr(cm, 'config') and 'catalogues' in cm.config:
+        catalogues = cm.config['catalogues']
+    else:
+        print("No catalogues configured.")
+        return
+    
+    # Get aliases for more helpful output
+    aliases = {}
+    if 'catalogue_aliases' in cm.config:
+        # Invert the aliases mapping for display
+        for alias, cat_name in cm.config['catalogue_aliases'].items():
+            if cat_name not in aliases:
+                aliases[cat_name] = []
+            aliases[cat_name].append(alias)
+    
+    # Print header
+    print("\nAvailable catalogues:")
+    print(f"{'NAME':<16} {'ALIASES':<25} {'ARCHIVE':<12} {'DESCRIPTION':<40}\n{'-'*93}")
+    
+    # Sort catalogues by name
+    for cat_name in sorted(catalogues.keys()):
+        cat_config = catalogues[cat_name]
+        cat_aliases = ', '.join(aliases.get(cat_name, []))
+        archive = cat_config.get('archive', 'unknown')
+        description = cat_config.get('description', 'No description')
+        
+        print(f"{cat_name:<16} {cat_aliases:<25} {archive:<12} {description:<40}")
+    
+    print("\nUse 'xmatch --describe CATALOGUE' for more details on a specific catalogue.")
 
-    # --- Instantiate CrossMatch Class ---
-    try:
-        log.debug(f"Initializing CrossMatch with config: {args.config}")
-        # Pass config path if provided, otherwise CrossMatch uses its default
-        cross_matcher = CrossMatch(config_file=args.config) if args.config else CrossMatch()
-        log.info(f"CrossMatch initialized using config: {cross_matcher.config_file}")
-    except CrossMatchError as e:
-        log.error(f"Failed to initialize CrossMatch: {e}")
-        sys.exit(1)
-    except FileNotFoundError as e:
-         log.error(f"Configuration file error: {e}")
-         sys.exit(1)
-    except Exception as e:
-         log.error(f"Unexpected error during CrossMatch initialization: {e}", exc_info=log_level <= logging.DEBUG)
-         sys.exit(1)
+def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> None:
+    """Print detailed information about a specific catalogue."""
+    # Resolve alias if needed
+    original_name = catalogue_name
+    catalogue_name = resolve_catalogue_name(catalogue_name, cm)
+    
+    # Get catalogue definition
+    if not hasattr(cm, 'config') or 'catalogues' not in cm.config:
+        print("No catalogues configured.")
+        return
+        
+    catalogues = cm.config['catalogues']
+    if catalogue_name not in catalogues:
+        print(f"Catalogue '{catalogue_name}' not found.")
+        if original_name != catalogue_name:
+            print(f"Note: '{original_name}' was resolved to '{catalogue_name}'.")
+        return
+    
+    cat_config = catalogues[catalogue_name]
+    
+    # Print catalogue details
+    print(f"\nCatalogue: {catalogue_name}")
+    if original_name != catalogue_name:
+        print(f"Alias: {original_name}")
+    
+    # Get all aliases for this catalogue
+    if 'catalogue_aliases' in cm.config:
+        aliases = [alias for alias, name in cm.config['catalogue_aliases'].items() 
+                  if name == catalogue_name and alias != original_name]
+        if aliases:
+            print(f"Other aliases: {', '.join(aliases)}")
+    
+    # Print general info
+    print(f"Description: {cat_config.get('description', 'No description')}")
+    print(f"Archive: {cat_config.get('archive', 'unknown')}")
+    print(f"Service: {cat_config.get('service_id', 'unknown')}")
+    print(f"Release: {cat_config.get('release', 'unknown')}")
+    
+    # Print table info
+    print(f"Table identifier: {cat_config.get('access_identifier', 'unknown')}")
+    
+    # Print spatial column info
+    print("\nSpatial columns:")
+    print(f"  RA: {cat_config.get('ra_column', 'unknown')}")
+    print(f"  Dec: {cat_config.get('dec_column', 'unknown')}")
+    if 'id_column' in cat_config:
+        print(f"  ID: {cat_config.get('id_column')}")
+    if 'pm_ra_column' in cat_config and 'pm_dec_column' in cat_config:
+        print(f"  Proper motion: {cat_config.get('pm_ra_column')} / {cat_config.get('pm_dec_column')}")
+    if 'epoch_column' in cat_config or 'epoch' in cat_config:
+        print(f"  Epoch: {cat_config.get('epoch_column', cat_config.get('epoch', 'unknown'))}")
+    
+    # Print error info
+    if 'ra_err_column' in cat_config or 'dec_err_column' in cat_config:
+        print("\nPosition errors:")
+        print(f"  RA error: {cat_config.get('ra_err_column', 'unknown')}")
+        print(f"  Dec error: {cat_config.get('dec_err_column', 'unknown')}")
+        if 'corr_column' in cat_config:
+            print(f"  Correlation: {cat_config.get('corr_column', 'unknown')}")
+        if 'pos_err_units' in cat_config:
+            print(f"  Units: {cat_config.get('pos_err_units', 'unknown')}")
+        if 'default_pos_error_arcsec' in cat_config:
+            print(f"  Default error: {cat_config.get('default_pos_error_arcsec')} arcsec")
+    
+    # Print default columns
+    if 'default_columns' in cat_config:
+        print("\nDefault columns:")
+        for col in cat_config['default_columns']:
+            print(f"  - {col}")
 
-    # --- Determine Operating Mode ---
-    info_commands_provided = [
-        args.list_catalogues, args.list_archives,
-        args.describe_catalogue, args.describe_archive
-    ]
-    num_info_commands = sum(bool(cmd) for cmd in info_commands_provided) # Count True/non-None values
-
-    # Check for create mode
-    is_create_mode = args.create_catalogue_entry is not None
-
-    is_info_mode = num_info_commands > 0 and not is_create_mode # Info mode excludes create mode
-    # Assume cross-match mode if no info/create command is given AND inputs are provided
-    is_potential_xmatch_mode = not is_info_mode and not is_create_mode and len(args.catalog_inputs) > 0
-
-    log.debug(f"Info mode: {is_info_mode}, Create mode: {is_create_mode}, Potential xmatch mode: {is_potential_xmatch_mode}, Num info commands: {num_info_commands}")
-
-    # --- Validate Arguments Based on Mode ---
-    if num_info_commands > 1:
-        parser.error("Please specify only one informational command (--list-*, --describe-*) at a time.")
-    if is_info_mode and is_create_mode:
-        parser.error("Cannot combine informational commands with --create-catalogue-entry.")
-    if is_create_mode and len(args.catalog_inputs) > 0:
-        parser.error("Catalogue inputs should not be provided with --create-catalogue-entry.")
-    if is_create_mode and (not args.archive or not args.access_id):
-        parser.error("--archive and --access-id are required when using --create-catalogue-entry.")
-
-    # --- Execute Action ---
-    try:
-        if is_info_mode:
-            if args.catalog_inputs:
-                parser.error("Catalogue inputs should not be provided with informational commands.")
-            # Cross-match specific args are ignored, maybe warn?
-            ignored_args = [arg for arg, val in [
-                ('radius', args.radius), ('output', args.output),
-                ('columns-1', args.columns_1), ('columns-2', args.columns_2),
-                ('join-on-ids', args.join_on_ids),
-                ('ra1-col', args.ra1_col), ('dec1-col', args.dec1_col),
-                ('ra2-col', args.ra2_col), ('dec2-col', args.dec2_col),
-                ('method', args.method)
-                ] if val is not None]
-            if ignored_args:
-                log.warning(f"Cross-match specific arguments ({', '.join(ignored_args)}) are ignored in informational mode.")
-
-            # --- Run Informational Command using CrossMatch instance ---
-            if args.list_catalogues:
-                catalogues = cross_matcher.catalogues_config
-                if not catalogues:
-                    print("No catalogues defined in the configuration.")
-                else:
-                    print("Available Catalogues:")
-                    for name in sorted(catalogues.keys()):
-                        desc = catalogues[name].get('description', 'No description')
-                        print(f"  - {name}: {desc}")
-
-            elif args.list_archives:
-                archives = cross_matcher.archives_config
-                if not archives:
-                     print("No archives defined in the configuration.")
-                else:
-                     print("Available Archives:")
-                     # Archives structure might be nested {archive_name: {service_id: details}}
-                     for archive_name in sorted(archives.keys()):
-                          print(f"  Archive: {archive_name}")
-                          archive_details = archives[archive_name]
-                          if isinstance(archive_details, dict):
-                               desc = archive_details.get('description', 'No description') # Top-level desc?
-                               print(f"    Description: {desc}")
-                               # List services within the archive
-                               for service_id in sorted(archive_details.keys()):
-                                    if service_id != 'description': # Skip description key
-                                        service_desc = archive_details[service_id].get('description', 'No service description')
-                                        print(f"    - Service: {service_id} ({service_desc})") # Assuming services are dicts
-                          else:
-                              print(f"    (Invalid structure for archive {archive_name})")
-
-            elif args.describe_catalogue:
-                cat_name = args.describe_catalogue
-                try:
-                    # Use the existing method to get fully resolved config
-                    cat_config = cross_matcher.get_catalogue_config(cat_name)
-                    print(f"\nDetails for Catalogue '{cat_name}':")
-                    print_dict_details(cat_config)
-                except CrossMatchError as e:
-                    log.error(e)
-                    # Suggest alternatives if possible
-                    available = sorted(cross_matcher.catalogues_config.keys())
-                    if available:
-                        print("\nAvailable catalogue entries:")
-                        for avail_name in available:
-                            print(f"  - {avail_name}")
-                    sys.exit(1)
-
-            elif args.describe_archive:
-                archive_name = args.describe_archive
-                if archive_name not in cross_matcher.archives_config:
-                     log.error(f"Archive entry '{archive_name}' not found in configuration.")
-                     available = sorted(cross_matcher.archives_config.keys())
-                     if available:
-                         print("\nAvailable archive entries:")
-                         for avail_name in available:
-                             print(f"  - {avail_name}")
-                     sys.exit(1)
-                else:
-                     print(f"\nDetails for Archive Structure '{archive_name}':")
-                     print_dict_details(cross_matcher.archives_config[archive_name])
-
-            sys.exit(0) # Exit cleanly after info command
-
-        elif is_create_mode:
-            log.info(f"--- Creating Catalogue Entry: {args.create_catalogue_entry} ---")
-            # Call the new method on the CrossMatch instance
-            # This method will handle querying TAP_SCHEMA and updating the YAML file
-            success = cross_matcher.create_catalogue_entry(
-                new_catalogue_name=args.create_catalogue_entry,
-                archive_name=args.archive,
-                access_identifier=args.access_id,
-                service_id=args.service_id,
-                description_override=args.description
-            )
-            if success:
-                log.info(f"Successfully created entry '{args.create_catalogue_entry}' in {cross_matcher.config_file}")
-                sys.exit(0)
-            else:
-                log.error(f"Failed to create catalogue entry '{args.create_catalogue_entry}'.")
-                sys.exit(1)
-
-        elif is_potential_xmatch_mode:
-            # --- Cross-Match Mode ---
-            if len(args.catalog_inputs) != 2:
-                 # Should not happen if logic is correct, but catch just in case
-                 parser.error("Internal Error or incorrect usage: Expected exactly two catalogue inputs for cross-matching.")
-
-            # Conditional radius check: Required only if NOT doing an ID join
-            if args.join_on_ids is None and args.radius is None:
-                 parser.error("Either --radius (for spatial join) or --join-on-ids (for ID join) must be provided.")
-            if args.join_on_ids and args.radius is not None:
-                 log.warning("Both --radius and --join-on-ids provided. --radius will be ignored for ID join.")
-            if args.radius is not None and args.radius <= 0:
-                 parser.error("The --radius must be a positive value.")
-
-            # Output is recommended but not strictly required by the class method
-            if not args.output:
-                log.warning("No --output file specified. Results will be returned as a DataFrame (and potentially lost if not handled).")
-
-            # --- Prepare parameters for cross_matcher.crossmatch ---
-            join_on_ids_dict = None
-            if args.join_on_ids:
-                 try:
-                      # Safely evaluate the string representation of the dictionary
-                      join_on_ids_dict = ast.literal_eval(args.join_on_ids)
-                      if not isinstance(join_on_ids_dict, dict) or 'cat1' not in join_on_ids_dict or 'cat2' not in join_on_ids_dict:
-                           raise ValueError("Invalid format for --join-on-ids. Must be a dict string with 'cat1' and 'cat2' keys.")
-                 except (ValueError, SyntaxError) as e:
-                      log.error(f"Invalid --join-on-ids format: {e}")
-                      sys.exit(1)
-
-            xmatch_params = {
-                "catalogue_1_input": args.catalog_inputs[0],
-                "catalogue_2_input": args.catalog_inputs[1],
-                "output_file": args.output,
-                "radius_arcsec": args.radius,
-                "columns1": args.columns_1, # Pass the list from parse_columns (or None)
-                "columns2": args.columns_2, # Pass the list from parse_columns (or None)
-                "join_on_ids": join_on_ids_dict,
-                "method": args.method,
-                # Add local column overrides
-                "ra1_col": args.ra1_col,
-                "dec1_col": args.dec1_col,
-                "ra2_col": args.ra2_col,
-                "dec2_col": args.dec2_col,
+def prepare_crossmatch_params(args: argparse.Namespace) -> Dict[str, Any]:
+    """Prepare parameters for the crossmatch function based on command-line arguments."""
+    params = {}
+    
+    # Basic matching params
+    if args.radius_arcsec is not None:
+        params['radius_arcsec'] = args.radius_arcsec
+    
+    # Column selection
+    if args.columns_1:
+        params['columns_1'] = [col.strip() for col in args.columns_1.split(',') if col.strip()]
+    if args.columns_2:
+        params['columns_2'] = [col.strip() for col in args.columns_2.split(',') if col.strip()]
+    
+    # Column overrides for local files
+    if args.ra_column_1:
+        params['ra_column_1'] = args.ra_column_1
+    if args.dec_column_1:
+        params['dec_column_1'] = args.dec_column_1
+    if args.ra_column_2:
+        params['ra_column_2'] = args.ra_column_2
+    if args.dec_column_2:
+        params['dec_column_2'] = args.dec_column_2
+    if args.id_column_1:
+        params['id_column_1'] = args.id_column_1
+    if args.id_column_2:
+        params['id_column_2'] = args.id_column_2
+    
+    # Join type
+    if args.join_type:
+        params['join_type'] = args.join_type
+    
+    # ID join
+    if args.join_on_ids:
+        if args.id_column_1 and args.id_column_2:
+            params['join_on_ids'] = {
+                'cat1': args.id_column_1,
+                'cat2': args.id_column_2
             }
-
-            log.debug(f"Crossmatch parameters: {xmatch_params}")
-
-            log.info("--- Starting Cross-Match ---")
-            log.info(f"Input 1: {args.catalog_inputs[0]}")
-            log.info(f"Input 2: {args.catalog_inputs[1]}")
-            log.info(f"Parameters: {xmatch_params}") # Log the actual params passed
-
-            # --- Call the core crossmatch method ---
-            results_df = cross_matcher.crossmatch(**xmatch_params)
-
-            log.info("--- Cross-Match Completed Successfully ---")
-
-            if results_df is not None:
-                log.info(f"Cross-match returned a DataFrame with {len(results_df)} rows.")
-                if not args.output:
-                    # If no output file, maybe print head? Be careful with large tables.
-                    print("\nCross-match Results Preview:")
-                    try:
-                        # Requires pandas to be installed
-                        import pandas as pd
-                        with pd.option_context('display.max_rows', 10, 'display.max_columns', 10):
-                             print(results_df)
-                    except ImportError:
-                         print("(Install pandas to see DataFrame preview)")
-                    except Exception as e:
-                         print(f"(Error generating preview: {e})")
-            elif args.output:
-                 log.info(f"Results saved to {Path(args.output).resolve()}")
-
-
-            sys.exit(0) # Success
-
         else:
-            # No informational command and no input catalogues provided
-            log.info("No command or catalogue inputs provided.")
-            parser.print_help()
-            sys.exit(0)
+            logger.warning("ID-based join requested but one or more ID columns not specified. "
+                          "Will attempt to use default ID columns from catalog configuration "
+                          "if available. Specify with --id1 and --id2 for explicit control.")
+            params['join_on_ids'] = {}
+    
+    # Spatial region
+    if args.ra is not None and args.dec is not None:
+        params['ra'] = args.ra
+        params['dec'] = args.dec
+    
+    # Error handling
+    if args.matcher:
+        params['matcher'] = args.matcher
+    if args.max_error is not None:
+        params['max_error'] = args.max_error
+    
+    # Strategy
+    if args.strategy:
+        params['strategy'] = args.strategy
+    
+    # Performance tuning
+    if args.n_workers is not None:
+        params['n_workers'] = args.n_workers
+    if args.chunk_size is not None:
+        params['chunk_size'] = args.chunk_size
+    
+    return params
+
+def main(args: Optional[List[str]] = None) -> int:
+    """Main entry point for the command-line interface."""
+    parsed_args = parse_args(args)
+
+    # Set up logging
+    setup_logging(parsed_args)
+
+    try:
+        # Import exceptions here, just before they might be caught
+        from .exceptions import CrossMatchError, ConfigError, TapError, StiltsError
+
+        # Initialize CrossMatch with config
+        cm = CrossMatch(config_file=parsed_args.config_file)
+
+        # Handle info commands
+        if parsed_args.list_catalogues:
+            list_catalogues(cm)
+            return 0
+
+        if parsed_args.describe_catalogue:
+            describe_catalogue(cm, parsed_args.describe_catalogue)
+            return 0
+
+        # Check if we have catalogues to match
+        if not parsed_args.catalogue_1 or not parsed_args.catalogue_2:
+            print("Error: Two catalogues are required for matching.")
+            print("Use 'xmatch --help' for usage information.")
+            print("Use 'xmatch --list-catalogues' to see available catalogues.")
+            return 1
+
+        # Resolve catalogue names/aliases
+        cat1_name = parsed_args.catalogue_1
+        cat2_name = parsed_args.catalogue_2
+
+        # Handle archive overrides
+        if parsed_args.archive_1:
+            cat1_name = handle_archive_override(cat1_name, parsed_args.archive_1.lower().rstrip('_'), cm)
+
+        if parsed_args.archive_2:
+            cat2_name = handle_archive_override(cat2_name, parsed_args.archive_2.lower().rstrip('_'), cm)
+
+        # Show default columns if requested
+        if parsed_args.show_default_columns:
+            # For catalogue 1
+            cat1_resolved = resolve_catalogue_name(cat1_name, cm)
+            cat1_is_catalogue = Path(cat1_name).suffix not in ['.csv', '.fits', '.parquet']
+            if cat1_is_catalogue and cat1_resolved in cm.config.get('catalogues', {}):
+                cat1_config = cm.config['catalogues'][cat1_resolved]
+                print(f"\nDefault columns for {cat1_name}:")
+                if 'default_columns' in cat1_config and cat1_config['default_columns']:
+                    for col in cat1_config['default_columns']:
+                        print(f"  - {col}")
+                else:
+                    print("  No default columns specified.")
+            else:
+                print(f"\n{cat1_name} is a local file, no default columns available.")
+
+            # For catalogue 2
+            cat2_resolved = resolve_catalogue_name(cat2_name, cm)
+            cat2_is_catalogue = Path(cat2_name).suffix not in ['.csv', '.fits', '.parquet']
+            if cat2_is_catalogue and cat2_resolved in cm.config.get('catalogues', {}):
+                cat2_config = cm.config['catalogues'][cat2_resolved]
+                print(f"\nDefault columns for {cat2_name}:")
+                if 'default_columns' in cat2_config and cat2_config['default_columns']:
+                    for col in cat2_config['default_columns']:
+                        print(f"  - {col}")
+                else:
+                    print("  No default columns specified.")
+            else:
+                print(f"\n{cat2_name} is a local file, no default columns available.")
+
+        # Prepare crossmatch parameters
+        params = prepare_crossmatch_params(parsed_args)
+
+        # Print what will be done
+        logger.info(f"Matching '{cat1_name}' with '{cat2_name}'")
+        logger.info(f"Parameters: {params}")
+        if parsed_args.output_file:
+            logger.info(f"Output will be written to: {parsed_args.output_file}")
+
+        # Skip actual execution in dry run mode
+        if parsed_args.dry_run:
+            logger.info("Dry run requested, skipping execution.")
+            return 0
+
+        # Execute the crossmatch
+        result_df = cm.crossmatch(
+            catalogue_1_input=cat1_name,
+            catalogue_2_input=cat2_name,
+            output_file=parsed_args.output_file,
+            **params
+        )
+
+        # If output_file is None, the result is returned and should be printed
+        if result_df is not None and parsed_args.output_file is None:
+            logger.info(f"Crossmatch returned {len(result_df)} rows.")
+            if not result_df.empty:
+                print("\nResults preview:")
+                print(result_df.head().to_string(index=False))
+            else:
+                print("No matches found.")
+
+        return 0
 
     except CrossMatchError as e:
-         log.error(f"Cross-matching Error: {e}", exc_info=log_level <= logging.DEBUG)
-         sys.exit(1)
-    except FileNotFoundError as e: # Catch file errors during matching too
-         log.error(f"File Error: {e}")
-         sys.exit(1)
-    except ImportError as e: # Catch missing dependencies like stilts
-         log.error(f"Import Error: {e}. Please ensure all required libraries (astropy, pandas, pyvo, etc.) are installed.")
-         sys.exit(1)
+        logger.error(f"CrossMatch error: {str(e)}")
+        return 1
+    except ConfigError as e:
+        logger.error(f"Configuration Error: {e}")
+        return 1
+    except TapError as e:
+        logger.error(f"TAP Service Error: {e}")
+        return 1
+    except StiltsError as e:
+        logger.error(f"STILTS Execution Error: {e}")
+        return 1
+    except KeyboardInterrupt:
+        logger.warning("Interrupted by user.")
+        return 130
     except Exception as e:
-         log.error(f"An unexpected error occurred: {e}", exc_info=log_level <= logging.DEBUG)
-         sys.exit(1)
-
+        logger.exception(f"Unexpected error: {str(e)}")
+        return 1
 
 if __name__ == "__main__":
-    main() 
+    sys.exit(main())

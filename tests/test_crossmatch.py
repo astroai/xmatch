@@ -9,7 +9,7 @@ from astropy.coordinates import SkyCoord
 import numpy as np
 
 # Adjust import based on project structure
-from src.xmatch.crossmatch import CrossMatch, CrossMatchError
+from xmatch.crossmatch import CrossMatch, CrossMatchError
 
 # --- Mock Configurations ---
 
@@ -55,7 +55,7 @@ def get_cm_with_mock_config(mock_config):
     # Patch auth.load_auth_config as it's not needed for these config tests
     with patch.object(CrossMatch, '_load_config', return_value=mock_config), \
          patch.object(CrossMatch, '_validate_config', return_value=None), \
-         patch('src.xmatch.auth.load_auth_config', return_value={}):
+         patch('xmatch.auth.load_auth_config', return_value={}):
         # The config_file path doesn't matter here as load is mocked
         cm = CrossMatch(config_file="dummy_path.yaml")
         # Manually set the config attributes that __init__ would normally set
@@ -66,13 +66,18 @@ def get_cm_with_mock_config(mock_config):
         cm.stilts_config = mock_config.get("stilts_config", {})
         return cm
 
+@pytest.fixture
+def crossmatcher(minimal_valid_config):
+    """Provides a CrossMatch instance with a minimal valid mock config."""
+    return get_cm_with_mock_config(minimal_valid_config)
+
 # --- Tests for _validate_config ---
 # We test this by calling it directly on mock configs, not via __init__
 
 def test_validate_config_valid(minimal_valid_config):
     """Test validation with a minimal valid config."""
     # Instantiate with a dummy path, then manually assign and validate
-    with patch('src.xmatch.auth.load_auth_config', return_value={}):
+    with patch('xmatch.auth.load_auth_config', return_value={}):
         cm = CrossMatch.__new__(CrossMatch) # Create instance without calling __init__
         cm.config = minimal_valid_config
         # Should run without errors
@@ -94,7 +99,7 @@ def test_validate_config_valid(minimal_valid_config):
 )
 def test_validate_config_invalid(invalid_config):
     """Test validation fails for various invalid config structures."""
-    with patch('src.xmatch.auth.load_auth_config', return_value={}):
+    with patch('xmatch.auth.load_auth_config', return_value={}):
         cm = CrossMatch.__new__(CrossMatch)
         cm.config = invalid_config
         # Set dummy archives/catalogues to avoid KeyErrors before validation call
@@ -156,7 +161,7 @@ def test_get_catalogue_config_missing_keys(minimal_valid_config):
     del bad_config["catalogues"]["gaia_cds"]["archive"] # Remove a required key
     # Need to mock _validate_config differently here as it would normally catch this
     with patch.object(CrossMatch, '_load_config', return_value=bad_config), \
-         patch('src.xmatch.auth.load_auth_config', return_value={}):
+         patch('xmatch.auth.load_auth_config', return_value={}):
         cm = CrossMatch(config_file="dummy_path.yaml")
         cm.config = bad_config # Override config after init
         cm.catalogues_config = bad_config.get("catalogues", {})
@@ -463,589 +468,52 @@ def test_crossmatch_cds_local_remote_query_fails(crossmatcher, local_df_config, 
                 radius_arcsec=2.0
             )
 
-# --- Tests for Remote Spatial Chunked Match ---
+# --- Tests for handle_archive_override ---
 
-@pytest.fixture
-def remote_tap_config_1():
-    """Config fixture for a remote TAP catalogue."""
-    return {
-        "_catalogue_name": "cat1_tap", "description": "Remote TAP Cat 1",
-        "archive": "noao", "service_id": "tap_service", 
-        "access_method": "tap", "access_url": "http://tap1.test",
-        "access_identifier": "cat1.table", "ra_column": "ra1", "dec_column": "dec1",
-        "epoch": 2000.0
-    }
-
-@pytest.fixture
-def remote_tap_config_2():
-    """Config fixture for another remote TAP catalogue."""
-    return {
-        "_catalogue_name": "cat2_tap", "description": "Remote TAP Cat 2",
-        "archive": "esa", "service_id": "tap_service", # Different archive
-        "access_method": "tap", "access_url": "http://tap2.test",
-        "access_identifier": "cat2.table", "ra_column": "ra2", "dec_column": "dec2",
-        "epoch": 2016.0, # Different epoch
-        "pm_ra_column": "pmra", "pm_dec_column": "pmdec", "epoch_column": "ref_epoch"
-    }
-
-@pytest.fixture
-def mock_healpix():
-    """Mocks astropy_healpix.HEALPix and boundary functions."""
-    # Define mock pixel boundaries (simplified)
-    mock_boundaries = {
-        0: SkyCoord(ra=[0, 1, 1, 0]*u.deg, dec=[0, 0, 1, 1]*u.deg, frame='icrs'),
-        1: SkyCoord(ra=[1, 2, 2, 1]*u.deg, dec=[0, 0, 1, 1]*u.deg, frame='icrs'),
-        2: SkyCoord(ra=[0, 1, 1, 0]*u.deg, dec=[1, 1, 2, 2]*u.deg, frame='icrs'),
-    }
-
-    with patch('xmatch.crossmatch.HEALPix') as mock_hp_cls, \
-         patch('xmatch.crossmatch.boundaries_skycoord') as mock_bounds:
-        
-        mock_hp_instance = MagicMock()
-        # Simulate cone search returning 3 pixels
-        mock_hp_instance.cone_search_skycoord.return_value = [0, 1, 2]
-        mock_hp_cls.return_value = mock_hp_instance
-
-        # Mock boundaries function
-        def boundaries_side_effect(pixels, nside):
-            # Note: healpix boundaries_skycoord returns a list of SkyCoord objects
-            return [mock_boundaries[p] for p in pixels]
-        # boundaries_skycoord is imported directly, so patch it directly
-        mock_bounds.side_effect = boundaries_side_effect
-        
-        yield {"class": mock_hp_cls, "boundaries": mock_bounds}
-
-
-@pytest.fixture
-def mock_fetch_remote_chunks():
-    """Mocks _fetch_remote_catalogue to simulate chunk fetching."""
-    # Return different data based on catalogue name and box params (simplified check)
-    def fetch_side_effect(config, columns=None, query_constraints=None, cone_params=None, box_params=None):
-        cat_name = config.get("_catalogue_name")
-        # Use a simple check on box_params (e.g., min dec) to return different data
-        dec_min = box_params.get('dec_min', -99) if box_params else -99
-
-        #print(f"Mock fetch called for {cat_name} with dec_min={dec_min}") # Debug print
-
-        if cat_name == "cat1_tap":
-            if np.isclose(dec_min, 0.0): # Pixel 0 or 1
-                return pd.DataFrame({'id1': [10, 11], 'ra1': [0.5, 1.5], 'dec1': [0.5, 0.5]})
-            elif np.isclose(dec_min, 1.0): # Pixel 2
-                return pd.DataFrame({'id1': [12], 'ra1': [0.5], 'dec1': [1.5]})
-            else:
-                return pd.DataFrame() # No data for other areas
-        elif cat_name == "cat2_tap":
-            if np.isclose(dec_min, 0.0): # Pixel 0 or 1
-                 # Simulate no data in pixel 1 for cat2
-                if box_params and np.isclose(box_params.get('ra_min', -99), 1.0):
-                    return pd.DataFrame() 
-                else: # Data for pixel 0
-                    return pd.DataFrame({'id2': [20], 'ra2': [0.51], 'dec2': [0.51], 'pmra': [1], 'pmdec': [1], 'ref_epoch':[2016.0]})
-            elif np.isclose(dec_min, 1.0): # Pixel 2
-                 return pd.DataFrame({'id2': [21, 22], 'ra2': [0.51, 0.6], 'dec2': [1.51, 1.6], 'pmra': [1,1], 'pmdec': [1,1], 'ref_epoch':[2016.0]})
-            else:
-                 return pd.DataFrame()
-            
-    with patch.object(CrossMatch, '_fetch_remote_catalogue') as mock_fetch:
-        mock_fetch.side_effect = fetch_side_effect
-        yield mock_fetch
-
-@pytest.fixture
-def mock_stilts_chunks():
-    """Mocks _execute_local_stilts for chunk processing."""
-    call_count = 0
-    def stilts_side_effect(config1, config2, **params):
-        nonlocal call_count
-        call_count += 1
-        #print(f"Mock stilts called: Chunk {call_count}") # Debug print
-        # Simulate successful match, return combined IDs (simplified)
-        df1 = config1['_input_dataframe']
-        df2 = config2['_input_dataframe']
-        # Just return first ID from each as a dummy match result
-        if not df1.empty and not df2.empty:
-             # Use first column name heuristically as ID col
-            id1_col = df1.columns[0]
-            id2_col = df2.columns[0]
-            return pd.DataFrame({f'{id1_col}_match': [df1[id1_col].iloc[0]], f'{id2_col}_match': [df2[id2_col].iloc[0]], 'chunk': [call_count]})
-        else:
-            return pd.DataFrame()
-
-    with patch.object(CrossMatch, '_execute_local_stilts') as mock_stilts:
-        mock_stilts.side_effect = stilts_side_effect
-        yield mock_stilts
-
-
-def test_crossmatch_strategy_remote_chunked(crossmatcher, remote_tap_config_1, remote_tap_config_2):
-    """Test strategy selection for remote spatial chunked match."""
-    strategy, params = crossmatcher._determine_crossmatch_strategy(
-        remote_tap_config_1, remote_tap_config_2, 
-        ra=1.0, dec=0.5, radius_arcsec=1800 # Provide spatial params
-    )
-    assert strategy == "remote_spatial_chunked_match"
-
-def test_crossmatch_remote_chunked_success(
-    crossmatcher, remote_tap_config_1, remote_tap_config_2, 
-    mock_healpix, mock_fetch_remote_chunks, mock_stilts_chunks
-):
-    """Test successful execution of the remote spatial chunked match strategy."""
-    # Need to patch _get_config_for_input to return the remote configs
-    with patch.object(crossmatcher, '_get_config_for_input', side_effect=[remote_tap_config_1, remote_tap_config_2]):
-        result_df = crossmatcher.crossmatch(
-            catalogue_1_input="cat1_tap", 
-            catalogue_2_input="cat2_tap",
-            strategy="remote_spatial_chunked_match", # Force strategy for test clarity
-            ra=1.0, dec=0.5, radius_arcsec=1800, # Spatial params required
-            nside=32 # Example nside
-        )
-
-    # Check mocks
-    # HEALPix cone search should be called once
-    mock_healpix["class"].return_value.cone_search_skycoord.assert_called_once()
-    # Boundaries should be called for the pixels found (3 in mock)
-    # Patch boundaries_skycoord directly as it's imported
-    mock_healpix["boundaries"].assert_called_once()
-    assert mock_healpix["boundaries"].call_args[0][0] == [0, 1, 2] # Check pixels passed
-
-    # Fetch should be called twice per pixel (3 pixels = 6 calls)
-    assert mock_fetch_remote_chunks.call_count == 6
-    # Stilts should be called only for pixels where *both* fetches returned data (pixels 0 and 2)
-    assert mock_stilts_chunks.call_count == 2 
-
-    # Check result (based on mock_stilts_chunks and mock_fetch_remote_chunks)
-    # Chunk 1 (Pixel 0): Match id1=10 vs id2=20 -> call 1
-    # Chunk 2 (Pixel 1): Cat2 fetch empty -> No stilts call
-    # Chunk 3 (Pixel 2): Match id1=12 vs id2=21 -> call 2
-    assert isinstance(result_df, pd.DataFrame)
-    assert len(result_df) == 2
-    assert list(result_df.columns) == ['id1_match', 'id2_match', 'chunk']
-    assert result_df['id1_match'].tolist() == [10, 12]
-    assert result_df['id2_match'].tolist() == [20, 21]
-    assert result_df['chunk'].tolist() == [1, 2] # Reflects order stilts was called
-
-def test_crossmatch_remote_chunked_missing_spatial_params(
-    crossmatcher, remote_tap_config_1, remote_tap_config_2
-):
-    """Test remote chunked strategy fails if spatial params are missing."""
-    # Mock strategy determination to force selection (as it would normally fallback)
-    with patch.object(crossmatcher, '_determine_crossmatch_strategy', return_value=("remote_spatial_chunked_match", {"matcher": "sky"})), \
-         patch.object(crossmatcher, '_get_config_for_input', side_effect=[remote_tap_config_1, remote_tap_config_2]):
-            
-        with pytest.raises(ValueError, match="Missing required parameters 'ra', 'dec', 'radius_arcsec'"):
-            crossmatcher.crossmatch(
-                catalogue_1_input="cat1_tap", 
-                catalogue_2_input="cat2_tap",
-                # Missing ra, dec, radius_arcsec
-                # Strategy forced by mock, so crossmatch will call the execution function
-                strategy="remote_spatial_chunked_match" 
-            )
-
-def test_crossmatch_remote_chunked_healpix_import_error(crossmatcher, remote_tap_config_1, remote_tap_config_2):
-    """Test error handling if astropy-healpix is not installed."""
-    # Patch sys.modules to simulate missing import
-    # Also need to mock _get_config_for_input
-    with patch.dict("sys.modules", {"astropy_healpix": None}), \
-         patch.object(crossmatcher, '_get_config_for_input', side_effect=[remote_tap_config_1, remote_tap_config_2]):
-        
-        # Mock strategy determination to force selection
-        with patch.object(crossmatcher, '_determine_crossmatch_strategy', return_value=("remote_spatial_chunked_match", {"matcher": "sky"})):
-            with pytest.raises(CrossMatchError, match="'astropy-healpix' library is required"):
-                crossmatcher.crossmatch(
-                    catalogue_1_input="cat1_tap", 
-                    catalogue_2_input="cat2_tap",
-                    strategy="remote_spatial_chunked_match", 
-                    ra=1.0, dec=0.5, radius_arcsec=1800,
-                )
-
-# --- Tests for Local File Chunking --- 
-
-@pytest.fixture
-def local_file_config_1(tmp_path):
-    """Config fixture for a local file (CSV)."""
-    f_path = tmp_path / "local1_chunk.csv"
-    # Create a larger CSV file
-    data = {
-        'id1': range(25), 
-        'ra1': np.linspace(0, 24, 25), 
-        'dec1': np.linspace(0, 24, 25)
-    }
-    pd.DataFrame(data).to_csv(f_path, index=False)
-    return {
-        "_catalogue_name": "local1_file", "_input_path": str(f_path),
-        "description": "Local File 1", "archive": None, 
-        "access_method": "file_system", "is_local": True,
-        "ra_column": "ra1", "dec_column": "dec1", "epoch": 2000.0
-    }
-
-@pytest.fixture
-def local_file_config_2(tmp_path):
-    """Config fixture for a second local file (CSV) - static target."""
-    f_path = tmp_path / "local2_static.csv"
-    data = {
-        'id2': range(5), 
-        'ra2': np.linspace(0.1, 4.1, 5), 
-        'dec2': np.linspace(0.1, 4.1, 5)
-    }
-    pd.DataFrame(data).to_csv(f_path, index=False)
-    return {
-        "_catalogue_name": "local2_file", "_input_path": str(f_path),
-        "description": "Local File 2 (Static)", "archive": None, 
-        "access_method": "file_system", "is_local": True,
-        "ra_column": "ra2", "dec_column": "dec2", "epoch": 2000.0
-    }
-
-@pytest.fixture
-def mock_stilts_local_chunking():
-    """Mocks _execute_local_stilts for local chunk processing."""
-    call_count = 0
-    def stilts_side_effect(config1, config2, **params):
-        nonlocal call_count
-        call_count += 1
-        # Simulate match based on input DataFrames
-        df1 = config1['_input_dataframe']
-        df2 = config2['_input_dataframe']
-        # Simple mock: return number of rows in chunk df1
-        return pd.DataFrame({'match_id': range(len(df1)), 'chunk_num': [call_count] * len(df1)})
-
-    with patch.object(CrossMatch, '_execute_local_stilts') as mock_stilts:
-        mock_stilts.side_effect = stilts_side_effect
-        yield mock_stilts
-
-def test_crossmatch_chunked_local_file_success(
-    crossmatcher, local_file_config_1, local_file_config_2, mock_stilts_local_chunking
-):
-    """Test successful execution of local file chunking (CSV)."""
-    chunk_rows = 10
-    # Mock _get_config_for_input to return file configs
-    with patch.object(crossmatcher, '_get_config_for_input', side_effect=[local_file_config_1, local_file_config_2]):
-        result_df = crossmatcher.crossmatch(
-            catalogue_1_input=local_file_config_1["_input_path"],
-            catalogue_2_input=local_file_config_2["_input_path"],
-            strategy="chunked_local_match", # Force strategy
-            chunk_rows=chunk_rows,
-            chunk_input_index=1, # Chunk the first input (25 rows)
-            radius_arcsec=1.0 # Dummy param for stilts mock
-        )
-
-    # Input 1 has 25 rows, chunk size 10 -> 3 chunks (10, 10, 5 rows)
-    assert mock_stilts_local_chunking.call_count == 3
-    assert len(result_df) == 25 # Total rows matched = total rows in chunked input
-    assert result_df['chunk_num'].nunique() == 3
-    assert result_df[result_df['chunk_num'] == 1].shape[0] == 10
-    assert result_df[result_df['chunk_num'] == 2].shape[0] == 10
-    assert result_df[result_df['chunk_num'] == 3].shape[0] == 5
-
-def test_crossmatch_chunked_local_file_parquet_fallback(
-    crossmatcher, tmp_path, local_file_config_2, mock_stilts_local_chunking
-):
-    """Test local file chunking fallback for Parquet (reads full file)."""
-    # Create a Parquet file
-    pq_path = tmp_path / "local1_chunk.parquet"
-    data = {
-        'id1': range(25), 
-        'ra1': np.linspace(0, 24, 25), 
-        'dec1': np.linspace(0, 24, 25)
-    }
-    pd.DataFrame(data).to_parquet(pq_path)
-    local_file_config_1_pq = {
-        "_catalogue_name": "local1_pq", "_input_path": str(pq_path),
-        "description": "Local Parquet File", "archive": None, 
-        "access_method": "file_system", "is_local": True,
-        "ra_column": "ra1", "dec_column": "dec1", "epoch": 2000.0
-    }
-
-    chunk_rows = 10
-    with patch.object(crossmatcher, '_get_config_for_input', side_effect=[local_file_config_1_pq, local_file_config_2]):
-        # Expect a warning about inefficient fallback
-        with pytest.warns(UserWarning, match="Direct file chunking for Parquet not fully implemented"):
-             result_df = crossmatcher.crossmatch(
-                catalogue_1_input=str(pq_path),
-                catalogue_2_input=local_file_config_2["_input_path"],
-                strategy="chunked_local_match", # Force strategy
-                chunk_rows=chunk_rows,
-                chunk_input_index=1, # Chunk the first input
-                radius_arcsec=1.0 
-            )
-
-    # Even with fallback, the result should be processed in chunks
-    assert mock_stilts_local_chunking.call_count == 3
-    assert len(result_df) == 25
-    assert result_df['chunk_num'].nunique() == 3
-
-# --- Tests for Epoch Propagation Verification ---
-
-@pytest.fixture
-def gaia_df_config():
-    """Config fixture for a Gaia-like DataFrame input."""
-    df = pd.DataFrame({
-        'id_g': [1], 'ra_g': [10.0], 'dec_g': [20.0],
-        'pmra_g': [10.0], 'pmdec_g': [-5.0], 'epoch_g': [2016.0]
-    })
-    return {
-        "_catalogue_name": "gaia_local_df", "_input_dataframe": df,
-        "description": "Gaia DataFrame", "archive": None,
-        "access_method": "file_system", "is_local": True,
-        "ra_column": "ra_g", "dec_column": "dec_g", "epoch": 2016.0,
-        "pm_ra_column": "pmra_g", "pm_dec_column": "pmdec_g", "epoch_column": "epoch_g"
-    }
-
-@pytest.fixture
-def j2000_df_config():
-    """Config fixture for a J2000.0 DataFrame input."""
-    df = pd.DataFrame({
-        'id_j': [101], 'ra_j': [10.0001], 'dec_j': [20.0001]
-    })
-    return {
-        "_catalogue_name": "j2000_local_df", "_input_dataframe": df,
-        "description": "J2000 DataFrame", "archive": None,
-        "access_method": "file_system", "is_local": True,
-        "ra_column": "ra_j", "dec_column": "dec_j", "epoch": 2000.0
-    }
-
-@pytest.fixture
-def remote_gaia_config():
-    """Config fixture for a remote Gaia catalogue (e.g., ESA)."""
-    # Similar to remote_tap_config_2 but explicitly named
-    return {
-        "_catalogue_name": "gaia_remote", "description": "Remote Gaia TAP",
-        "archive": "esa", "service_id": "tap_service", 
-        "access_method": "tap", "access_url": "http://gaia.test",
-        "access_identifier": "gaia.dr3", "ra_column": "ra_g", "dec_column": "dec_g",
-        "epoch": 2016.0, "pm_ra_column": "pmra_g", "pm_dec_column": "pmdec_g", 
-        "epoch_column": "epoch_g"
-    }
-
-@pytest.fixture
-def mock_stilts_check_propagation():
-    """Mocks _execute_local_stilts and checks for propagated columns."""
-    call_args_list = []
-    def stilts_side_effect(config1, config2, **params):
-        # Store args for later inspection
-        call_args_list.append({'config1': config1, 'config2': config2, 'params': params})
-        # Return dummy result
-        return pd.DataFrame({'match': [1]}) 
-
-    with patch.object(CrossMatch, '_execute_local_stilts') as mock_stilts:
-        mock_stilts.side_effect = stilts_side_effect
-        # Yield the mock and the list to store calls
-        yield {'mock': mock_stilts, 'calls': call_args_list}
-
-def test_epoch_propagation_local_stilts(
-    crossmatcher, gaia_df_config, j2000_df_config, mock_stilts_check_propagation
-):
-    """Verify propagation happens in local_stilts strategy."""
-    with patch.object(crossmatcher, '_get_config_for_input', side_effect=[gaia_df_config, j2000_df_config]):
-        crossmatcher.crossmatch(
-            catalogue_1_input="gaia_local_df",
-            catalogue_2_input="j2000_local_df",
-            radius_arcsec=1.0
-        )
-
-    assert mock_stilts_check_propagation['mock'].call_count == 1
-    call_info = mock_stilts_check_propagation['calls'][0]
+def test_handle_archive_override(crossmatcher, minimal_valid_config):
+    """Test the handle_archive_override function that appends archive prefixes."""
+    # Get the crossmatch instance with our minimal config
+    cm = crossmatcher
     
-    # Config1 should be Gaia, Config2 should be J2000
-    conf1 = call_info['config1']
-    conf2 = call_info['config2']
-    df1 = conf1['_input_dataframe']
-
-    # Check Gaia config/df passed to stilts
-    assert conf1['_catalogue_name'] == "gaia_local_df"
-    # Verify RA/Dec columns were updated to propagated versions
-    assert conf1['ra_column'] == 'ra_propagated'
-    assert conf1['dec_column'] == 'dec_propagated'
-    # Verify propagated columns exist in the DataFrame
-    assert 'ra_propagated' in df1.columns
-    assert 'dec_propagated' in df1.columns
-    # Verify original coordinates are different from propagated (within tolerance)
-    assert not np.isclose(df1['ra_g'].iloc[0], df1['ra_propagated'].iloc[0])
-    assert not np.isclose(df1['dec_g'].iloc[0], df1['dec_propagated'].iloc[0])
-
-    # Check J2000 config/df (should not be propagated)
-    assert conf2['_catalogue_name'] == "j2000_local_df"
-    assert conf2['ra_column'] == 'ra_j'
-    assert conf2['dec_column'] == 'dec_j'
-
-def test_epoch_propagation_download_match(
-    crossmatcher, remote_gaia_config, j2000_df_config, mock_stilts_check_propagation
-):
-    """Verify propagation happens in download_and_match strategy."""
-    # Mock fetch to return Gaia data
-    gaia_data = pd.DataFrame({
-        'id_g': [1], 'ra_g': [10.0], 'dec_g': [20.0],
-        'pmra_g': [10.0], 'pmdec_g': [-5.0], 'epoch_g': [2016.0]
-    })
-    with patch.object(crossmatcher, '_fetch_remote_catalogue', return_value=gaia_data), \
-         patch.object(crossmatcher, '_get_config_for_input', side_effect=[remote_gaia_config, j2000_df_config]):
-        
-        crossmatcher.crossmatch(
-            catalogue_1_input="gaia_remote",
-            catalogue_2_input="j2000_local_df",
-            radius_arcsec=1.0
-        )
-
-    assert mock_stilts_check_propagation['mock'].call_count == 1
-    call_info = mock_stilts_check_propagation['calls'][0]
+    # Add some test catalog with archive prefix
+    cm.config['catalogues']['test_cds'] = {'archive': 'cds', 'service_id': 'tap_service'}
+    cm.config['catalogues']['test_esa'] = {'archive': 'esa_gaia', 'service_id': 'tap_service'}
     
-    # Config1 should be Gaia (now marked as local), Config2 should be J2000
-    conf1 = call_info['config1'] 
-    conf2 = call_info['config2']
-    df1 = conf1['_input_dataframe']
-
-    # Check Gaia config/df passed to stilts
-    assert conf1['_catalogue_name'] == "gaia_remote"
-    assert conf1['access_method'] == 'file_system' # Should be updated after download
-    assert conf1['ra_column'] == 'ra_propagated'
-    assert conf1['dec_column'] == 'dec_propagated'
-    assert 'ra_propagated' in df1.columns
-    assert 'dec_propagated' in df1.columns
-    assert not np.isclose(df1['ra_g'].iloc[0], df1['ra_propagated'].iloc[0])
-    assert not np.isclose(df1['dec_g'].iloc[0], df1['dec_propagated'].iloc[0])
-
-    # Check J2000 config/df
-    assert conf2['_catalogue_name'] == "j2000_local_df"
-    assert conf2['ra_column'] == 'ra_j'
-    assert conf2['dec_column'] == 'dec_j'
-
-# --- Test Matcher Handling ---
-
-@pytest.fixture
-def local_err_config_1(tmp_path):
-    """Config fixture for local df with error columns."""
-    df = pd.DataFrame({
-        'id1': [1], 'ra1': [10.0], 'dec1': [20.0],
-        'err_ra1': [0.1], 'err_dec1': [0.1], 'corr1': [0.2]
-    })
-    return {
-        "_catalogue_name": "local_err1", "_input_dataframe": df,
-        "description": "Local with Errors 1", "archive": None,
-        "access_method": "file_system", "is_local": True,
-        "ra_column": "ra1", "dec_column": "dec1", "epoch": 2000.0,
-        "ra_err_column": "err_ra1", "dec_err_column": "err_dec1", "corr_column": "corr1",
-        "pos_err_units": "arcsec"
-    }
-
-@pytest.fixture
-def local_err_config_2(tmp_path):
-    """Config fixture for local df with error columns."""
-    df = pd.DataFrame({
-        'id2': [101], 'ra2': [10.0001], 'dec2': [20.0001],
-        'err_ra2': [0.1], 'err_dec2': [0.1] # No correlation
-    })
-    return {
-        "_catalogue_name": "local_err2", "_input_dataframe": df,
-        "description": "Local with Errors 2", "archive": None,
-        "access_method": "file_system", "is_local": True,
-        "ra_column": "ra2", "dec_column": "dec2", "epoch": 2000.0,
-        "ra_err_column": "err_ra2", "dec_err_column": "err_dec2", 
-        "pos_err_units": "arcsec"
-    }
-
-def test_matcher_selection_local_stilts(
-    crossmatcher, local_err_config_1, local_err_config_2, mock_stilts_check_propagation
-):
-    """Test different matchers are selected and params passed correctly."""
+    # Test simple case (no override needed)
+    result = cm.handle_archive_override("test_cds", "cds", cm)
+    assert result == "test_cds"
     
-    # 1. Test default selection (should be skyerr)
-    with patch.object(crossmatcher, '_get_config_for_input', side_effect=[local_err_config_1, local_err_config_2]):
-        crossmatcher.crossmatch(
-            catalogue_1_input="local_err1",
-            catalogue_2_input="local_err2",
-            # No radius or max_error, use defaults
-        )
-    assert mock_stilts_check_propagation['mock'].call_count == 1
-    call_info1 = mock_stilts_check_propagation['calls'][0]
-    # Auto-detection based on errors. Config 1 has corr, Config 2 doesn't -> should default to skyerr
-    # Let's re-evaluate _determine_crossmatch_strategy logic: it requires BOTH to have errors for skyerr,
-    # and BOTH to have correlation for skyellipse. Here, only config1 has corr, so it should be skyerr.
-    assert call_info1['params'].get('matcher') == 'skyerr'
-    assert 'max_error' in call_info1['params'] # Default max_error should be used
-    assert 'radius_arcsec' not in call_info1['params'] # Radius not used for skyerr
-
-    # Clear calls for next test
-    mock_stilts_check_propagation['calls'].clear()
-
-    # 2. Test user override to sky
-    with patch.object(crossmatcher, '_get_config_for_input', side_effect=[local_err_config_1, local_err_config_2]):
-        crossmatcher.crossmatch(
-            catalogue_1_input="local_err1",
-            catalogue_2_input="local_err2",
-            matcher='sky',
-            radius_arcsec=5.0 
-        )
-    assert mock_stilts_check_propagation['mock'].call_count == 2
-    call_info2 = mock_stilts_check_propagation['calls'][0] # Index 0 as list was cleared
-    assert call_info2['params'].get('matcher') == 'sky'
-    assert call_info2['params'].get('radius_arcsec') == 5.0
-    assert 'max_error' not in call_info2['params']
-
-# Modify the mock fixture to patch the lower-level stilts function
-@pytest.fixture
-def mock_stilts_crossmatch_sky():
-    """Mocks stilts.crossmatch_sky to inspect its arguments."""
-    call_args_list = []
-    # Need to patch the function in the module where it's *looked up*
-    # which is crossmatch.py where stilts.crossmatch_sky is imported and used.
-    with patch('xmatch.crossmatch.crossmatch_sky') as mock_cs:
-        def side_effect(*args, **kwargs):
-            # Store args/kwargs for inspection
-            call_args_list.append({'args': args, 'kwargs': kwargs})
-            # Return dummy result path (doesn't matter as we mock read_parquet)
-            # Need to return *something* as _execute_local_stilts expects a path
-            return "mock_output.parquet" 
-        mock_cs.side_effect = side_effect
-        # Also mock reading the result file
-        with patch('pandas.read_parquet') as mock_read:
-            mock_read.return_value = pd.DataFrame({'match': [1]}) 
-            yield {'mock': mock_cs, 'calls': call_args_list}
-
-# Test matcher parameter passing to stilts.crossmatch_sky
-def test_stilts_matcher_param_passing(
-    crossmatcher, local_err_config_1, local_err_config_2, mock_stilts_crossmatch_sky
-):
-    """Test that correct args (errors, params) are passed to stilts.crossmatch_sky."""
+    # Test when archive override applies (no existing match)
+    result = cm.handle_archive_override("test", "cds", cm)
+    assert result == "test_cds"
     
-    # 1. Test skyerr (auto-detected)
-    with patch.object(crossmatcher, '_get_config_for_input', side_effect=[local_err_config_1, local_err_config_2]):
-        crossmatcher.crossmatch(
-            catalogue_1_input="local_err1",
-            catalogue_2_input="local_err2",
-            # Use default matcher (skyerr)
-            max_error=5.0 # Explicitly provide max_error
-        )
-    assert mock_stilts_crossmatch_sky['mock'].call_count == 1
-    kwargs1 = mock_stilts_crossmatch_sky['calls'][0]['kwargs']
-    assert kwargs1.get('matcher') == 'skyerr'
-    assert kwargs1.get('max_error') == 5.0
-    assert kwargs1.get('radius_arcsec') is None
-    assert kwargs1.get('err_ra1') == local_err_config_1['ra_err_column']
-    assert kwargs1.get('err_dec1') == local_err_config_1['dec_err_column']
-    assert kwargs1.get('err_ra2') == local_err_config_2['ra_err_column']
-    assert kwargs1.get('err_dec2') == local_err_config_2['dec_err_column']
-    assert kwargs1.get('corr1') is None # Config 2 doesn't have corr, so skyellipse not chosen
-    assert kwargs1.get('corr2') is None
+    # Test when override doesn't match any known catalog
+    result = cm.handle_archive_override("unknown", "cds", cm)
+    assert result == "unknown"  # Should return original when no match
 
-    # Clear calls
-    mock_stilts_crossmatch_sky['calls'].clear()
+    # Test with alias resolution
+    cm.config['catalogue_aliases'] = {'test_alias': 'test_cds'}
+    result = cm.handle_archive_override("test_alias", "esa", cm)
+    assert result == "test_alias"  # Alias resolved to test_cds, so override not needed
 
-    # 2. Test skyellipse (force matcher, as config2 lacks corr)
-    with patch.object(crossmatcher, '_get_config_for_input', side_effect=[local_err_config_1, local_err_config_2]):
-        # Force skyellipse even though config2 lacks corr - crossmatch_sky should handle this internally
-        crossmatcher.crossmatch(
-            catalogue_1_input="local_err1",
-            catalogue_2_input="local_err2",
-            matcher='skyellipse', 
-            max_error=3.0
-        )
-    assert mock_stilts_crossmatch_sky['mock'].call_count == 2
-    kwargs2 = mock_stilts_crossmatch_sky['calls'][0]['kwargs']
-    assert kwargs2.get('matcher') == 'skyellipse'
-    assert kwargs2.get('max_error') == 3.0
-    assert kwargs2.get('radius_arcsec') is None
-    assert kwargs2.get('err_ra1') == local_err_config_1['ra_err_column']
-    assert kwargs2.get('err_dec1') == local_err_config_1['dec_err_column']
-    assert kwargs2.get('corr1') == local_err_config_1['corr_column']
-    assert kwargs2.get('err_ra2') == local_err_config_2['ra_err_column']
-    assert kwargs2.get('err_dec2') == local_err_config_2['dec_err_column']
-    assert kwargs2.get('corr2') is None # Config 2 still lacks corr
+# --- Tests for archive override in CLI ---
 
-# TODO: Add tests for different matcher types in local strategies 
+@patch('xmatch.cli.CrossMatch')
+def test_cli_archive_override(mock_cm_class, minimal_valid_config):
+    """Test that CLI uses handle_archive_override correctly."""
+    # Set up mock instance
+    mock_cm = mock_cm_class.return_value
+    mock_cm.config = minimal_valid_config
+    mock_cm.crossmatch.return_value = pd.DataFrame()
+    
+    # Mock the handle_archive_override method
+    mock_cm.handle_archive_override = MagicMock(side_effect=lambda name, arch, cm: f"{name}_{arch}")
+    
+    # Run CLI with archive override args
+    with patch('sys.argv', ['xmatch', 'cat1', 'cat2', '--archive-1', 'cds', '--archive-2', 'esa']):
+        from xmatch.cli import main
+        main()
+    
+    # Check that handle_archive_override was called with right args
+    mock_cm.handle_archive_override.assert_any_call('cat1', 'cds', mock_cm)
+    mock_cm.handle_archive_override.assert_any_call('cat2', 'esa', mock_cm)

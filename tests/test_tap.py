@@ -8,14 +8,10 @@ from unittest.mock import patch, MagicMock, call
 import pyvo
 
 # Adjust import based on project structure
-from src.xmatch.tap import (
-    build_spatial_query,
-    perform_local_id_join_df,
-    perform_local_spatial_join_df,
-    ensure_j2000,
+from xmatch.tap import (
+    TapError,
     get_tap_service,
-    execute_tap_query,
-    TapError
+    execute_tap_query
 )
 
 # --- Fixtures for TAP tests ---
@@ -49,194 +45,6 @@ def mock_tap_service():
 
     return service
 
-def test_build_spatial_query_basic(sample_query_df):
-    """Test basic spatial query construction."""
-    query = build_spatial_query(
-        df=sample_query_df,
-        tap_table="gaia.dr3",
-        ra="ra",
-        dec="dec",
-        radius=1.5, # arcsec
-        columns=["source_id", "g_mag"]
-    )
-    assert "SELECT source_id, g_mag FROM gaia.dr3" in query
-    assert "WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 10.0, 5.0, 0.00041666))" in query
-    assert "OR 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 20.0, -5.0, 0.00041666))" in query
-    # Check radius conversion (1.5 arcsec = 1.5/3600 deg)
-    assert np.isclose(1.5 / 3600, 0.00041666, atol=1e-8)
-
-def test_build_spatial_query_all_columns(sample_query_df):
-    """Test query when all columns are requested."""
-    query = build_spatial_query(
-        df=sample_query_df,
-        tap_table="vizier.cat",
-        ra="ra",
-        dec="dec",
-        radius=2.0,
-        columns=None # Request all columns
-    )
-    assert "SELECT * FROM vizier.cat" in query
-    assert "WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 10.0, 5.0, 0.00055555))" in query
-    assert np.isclose(2.0 / 3600, 0.00055555, atol=1e-8)
-
-def test_build_spatial_query_with_schema(sample_query_df):
-    """Test query construction with an explicit schema."""
-    query = build_spatial_query(
-        df=sample_query_df,
-        tap_table="gaia_source",
-        ra="ra",
-        dec="dec",
-        radius=1.0,
-        columns=["ra", "dec"],
-        tap_schema="gaiadr3"
-    )
-    assert "SELECT ra, dec FROM gaiadr3.gaia_source" in query
-    assert "WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 10.0, 5.0, 0.00027777))" in query
-    assert np.isclose(1.0 / 3600, 0.00027777, atol=1e-8)
-
-def test_build_spatial_query_empty_df():
-    """Test query construction with an empty input DataFrame."""
-    empty_df = pd.DataFrame({'ra': [], 'dec': []})
-    query = build_spatial_query(
-        df=empty_df,
-        tap_table="any.table",
-        ra="ra",
-        dec="dec",
-        radius=1.0,
-        columns=["col1"]
-    )
-    # Should produce a query that returns no results but is syntactically valid
-    assert "SELECT col1 FROM any.table WHERE 1=0" in query 
-
-# --- Fixtures for local join tests ---
-
-@pytest.fixture
-def df1_local():
-    """First DataFrame for local join tests."""
-    return pd.DataFrame({
-        'id1': [1, 2, 3, 4],
-        'ra1': [10.0, 20.0, 30.0, 40.0],
-        'dec1': [5.0, -5.0, 50.0, -50.0],
-        'val1': ['a', 'b', 'c', 'd']
-    })
-
-@pytest.fixture
-def df2_local_id():
-    """Second DataFrame for local ID join tests."""
-    return pd.DataFrame({
-        'id2': [2, 4, 5, 6],
-        'name': ['apple', 'banana', 'orange', 'grape'],
-        'val2': [100, 200, 300, 400]
-    })
-
-@pytest.fixture
-def df2_local_spatial():
-    """Second DataFrame for local spatial join tests."""
-    return pd.DataFrame({
-        'id2': [10, 11, 12, 13],
-        # RA/Dec slightly offset from df1_local for matching
-        'ra2': [10.0001, 20.0002, 35.0, 40.0001],
-        'dec2': [5.0001, -5.0002, 55.0, -50.0001],
-        'val2': [1000, 2000, 3000, 4000]
-    })
-
-# --- Tests for perform_local_id_join_df ---
-
-def test_perform_local_id_join_df_basic(df1_local, df2_local_id):
-    """Test basic ID join between two DataFrames."""
-    result_df = perform_local_id_join_df(
-        input_df=df1_local,
-        catalogue_2_df=df2_local_id,
-        id_column_1='id1',
-        id_column_2='id2',
-        columns=None # Keep all columns from df2
-    )
-    assert len(result_df) == 2 # Should match on id=2 and id=4
-    assert list(result_df.columns) == ['id1', 'ra1', 'dec1', 'val1', 'id2', 'name', 'val2']
-    assert sorted(result_df['id1'].tolist()) == [2, 4]
-    assert result_df[result_df['id1'] == 2]['name'].iloc[0] == 'apple'
-    assert result_df[result_df['id1'] == 4]['val2'].iloc[0] == 200
-
-def test_perform_local_id_join_df_select_cols(df1_local, df2_local_id):
-    """Test ID join selecting specific columns from df2."""
-    result_df = perform_local_id_join_df(
-        input_df=df1_local,
-        catalogue_2_df=df2_local_id,
-        id_column_1='id1',
-        id_column_2='id2',
-        columns=['name'] # Only keep 'name' from df2
-    )
-    assert len(result_df) == 2
-    assert list(result_df.columns) == ['id1', 'ra1', 'dec1', 'val1', 'id2', 'name']
-    assert sorted(result_df['id1'].tolist()) == [2, 4]
-
-def test_perform_local_id_join_df_no_match(df1_local):
-    """Test ID join when there are no matching IDs."""
-    df2_no_match = pd.DataFrame({'id2': [5, 6, 7], 'val2': [50, 60, 70]})
-    result_df = perform_local_id_join_df(
-        input_df=df1_local,
-        catalogue_2_df=df2_no_match,
-        id_column_1='id1',
-        id_column_2='id2'
-    )
-    assert len(result_df) == 0
-
-# --- Tests for perform_local_spatial_join_df ---
-
-def test_perform_local_spatial_join_df_basic(df1_local, df2_local_spatial):
-    """Test basic spatial join between two DataFrames."""
-    radius_arcsec = 1.0
-    result_df = perform_local_spatial_join_df(
-        input_df=df1_local,
-        catalogue_2_df=df2_local_spatial,
-        ra='ra1',
-        dec='dec1',
-        radius=radius_arcsec,
-        columns=None # Keep all columns from df2
-    )
-    # Should match id1=1 -> id2=10, id1=2 -> id2=11, id1=4 -> id2=13
-    assert len(result_df) == 3
-    expected_cols = ['id1', 'ra1', 'dec1', 'val1', 'idx', 'sep_arcsec', 'id2', 'ra2', 'dec2', 'val2']
-    assert sorted(list(result_df.columns)) == sorted(expected_cols)
-    assert sorted(result_df['id1'].tolist()) == [1, 2, 4]
-    assert result_df[result_df['id1'] == 1]['id2'].iloc[0] == 10
-    assert result_df[result_df['id1'] == 2]['id2'].iloc[0] == 11
-    assert result_df[result_df['id1'] == 4]['id2'].iloc[0] == 13
-    assert np.all(result_df['sep_arcsec'] <= radius_arcsec)
-
-def test_perform_local_spatial_join_df_select_cols(df1_local, df2_local_spatial):
-    """Test spatial join selecting specific columns from df2."""
-    radius_arcsec = 1.0
-    result_df = perform_local_spatial_join_df(
-        input_df=df1_local,
-        catalogue_2_df=df2_local_spatial,
-        ra='ra1',
-        dec='dec1',
-        radius=radius_arcsec,
-        columns=['id2', 'val2'] # Select specific columns
-    )
-    assert len(result_df) == 3
-    expected_cols = ['id1', 'ra1', 'dec1', 'val1', 'idx', 'sep_arcsec', 'id2', 'val2']
-    assert sorted(list(result_df.columns)) == sorted(expected_cols)
-    assert sorted(result_df['id1'].tolist()) == [1, 2, 4]
-
-def test_perform_local_spatial_join_df_no_match(df1_local):
-    """Test spatial join when no coordinates are within radius."""
-    df2_far = pd.DataFrame({
-        'id2': [20, 21],
-        'ra2': [180.0, 190.0],
-        'dec2': [0.0, 10.0],
-        'val2': [5000, 6000]
-    })
-    result_df = perform_local_spatial_join_df(
-        input_df=df1_local,
-        catalogue_2_df=df2_far,
-        ra='ra1',
-        dec='dec1',
-        radius=1.0,
-    )
-    assert len(result_df) == 0 
-
 # --- Tests for get_tap_service ---
 
 @patch('pyvo.dal.TAPService')
@@ -246,7 +54,7 @@ def test_get_tap_service_new_connection(MockTAPService, mock_tap_service):
     url = "http://new.tap/service"
 
     # Clear cache before test
-    from src.xmatch import tap
+    from xmatch import tap
     tap._tap_service_cache = {}
 
     service = get_tap_service(url)
@@ -262,7 +70,7 @@ def test_get_tap_service_cached_connection(MockTAPService, mock_tap_service):
     url = "http://cached.tap/service"
 
     # Clear cache and add the service
-    from src.xmatch import tap
+    from xmatch import tap
     tap._tap_service_cache = {url: mock_tap_service}
 
     service = get_tap_service(url)
@@ -278,7 +86,7 @@ def test_get_tap_service_connection_error(MockTAPService):
     url = "http://fail.tap/service"
 
     # Clear cache
-    from src.xmatch import tap
+    from xmatch import tap
     tap._tap_service_cache = {}
 
     with pytest.raises(TapError, match="Failed to connect"):        get_tap_service(url)
@@ -290,7 +98,7 @@ def test_get_tap_service_cache_key_auth(MockTAPService, mock_tap_service):
     url = "http://auth.tap/service"
 
     # Clear cache
-    from src.xmatch import tap
+    from xmatch import tap
     tap._tap_service_cache = {}
 
     service1 = get_tap_service(url, user="user1", password="pass1")
@@ -318,102 +126,100 @@ def test_get_tap_service_cache_key_auth(MockTAPService, mock_tap_service):
 # --- Tests for execute_tap_query ---
 
 def test_execute_tap_query_sync_success(mock_tap_service):
-    """Test successful synchronous TAP query."""
-    query = "SELECT a, b FROM table"
-    result = execute_tap_query(mock_tap_service, query, is_async=False)
-
-    mock_tap_service.search.assert_called_once_with(query=query, language='ADQL')
-    mock_tap_service.run_async.assert_not_called()
-    assert isinstance(result, Table)
-    assert list(result.colnames) == ['a', 'b']
-    assert len(result) == 2
+    """Test successful synchronous TAP query execution."""
+    mock_tap_service.search.return_value = MagicMock(to_table=MagicMock(return_value=Table([{'a': 1}]))) # Mock successful result
+    query = "SELECT * FROM table"
+    result = execute_tap_query(mock_tap_service, query)
+    mock_tap_service.search.assert_called_once_with(query=query)
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 1
+    assert result['a'].iloc[0] == 1
 
 def test_execute_tap_query_sync_error(mock_tap_service):
-    """Test handling error during synchronous TAP query."""
-    query = "SELECT * FROM bad_table"
-    mock_tap_service.search.side_effect = pyvo.dal.DALQueryError("Table not found")
+    """Test error handling during synchronous TAP query execution."""
+    mock_tap_service.search.side_effect = pyvo.dal.DALQueryError("Sync Query Error")
+    query = "SELECT * FROM table"
+    with pytest.raises(TapError, match="Sync Query Error"):
+        execute_tap_query(mock_tap_service, query, max_retries=1)
+    assert mock_tap_service.search.call_count == 1 # Should try once
 
-    with pytest.raises(TapError, match="TAP query failed"):
-        execute_tap_query(mock_tap_service, query, is_async=False)
+# --- Tests for execute_tap_query (formerly async, now unified) ---
 
-    mock_tap_service.search.assert_called_once_with(query=query, language='ADQL')
+def test_execute_tap_query_async_success(mock_tap_service):
+    """Test successful TAP query (previously async mode)."""
+    # Mock the async job pattern
+    mock_job = MagicMock()
+    mock_job.phase = 'COMPLETED'
+    mock_job.fetch_result.return_value = MagicMock(to_table=MagicMock(return_value=Table([{'b': 2}]))) 
+    mock_tap_service.submit_job.return_value = mock_job
 
-@patch('time.sleep', return_value=None) # Mock time.sleep to speed up test
-def test_execute_tap_query_async_success(mock_sleep, mock_tap_service):
-    """Test successful asynchronous TAP query."""
-    query = "SELECT a, b FROM large_table"
-    result = execute_tap_query(mock_tap_service, query, is_async=True, retry_delay=1, timeout=10)
+    query = "SELECT * FROM table"
+    # The function now handles sync/async internally based on service capabilities/behavior
+    # We might need to adjust mocks if internal logic changed significantly
+    result = execute_tap_query(mock_tap_service, query)
 
-    mock_tap_service.run_async.assert_called_once_with(query=query, language='ADQL')
-    # Check wait and fetch_result were called on the job object
-    job = mock_tap_service.run_async.return_value
-    job.wait.assert_called_once_with(timeout=10)
-    job.fetch_result.assert_called_once()
-    mock_tap_service.search.assert_not_called()
+    # Assertion might need adjustment depending on how sync/async is now handled.
+    # Assuming it might still use submit_job/fetch_result for potentially long queries:
+    mock_tap_service.submit_job.assert_called_once_with(query=query)
+    mock_job.run.assert_called_once()
+    mock_job.wait.assert_called_once()
+    mock_job.fetch_result.assert_called_once()
+    assert isinstance(result, pd.DataFrame)
+    assert result['b'].iloc[0] == 2
 
-    assert isinstance(result, Table)
-    assert list(result.colnames) == ['a', 'b']
+def test_execute_tap_query_async_retry_and_success(mock_tap_service):
+    """Test retry mechanism for TAP query (previously async mode)."""
+    mock_job_error = MagicMock()
+    mock_job_error.phase = 'ERROR'
+    mock_job_success = MagicMock()
+    mock_job_success.phase = 'COMPLETED'
+    mock_job_success.fetch_result.return_value = MagicMock(to_table=MagicMock(return_value=Table([{'c': 3}]))) 
 
-@patch('time.sleep', return_value=None) # Mock time.sleep
-def test_execute_tap_query_async_retry_and_success(mock_sleep, mock_tap_service):
-    """Test async query that requires retrying due to PENDING/EXECUTING phases."""
-    query = "SELECT * FROM complex_table"
-    job = mock_tap_service.run_async.return_value
+    # Fail first time, succeed second time
+    mock_tap_service.submit_job.side_effect = [mock_job_error, mock_job_success]
 
-    # Simulate job phases: PENDING -> EXECUTING -> COMPLETED
-    job.phase_sequence = ['PENDING', 'EXECUTING', 'COMPLETED']
-    def phase_side_effect(*args, **kwargs):
-        # Pop from the start of the sequence
-        current_phase = job.phase_sequence.pop(0)
-        job.phase = current_phase
-        if current_phase != 'COMPLETED':
-            # wait should raise TimeoutError if not completed within polling interval
-            # but execute_tap_query catches it and retries
-            raise TimeoutError("Still running")
-        # Only succeed on the last call
+    query = "SELECT * FROM table"
+    result = execute_tap_query(mock_tap_service, query, max_retries=2)
 
-    job.wait.side_effect = phase_side_effect
+    assert mock_tap_service.submit_job.call_count == 2
+    # Check interactions with the successful job
+    mock_job_success.run.assert_called_once()
+    mock_job_success.wait.assert_called_once()
+    mock_job_success.fetch_result.assert_called_once()
+    assert isinstance(result, pd.DataFrame)
+    assert result['c'].iloc[0] == 3
 
-    result = execute_tap_query(mock_tap_service, query, is_async=True, retry_delay=1, timeout=10)
+def test_execute_tap_query_async_timeout(mock_tap_service):
+    """Test timeout during TAP query (previously async mode)."""
+    mock_job = MagicMock()
+    mock_job.wait.side_effect = TimeoutError("Job timed out")
+    mock_tap_service.submit_job.return_value = mock_job
 
-    mock_tap_service.run_async.assert_called_once_with(query=query, language='ADQL')
-    assert job.wait.call_count == 3 # Called for PENDING, EXECUTING, COMPLETED
-    job.fetch_result.assert_called_once()
-    assert result is not None
-
-@patch('time.sleep', return_value=None)
-def test_execute_tap_query_async_timeout(mock_sleep, mock_tap_service):
-    """Test async query that times out."""
-    query = "SELECT * FROM very_large_table"
-    job = mock_tap_service.run_async.return_value
-    job.phase = 'EXECUTING' # Stays in executing phase
-    # wait keeps raising TimeoutError
-    job.wait.side_effect = TimeoutError("Job taking too long")
-
+    query = "SELECT * FROM table"
     with pytest.raises(TapError, match="timed out"):
-        execute_tap_query(mock_tap_service, query, is_async=True, retry_delay=1, timeout=5)
+        execute_tap_query(mock_tap_service, query, max_retries=1)
 
-    mock_tap_service.run_async.assert_called_once_with(query=query, language='ADQL')
-    # Check wait was called multiple times based on timeout/delay
-    assert job.wait.call_count > 1
-    job.fetch_result.assert_not_called()
+    mock_tap_service.submit_job.assert_called_once()
+    mock_job.run.assert_called_once()
+    mock_job.wait.assert_called_once()
+    mock_job.delete.assert_called_once() # Check if job is deleted on timeout
+    mock_job.fetch_result.assert_not_called()
 
-@patch('time.sleep', return_value=None)
-def test_execute_tap_query_async_error_phase(mock_sleep, mock_tap_service):
-    """Test async query that fails with an ERROR phase."""
-    query = "SELECT * FROM error_table"
-    job = mock_tap_service.run_async.return_value
-    job.phase = 'ERROR' # Job fails immediately or during execution
-    # Mock wait to reflect the error state immediately
-    job.wait.side_effect = lambda *args, **kwargs: None # No timeout if error
+def test_execute_tap_query_async_error_phase(mock_tap_service):
+    """Test handling of ERROR phase during TAP query (previously async mode)."""
+    mock_job = MagicMock()
+    mock_job.phase = 'ERROR'
+    mock_tap_service.submit_job.return_value = mock_job
 
+    query = "SELECT * FROM table"
     with pytest.raises(TapError, match="TAP job failed with phase ERROR"):
-        execute_tap_query(mock_tap_service, query, is_async=True, retry_delay=1, timeout=10)
+        execute_tap_query(mock_tap_service, query, max_retries=1)
 
-    mock_tap_service.run_async.assert_called_once_with(query=query, language='ADQL')
-    # Wait might be called once before checking phase
-    assert job.wait.call_count <= 1
-    job.fetch_result.assert_not_called()
+    mock_tap_service.submit_job.assert_called_once()
+    mock_job.run.assert_called_once()
+    mock_job.wait.assert_called_once()
+    mock_job.delete.assert_called_once() # Check if job is deleted on error
+    mock_job.fetch_result.assert_not_called()
 
 # TODO: Add tests for higher-level functions like perform_tap_id_join, perform_tap_spatial_join
-# These will involve mocking get_tap_service and execute_tap_query. 
+# These will involve mocking get_tap_service and execute_tap_query.

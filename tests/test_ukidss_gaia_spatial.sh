@@ -1,12 +1,13 @@
 #!/bin/bash
-# Test: xmatch ukidsslas_noao gaia_noao -o ukidss_gaia.parquet (Spatial Join)
-# NOTE: Assumes spatial join. To use pre-matched table, need different command + likely ID join.
-
 set -e
 
-TEST_NAME="ukidsslas_noao_vs_gaia_noao_spatial"
-OUTPUT_FILE="tests/output_${TEST_NAME}.parquet"
-CONFIG_FILE="src/xmatch/xmatch.yaml"
+TEST_NAME="ukidss_gaia_spatial"
+
+# Get the directory where the script is located
+testdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p "$testdir/outputs"
+
+OUTPUT_FILE="$testdir/outputs/output_${TEST_NAME}.parquet"
 CAT1="ukidsslas_noao"
 CAT2="gaia_noao"
 RADIUS=1.0 # Example radius
@@ -14,8 +15,7 @@ RADIUS=1.0 # Example radius
 rm -f "$OUTPUT_FILE"
 
 echo "Running test: $TEST_NAME"
-python -m src.xmatch.cli "$CAT1" "$CAT2" \
-    --config "$CONFIG_FILE" \
+xmatch "$CAT1" "$CAT2" \
     --radius "$RADIUS" \
     -o "$OUTPUT_FILE"
 
@@ -24,4 +24,3 @@ if [ ! -f "$OUTPUT_FILE" ]; then
     exit 1
 fi
 echo "Test $TEST_NAME PASSED (Basic check - file created)"
-# rm -f "$OUTPUT_FILE" 

@@ -59,3 +59,6 @@ lightning_logs/
 data/
 output/
 results/
+
+# Ignore test output files
+tests/outputs/

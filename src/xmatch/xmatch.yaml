@@ -9,6 +9,7 @@ archives:
       access_method: tap
       column_selection_supported: true
       # Assumed ADQL features, verify if specific ones like UPLOAD are needed/supported
+      # TEMPORARILY REMOVED 'table_upload' for testing fallback
       adql_features: [cone_search, polygon_search, table_join] 
     # CDS X-Match Service (Alternative, potentially faster for simple matches)
     xmatch_service:
@@ -51,6 +52,26 @@ archives:
     crossmatch_input_methods: [remote_table_join, cone_search, polygon_search, table_upload]
     service_priority: [tap_service]
 
+# --- Catalogue Aliases ---
+# Maps simple names to specific catalogue versions
+# This allows users to reference catalogues with simple names like "gaia" or "galex"
+# without needing to know the specific version or archive
+catalogue_aliases:
+  # ESA Gaia Data
+  gaia: "gaia_esa" # Default to ESA's version
+  gaia_dr3: "gaia_esa"  
+  gaiadr3: "gaia_esa"
+  
+  # CDS Data
+  galex: "galex_cds"
+  vhs: "vhs_cds"
+  
+  # NOAO Data
+  delve: "delve_noao"
+  desils: "desils_noao" 
+  ukidss: "ukidsslas_noao"
+  ukidsslas: "ukidsslas_noao"
+
 # --- Catalogue Definitions --- 
 # Defines specific astronomical catalogues, their location, and properties.
 # NOTE: Catalogue names are lowercase for easier command-line use.
@@ -64,82 +85,40 @@ catalogues:
     service_id: tap_service
     release: "dr3"
     access_identifier: "I/355/gaiadr3"
-    table_name: "I/355/gaiadr3" # VizieR table name
-    epoch: 2016.0 # Reference epoch for Gaia - TODO [VERIFY] Confirm this is correct for VizieR table
+    table_name: "I/355/gaiadr3" # Same as access_identifier for VizieR TAP
+    epoch: 2016.0
     # Estimated size (rows) - helps strategy selection. Can be 'small', 'medium', 'large', 'huge', or number
     estimated_size: 'huge' # ~1.8 billion
-    # Key columns (adjust based on actual VizieR table I/355/gaiadr3)
-    ra_column: "RA_ICRS"  # TODO [VERIFY] Confirm name and units (degrees?) in VizieR I/355/gaiadr3
-    dec_column: "DE_ICRS" # TODO [VERIFY] Confirm name and units (degrees?) in VizieR I/355/gaiadr3
+    ra_column: "RA_ICRS" 
+    dec_column: "DE_ICRS"
+    id_column: "Source" # Add ID column
     # Default columns: VizieR names. pmRA/pmDE are in mas/yr
     default_columns: ["Source", "RA_ICRS", "DE_ICRS", "pmRA", "pmDE", "Plx", "Gmag", "Epoch"]
-    pm_ra_column: "pmRA" # TODO [VERIFY] Confirm name and units (mas/yr?) in VizieR I/355/gaiadr3
-    pm_dec_column: "pmDE" # TODO [VERIFY] Confirm name and units (mas/yr?) in VizieR I/355/gaiadr3
-    epoch_column: "Epoch" # TODO [VERIFY] Confirm name and value (JYear?) in VizieR I/355/gaiadr3
+    pm_ra_column: "pmRA" 
+    pm_dec_column: "pmDE" 
+    epoch_column: "Epoch"
     # Positional Error Configuration (check VizieR column names)
-    ra_err_column: "e_RA_ICRS"   # TODO [VERIFY] Confirm name and units (mas?) in VizieR I/355/gaiadr3
-    dec_err_column: "e_DE_ICRS"  # TODO [VERIFY] Confirm name and units (mas?) in VizieR I/355/gaiadr3
-    corr_column: "ra_dec_corr" # TODO [VERIFY] Verify actual correlation column name in VizieR I/355/gaiadr3 (if available)
-    pos_err_units: "mas" # milliarcseconds - TODO [VERIFY] Confirm consistent units for errors
+    ra_err_column: "e_RA_ICRS"
+    dec_err_column: "e_DE_ICRS"
+    corr_column: "RADECor"
+    pos_err_units: "mas" 
     # Default error if specific columns are missing/null (in arcsec)
     default_pos_error_arcsec: 0.05
-
-  twomass_psc_cds:
-    description: "2MASS Point Source Catalog via CDS VizieR TAP"
-    archive: cds
-    service_id: tap_service
-    access_identifier: "II/246/out"
-    table_name: "II/246/out" # Same as access_identifier for VizieR TAP
-    id_column: "_2MASS" # Verified join key
-    ra_column: "RAJ2000" # Verified RA column (degrees)
-    dec_column: "DEJ2000" # Verified Dec column (degrees)
-    default_columns: ["_2MASS", "RAJ2000", "DEJ2000", "Jmag", "Hmag", "Kmag"]
-    estimated_size: 'huge'
-    default_pos_error_arcsec: 0.1 # Approximate default
-
-  askap_possum_cds:
-    description: "ASKAP POSSUM Pilot Survey Catalogue via CDS VizieR TAP"
-    archive: cds
-    service_id: tap_service
-    access_identifier: "II/281/askp"
-    table_name: "II/281/askp"
-    id_column: "_2MASS" # Verified join key
-    ra_column: "RAdeg" # Verified RA column (degrees)
-    dec_column: "DEdeg" # Verified Dec column (degrees)
-    default_columns: ["_2MASS", "RAdeg", "DEdeg", "S1400", "e_S1400", "Type"]
-    estimated_size: 'medium'
-    default_pos_error_arcsec: 1.0 # Approximate default
-
-  twomass_cds_xmatch:
-    description: "2MASS PSC via CDS XMatch Service"
-    archive: cds
-    service_id: xmatch_service # Use the xmatch service
-    access_identifier: "II/246/out" # VizieR table ID for 2MASS PSC
-    # ra/dec columns defined here are for the *remote* table (II/246/out)
-    # used by astroquery if needed, though often implicit.
-    ra_column: "RAJ2000"
-    dec_column: "DEJ2000"
-    estimated_size: 'huge'
-    # No id_column needed as CDS xmatch is spatial only via astroquery
-    # No default_columns as CDS XMatch results structure is less predictable/controllable
 
   galex_cds:
     description: "GALEX All-Sky Imaging Survey (AIS) via CDS VizieR TAP"
     archive: cds
     service_id: tap_service
     release: "gr67"
-    access_identifier: "II/312/ais"
-    table_name: "II/312/ais"
-    epoch: 2000.0 # TODO [VERIFY] Confirm mean observation epoch for VizieR II/312/ais
+    access_identifier: "II/335"
+    table_name: "II/335/galex_ais"
+    epoch: 2000.0
     estimated_size: 'large' # ~83 million
     ra_column: "RAJ2000"
     dec_column: "DEJ2000"
-    default_columns: ["GALEXASC", "RAJ2000", "DEJ2000", "FUVmag", "NUVmag"]
-    # Positional Error Configuration (check VizieR)
-    ra_err_column: "e_RAJ2000" # TODO [VERIFY] Confirm name and units (arcsec?) in VizieR II/312/ais
-    dec_err_column: "e_DEJ2000" # TODO [VERIFY] Confirm name and units (arcsec?) in VizieR II/312/ais
-    pos_err_units: "arcsec" # TODO [VERIFY] Confirm consistent units for errors
-    default_pos_error_arcsec: 1.5
+    id_column: "obijd" # Add ID column
+    default_columns: ["obijd", "RAJ2000", "DEJ2000", "FUVmag", "e_FUVmag", "NUVmag", "e_NUVmag", "Fafl", "Nafl", "Fexf", "Nexf", "Ffux", "e_Fflux", "Nfux", "e_Nflux"]
+    default_pos_error_arcsec: 3.0
 
   vhs_cds:
     description: "VISTA Hemisphere Survey via CDS VizieR TAP"
@@ -148,16 +127,14 @@ catalogues:
     release: "dr5"
     access_identifier: "II/367/vhs_dr5"
     table_name: "II/367/vhs_dr5"
-    epoch: 2000.0 # TODO [VERIFY] Confirm mean observation epoch for VizieR II/367/vhs_dr5
-    estimated_size: 'large' # ~1.3 billion
-    ra_column: "RARad" # TODO [VERIFY] Check VizieR II/367/vhs_dr5: Is this radians? Needs conversion if so, or find degree column.
-    dec_column: "DECRad" # TODO [VERIFY] Check VizieR II/367/vhs_dr5: Is this radians? Needs conversion if so, or find degree column.
-    default_columns: ["SourceID", "RARad", "DECRad", "Jmag", "e_Jmag", "Hmag", "e_Hmag", "Ksmag", "e_Ksmag"]
-    # Positional Error Configuration (check VizieR)
-    ra_err_column: "e_RARad" # TODO [VERIFY] Confirm name and units (arcsec?) in VizieR II/367/vhs_dr5
-    dec_err_column: "e_DECRad" # TODO [VERIFY] Confirm name and units (arcsec?) in VizieR II/367/vhs_dr5
-    pos_err_units: "arcsec" # TODO [VERIFY] Confirm consistent units for errors
-    default_pos_error_arcsec: 0.1
+    epoch: 2000.0
+    estimated_size: 'huge' # ~1.3 billion
+    ra_column: "RAJ2000"
+    dec_column: "DEJ2000" 
+    id_column: "SrcID" # Add ID column
+    default_columns: ["SrcID", "RAJ2000", "DEJ2000", "Yap3", "e_Yap3", "Jap3", "e_Jap3", "Hap3", "e_Hap3", "Ksap3", "e_Ksap3"]
+    pos_err_units: "arcsec"
+    default_pos_error_arcsec: 0.3
 
   # --- NOAO Data Lab Catalogues ---
   delve_noao:
@@ -167,29 +144,27 @@ catalogues:
     release: "dr2"
     access_identifier: "delve_dr2.objects"
     table_name: "delve_dr2.objects"
-    epoch: 2000.0 # TODO [VERIFY] Confirm mean observation epoch for delve_dr2.objects
-    estimated_size: 'large' # ~747 million
+    epoch: 2000.0
+    estimated_size: 'huge' # ~2.2 billion
     ra_column: "ra"
     dec_column: "dec"
-    default_columns: ["quick_object_id", "ra", "dec", "mag_auto_g", "mag_auto_r", "mag_auto_i", "mag_auto_z"]
-    # Positional Error Configuration (Check Data Lab schema)
-    ra_err_column: "sigra"  # TODO [VERIFY] Confirm units (arcsec?) from NOIRLab delve_dr2.objects schema
-    dec_err_column: "sigdec" # TODO [VERIFY] Confirm units (arcsec?) from NOIRLab delve_dr2.objects schema
-    # corr_column: "XYZ"   # Check if correlation exists
-    pos_err_units: "arcsec" # TODO [VERIFY] Confirm consistent units for errors from schema
+    id_column: "quick_object_id" # Add ID column
+    default_columns: ["quick_object_id", "ra", "dec", "mag_auto_g", "mag_auto_r", "mag_auto_i", "mag_auto_z", "magerr_auto_g", "magerr_auto_r", "magerr_auto_i", "magerr_auto_z"]
+    pos_err_units: "arcsec"
     default_pos_error_arcsec: 0.1
 
   gaia_noao:
     description: "Gaia (Source Catalogue) mirrored/available via NOIRLab Data Lab TAP"
     archive: noao_datalab
     service_id: tap_service
-    release: "dr3" # Assuming DR3 is available
-    access_identifier: "gaia_dr3.gaia_source" # TODO [VERIFY] Confirm actual table name on Data Lab
-    table_name: "gaia_dr3.gaia_source" # TODO [VERIFY] Confirm actual table name on Data Lab
+    release: "dr3"
+    access_identifier: "gaia_dr3.gaia_source" 
+    table_name: "gaia_dr3.gaia_source"
     epoch: 2016.0
     estimated_size: 'huge'
     ra_column: "ra" # Assuming same names as ESA
     dec_column: "dec"
+    id_column: "source_id" # Add ID column
     default_columns: ["source_id", "ra", "dec", "pmra", "pmdec", "parallax", "phot_g_mean_mag", "ref_epoch"]
     pm_ra_column: "pmra"
     pm_dec_column: "pmdec"
@@ -204,14 +179,15 @@ catalogues:
     description: "DESI Legacy Imaging Surveys (LS) via NOIRLab Data Lab TAP"
     archive: noao_datalab
     service_id: tap_service
-    release: "dr9" # Example DR, check latest
-    access_identifier: "ls_dr9.tractor" # TODO [VERIFY] Confirm actual table name (e.g., tractor, sweeps)
-    table_name: "ls_dr9.tractor" # TODO [VERIFY] Confirm actual table name
-    epoch: 2015.0 # Approximate midpoint, needs verification
-    estimated_size: 'huge'
-    ra_column: "ra" # TODO [VERIFY]
-    dec_column: "dec" # TODO [VERIFY]
-    default_columns: ["ls_id", "ra", "dec", "flux_g", "flux_r", "flux_z", "type"] # TODO [VERIFY]
+    release: "dr10"
+    access_identifier: "ls_dr10.tractor" 
+    table_name: "ls_dr10.tractor"
+    epoch: 2015.0
+    estimated_size: 'huge' # ~1.5 billion
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "ls_id" # Add ID column
+    default_columns: ["ls_id", "ra", "dec", "mag_g", "mag_r", "mag_i", "mag_z", "mag_w1", "mag_w2", "mag_w3", "mag_w4", "type"]
     # Add error columns if available and needed
     # ra_err_column: "ra_ivar" # Example, check schema (often inverse variance)
     # dec_err_column: "dec_ivar"
@@ -223,91 +199,62 @@ catalogues:
     archive: noao_datalab
     service_id: tap_service
     release: "dr11plus"
-    access_identifier: "ukidss_dr11.las_source"
-    table_name: "ukidss_dr11plus.lassource" # TODO [VERIFY] Confirm table name vs access identifier
-    epoch: 2000.0 # TODO [VERIFY] Confirm mean observation epoch for ukidss_dr11.las_source
-    estimated_size: 'large' # ~747 million
+    access_identifier: "ukidss_dr11plus.lassource"
+    table_name: "ukidss_dr11plus.lassource"
+    epoch: 2000.0
+    estimated_size: 'large' # ~88 million
     ra_column: "ra"
     dec_column: "dec"
-    default_columns: ["sourceid", "ra", "dec", "yaperflux3", "japermag3", "hapermag3", "kapermag3"]
-    # Positional Error Configuration (UKIDSS provides per-axis errors)
-    ra_err_column: "sigra" # TODO [VERIFY] Confirm units (arcsec?) from NOIRLab ukidss_dr11.las_source schema
-    dec_err_column: "sigdec" # TODO [VERIFY] Confirm units (arcsec?) from NOIRLab ukidss_dr11.las_source schema
+    id_column: "sourceid" # Add ID column
+    default_columns: ["sourceid", "ra", "dec", "yapermag3", "yapermag3err", "hapermag3", "hapermag3err", "kapermag3", "kapermag3err", "japermag3", "japermag3err"]
+    ra_err_column: "sigra" # 
+    dec_err_column: "sigdec"
     # corr_column: # No correlation term usually provided
-    pos_err_units: "arcsec" # TODO [VERIFY] Confirm consistent units for errors from schema
+    pos_err_units: "arcsec"
     default_pos_error_arcsec: 0.05
 
-  # --- ESA Gaia Archive Catalogues ---
+  # --- ESA Archive Catalogues ---
   gaia_esa:
-    description: "Gaia (Source Catalogue) via ESA Gaia Archive TAP"
+    description: "Gaia Data Release 3 (ESA Archive)"
     archive: esa_gaia
     service_id: tap_service
     release: "dr3"
     access_identifier: "gaiadr3.gaia_source"
-    table_name: "gaiadr3.gaia_source" # Native ESA table name
-    epoch: 2016.0 # Reference epoch for Gaia - Should be correct for ESA DR3
-    estimated_size: 'huge' # ~1.8 billion
-    # Key columns (Native ESA column names)
-    ra_column: "ra"
-    dec_column: "dec"
-    # Default columns: Native ESA names. pmra/pmdec are in mas/yr. epoch is fixed 2016.0
-    default_columns: ["source_id", "ra", "dec", "pmra", "pmdec", "parallax", "phot_g_mean_mag", "ref_epoch"]
-    pm_ra_column: "pmra" # TODO [VERIFY] Confirm units are mas/yr in ESA gaiadr3.gaia_source
-    pm_dec_column: "pmdec" # TODO [VERIFY] Confirm units are mas/yr in ESA gaiadr3.gaia_source
-    epoch_column: "ref_epoch" # TODO [VERIFY] Confirm name and value (J2016.0?) in ESA gaiadr3.gaia_source
-    # Positional Error Configuration (Native ESA names)
-    ra_err_column: "ra_error"   # TODO [VERIFY] Confirm units (mas?) in ESA gaiadr3.gaia_source
-    dec_err_column: "dec_error"  # TODO [VERIFY] Confirm units (mas?) in ESA gaiadr3.gaia_source
-    corr_column: "ra_dec_corr" # TODO [VERIFY] Confirm name in ESA gaiadr3.gaia_source
-    pos_err_units: "mas" # milliarcseconds - TODO [VERIFY] Confirm consistent units for errors
-    # Default error if specific columns are missing/null (in arcsec)
-    default_pos_error_arcsec: 0.01
-    # Optional columns for advanced EPOCH_PROP:
-    # parallax_column: "parallax" # TODO [VERIFY] Confirm name and units (mas?)
-    # rv_column: "radial_velocity" # TODO [VERIFY] Confirm name and units (km/s?)
-
-  gaia_esa_dr3: # Example specific Gaia DR3 source table at ESA
-    description: "Gaia DR3 Source Catalogue via ESA TAP"
-    archive: esa_gaia
-    service_id: tap_service
-    release: "dr3"
-    access_identifier: "gaiaedr3.gaia_source" # Adjust if DR3 name is different
-    table_name: "gaiaedr3.gaia_source"
+    table_name: "gaiadr3.gaia_source"
     epoch: 2016.0
-    estimated_size: 'huge'
+    estimated_size: 'huge' # ~1.8 billion
     ra_column: "ra"
     dec_column: "dec"
-    default_columns: ["source_id", "ra", "dec", "pmra", "pmdec", "parallax", "phot_g_mean_mag"]
+    id_column: "source_id"
+    default_columns: ["source_id", "ra", "dec", "pmra", "pmdec", "parallax", "phot_g_mean_mag", "ref_epoch"]
     pm_ra_column: "pmra"
     pm_dec_column: "pmdec"
-    epoch_column: "ref_epoch" # Assuming 2016.0 is ref_epoch for DR3
-    parallax_column: "parallax"
+    epoch_column: "ref_epoch"
     ra_err_column: "ra_error"
     dec_err_column: "dec_error"
     corr_column: "ra_dec_corr"
     pos_err_units: "mas"
-    default_pos_error_arcsec: 0.05
+    default_pos_error_arcsec: 0.01
 
   # --- NOAO Pre-Computed Crossmatch Catalogues ---
   ukidss_gaia_xmatch_noao:
     description: "UKIDSS DR11 LAS x Gaia DR3 Pre-computed Crossmatch (NOAO)"
     archive: noao_datalab
     service_id: tap_service
-    release: "x1p5" # Indicate it's a crossmatch product
+    release: "x1p5" # Indicate it's a crossmatch product at 1.5 arcsec
     # The actual table name on the NOAO TAP service
     access_identifier: "ukidss_dr11plus.x1p5__lassource__gaia_dr3__gaia_source"
     table_name: "ukidss_dr11plus.x1p5__lassource__gaia_dr3__gaia_source"
     # This table typically only contains IDs and potentially coords/sep
     # Define the key ID columns based on expected NOAO naming convention
     # We'll use these keys in the `--join-keys` argument later
-    ukidss_id_column: "UKIDSSDR11PLUS_LASSOURCE_SOURCEID"
-    gaia_id_column: "GAIADR3_GAIA_SOURCE_SOURCEID"
-    ra_column: "ra" # Usually includes coords too
-    dec_column: "dec"
+    ukidss_id_column: "id1"
+    gaia_id_column: "id2"
+    ra_column: "ra1"
+    dec_column: "dec1"
     # Define some default columns for viewing, including the crucial IDs
-    default_columns: ["UKIDSSDR11PLUS_LASSOURCE_SOURCEID", "GAIADR3_GAIA_SOURCE_SOURCEID", "ra", "dec", "separation"]
+    default_columns: ["ra1", "dec1", "ra2", "dec2", "id1", "id2", "distance"]
     estimated_size: 'large' # Size depends on the overlap
-    # No epoch/pm/error info needed for simple ID join source
 
 
 # --- Crossmatch Method Definitions --- 
@@ -387,3 +334,9 @@ stilts_config:
   
   # Global default positional error floor (arcseconds) applied if no catalogue-specific default found
   default_floor_error_arcsec: 0.01 # Small value, e.g., 10 mas
+
+crossmatch:
+  chunking:
+    enabled: true
+    nside: 8  # HEALPix resolution parameter
+    automatic_detection: true  # Auto-detect large catalogs

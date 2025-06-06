@@ -1,29 +1,26 @@
 import logging
-import random
-import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+from io import BytesIO
 
-import numpy as np
 import pandas as pd
 import pyvo
 from astropy import units as u
 from astropy.coordinates import SkyCoord, match_coordinates_sky
+from astropy.io.votable import parse_single_table
 from astropy.table import Table
 # Specific exceptions
 from pandas.errors import EmptyDataError
-from pyvo.dal import DALQueryError, DALServiceError, DALFormatError
+# Corrected import: TapService -> TAPService
+from pyvo.dal import DALQueryError, DALServiceError, DALFormatError, TAPService, AsyncTAPJob
 from requests.exceptions import RequestException, ConnectionError, Timeout
 
+# Use centralized exceptions
+from .exceptions import TapError, TapUploadUnsupportedError
+
 logger = logging.getLogger(__name__)
-
-
-class TapError(Exception):
-    """Base exception for TAP-related errors."""
-
-    pass
-
 
 # Add connection pooling for TAP services
 _tap_service_cache = {}
@@ -32,29 +29,30 @@ _tap_service_cache = {}
 def get_tap_service(tap_url: str, **kwargs) -> pyvo.dal.TAPService:
     """Get a cached TAP service connection or create a new one."""
     # Create a cache key based on URL and relevant kwargs (like auth)
-    cache_key = tap_url
-    for k, v in sorted(kwargs.items()):
-        # Include auth params in cache key, avoid caching based on other dynamic kwargs
-        if k in ["user", "password"]:
-            cache_key += f"_{k}_{v}"
+    cache_key_parts = [tap_url]
+    auth_session = kwargs.get('auth_session')
+    if auth_session:
+        # Include relevant auth details if present (e.g., credentials identifier)
+        # WARNING: Avoid caching sensitive parts directly. Use a hash or identifier if possible.
+        # For simplicity here, we might just use the presence of an auth session.
+        # A more robust solution might involve inspecting auth_session details safely.
+        cache_key_parts.append(f"auth_present={auth_session is not None}")
+
+    cache_key = tuple(cache_key_parts)
 
     if cache_key not in _tap_service_cache:
-        logger.info(f"Establishing new TAP service connection to {tap_url}")
+        logger.info(f"Creating new TAP service connection for {tap_url}")
         try:
-            # Attempt to create the TAP service connection
-            service = pyvo.dal.TAPService(tap_url, **kwargs)
-            # Test connection? Some services might require explicit login/check.
-            # For now, assume successful instantiation means connection is likely ok.
+            # Pass auth session if provided
+            service = pyvo.dal.TAPService(tap_url, session=auth_session)
             _tap_service_cache[cache_key] = service
-            logger.debug(f"Successfully created TAP service for {tap_url}")
+            logger.debug(f"Successfully created and cached TAP service for {tap_url}")
         except (ConnectionError, Timeout, DALServiceError, RequestException) as e:
-            # Catch specific network/service related errors during connection setup
-            logger.error(f"Network/Service error connecting to TAP service {tap_url}: {e}")
-            raise TapError(f"Failed to connect to TAP service {tap_url}: {e}") from e
+            logger.error(f"Failed to connect to TAP service {tap_url}: {e}")
+            raise TapError(f"Failed to connect to TAP service {tap_url}: {e}")
         except Exception as e:
-            # Catch other unexpected errors during service instantiation
-            logger.error(f"Unexpected error instantiating TAP service {tap_url}: {e}", exc_info=True)
-            raise TapError(f"Unexpected error connecting to TAP service {tap_url}: {e}") from e
+            logger.error(f"Unexpected error creating TAP service for {tap_url}: {e}", exc_info=True)
+            raise TapError(f"Unexpected error creating TAP service for {tap_url}: {e}")
     else:
         logger.debug(f"Using cached TAP service connection for {tap_url}")
 
@@ -62,109 +60,133 @@ def get_tap_service(tap_url: str, **kwargs) -> pyvo.dal.TAPService:
 
 
 def execute_tap_query(
-    tap_service: pyvo.dal.TAPService,
-    adql_query: str,
-    max_retries: int = 3,
-    retry_delay: int = 60,
-    timeout: int = 600,
-    verbose: bool = False,
-    upload_table: Optional[Union[Table, str]] = None,
-    upload_name: Optional[str] = None,
-) -> pd.DataFrame:
-    """Executes an ADQL query using a TAP service with retries and timeout.
-
-    Args:
-        tap_service: An initialized pyvo.dal.TAPService object.
-        adql_query: The ADQL query string.
-        max_retries: Maximum number of retries on failure.
-        retry_delay: Base delay (seconds) between retries (exponential backoff).
-        timeout: Timeout for the query execution in seconds.
-        verbose: Print progress information.
-        upload_table: Astropy Table or path to file to upload.
-        upload_name: Name for the uploaded table.
-
-    Returns:
-        DataFrame containing the query results, or an empty DataFrame on failure after retries.
-
-    Raises:
-        TapError: If the query fails definitively after retries.
-    """
-    retries = 0
+    tap_service: TAPService,
+    query: str,
+    maxrec: Optional[int] = None,
+    upload_params: Optional[dict] = None,
+    retries: int = 3,
+    retry_delay: int = 3,
+    job_timeout: int = 300,  # Example timeout for waiting
+) -> Table:
+    """Executes a TAP query, handling async jobs, retries, and detailed error logging."""
     last_exception = None
+    job = None  # Initialize job variable
 
-    while retries <= max_retries:
+    for attempt in range(1, retries + 1):
+        job_detail = ""  # Reset detail for each attempt
         try:
-            logger.info(f"Executing TAP query (Attempt {retries + 1}/{max_retries + 1})...")
-            if verbose:
-                logger.info(f"ADQL Query:\n{adql_query}")
-            if upload_table:
-                logger.info(f"Uploading table '{upload_name}' for query.")
+            logger.info(f"Executing TAP query (Attempt {attempt}/{retries})...")
+            logger.debug(f"Query: {query}")  # Log the query being sent
 
-            # Execute the query using the TAP service object
-            # Set timeout via searchparams if possible, or rely on underlying requests timeout?
-            # pyvo doesn't seem to expose timeout directly in run_async?
-            # Let's assume underlying HTTP timeout applies or service default.
-            job = tap_service.run_async(
-                adql_query,
-                uploads={upload_name: upload_table} if upload_table and upload_name else None,
-                # maxrec=? Can be useful but not directly exposed here
-            )
-
-            # Wait for job completion (check status?)
-            # Using results directly blocks until completion.
-            results_table = job.results
-
-            # Check for empty results vs actual errors
-            if results_table is None:
-                # This might indicate an issue rather than just empty results
-                logger.warning("TAP query job result is None. Checking job status.")
-                job.raise_if_error() # Raise exception if job phase is ERROR
-                logger.warning("TAP query returned None results but job status is OK. Treating as empty.")
-                return pd.DataFrame() # Treat as empty
-
-            logger.info(f"TAP query successful. Received {len(results_table)} rows.")
-            # Convert Astropy Table to Pandas DataFrame
-            try:
-                results_df = results_table.to_pandas()
-                # Convert potentially problematic DTYPES (like object containing bytes)
-                for col in results_df.select_dtypes(include=['object']).columns:
-                    # Attempt to decode if bytes are present
-                    try:
-                        if results_df[col].iloc[0] is not None and isinstance(results_df[col].iloc[0], bytes):
-                            results_df[col] = results_df[col].str.decode('utf-8', errors='replace')
-                            logger.debug(f"Decoded byte string in column '{col}'.")
-                    except Exception as decode_err:
-                        logger.warning(f"Could not decode bytes in column '{col}': {decode_err}. Skipping.")
-                return results_df
-            except EmptyDataError:
-                logger.info("TAP query result table is empty.")
-                return pd.DataFrame() # Return empty DataFrame for 0 rows
-            except Exception as e:
-                logger.error(f"Failed to convert TAP results Table to DataFrame: {e}", exc_info=True)
-                # Consider this a failure - raise TapError?
-                raise TapError(f"Failed to convert results to DataFrame: {e}") from e
-
-        except (DALQueryError, DALServiceError, DALFormatError, ConnectionError, Timeout, RequestException) as e:
-            last_exception = e
-            retries += 1
-            logger.warning(f"TAP query failed (Attempt {retries}/{max_retries + 1}): {type(e).__name__} - {e}")
-            if retries <= max_retries:
-                sleep_time = retry_delay * (2 ** (retries - 1)) # Exponential backoff
-                logger.info(f"Retrying in {sleep_time} seconds...")
-                time.sleep(sleep_time)
+            if upload_params:
+                raise TapUploadUnsupportedError("Upload via execute_tap_query not fully implemented here.")
             else:
-                logger.error(f"TAP query failed after {max_retries} retries.")
-                # Raise a TapError wrapping the last exception
-                raise TapError(f"TAP query failed after {max_retries} retries: {last_exception}") from last_exception
-        except Exception as e:
-            # Catch other unexpected errors during query execution
-            logger.error(f"Unexpected error during TAP query: {e}", exc_info=True)
-            # Raise TapError wrapping the unexpected exception
-            raise TapError(f"Unexpected error during TAP query: {e}") from e
+                logger.debug("Using service.submit_job method.")
+                job = tap_service.submit_job(query, maxrec=maxrec, language="ADQL")  # Explicitly ADQL
+                job.run()  # Start the job
 
-    # Should not be reached if loop finishes, but return empty DF as fallback
-    logger.error("TAP query loop exited unexpectedly.")
+            logger.debug(f"Monitoring TAP job (type: {type(job).__name__}, ID: {job.job_id})...")
+            # Wait for job completion or failure
+            job.wait(phases=["COMPLETED", "ERROR", "ABORTED"], timeout=job_timeout)
+
+            job_phase = job.phase
+            logger.debug(f"Job phase after wait: {job_phase}")
+
+            if job_phase == "COMPLETED":
+                logger.info("TAP query completed successfully.")
+                return job.fetch_result()
+            else:
+                # --- Enhanced Error Handling ---
+                job_detail = f"TAP job failed with phase: {job_phase}"
+                error_summary = None  # Initialize error_summary
+                try:
+                    # Try common attributes first
+                    if hasattr(job, 'message') and job.message:
+                        error_summary = str(job.message)
+                    elif hasattr(job, 'error_summary') and job.error_summary and hasattr(job.error_summary, 'message') and job.error_summary.message:
+                        error_summary = str(job.error_summary.message)
+                    elif hasattr(job, 'parameters') and isinstance(job.parameters, dict) and 'error' in job.parameters:
+                        # Check job parameters dictionary
+                        error_summary = str(job.parameters['error'])
+
+                    # Attempt standard XML parsing
+                    if not error_summary and hasattr(job, 'xml'):
+                        try:
+                            # Look for common error elements/attributes in UWS standard
+                            error_node = job.xml.find('.//{http://www.ivoa.net/xml/UWS/v1.0}message')
+                            if error_node is not None and error_node.text:
+                                error_summary = error_node.text
+                            else:
+                                # Try another common pattern (parameter with id='error')
+                                error_param = job.xml.find(".//{http://www.ivoa.net/xml/UWS/v1.0}parameter[@id='error']")
+                                if error_param is not None and error_param.text:
+                                    error_summary = error_param.text
+                        except Exception as xml_parse_err:
+                            logger.warning(f"Could not parse job XML for standard error details: {xml_parse_err}")
+
+                except Exception as detail_err:
+                    # Catch errors during standard attribute/parameter checking
+                    logger.warning(f"Could not retrieve detailed error message using standard methods: {detail_err}")
+
+                # --- Log Raw XML if available, regardless of previous success ---
+                raw_xml_logged = False
+                if hasattr(job, 'xml'):
+                    logger.warning("Inspecting raw job XML for error details:")
+                    try:
+                        # Use lxml's tostring for potentially cleaner output if available
+                        from lxml import etree
+                        xml_string = etree.tostring(job.xml, pretty_print=True, encoding='unicode')
+                        logger.warning(f"Raw Job XML:\n{xml_string}")
+                        raw_xml_logged = True
+                    except ImportError:
+                        # Fallback to standard xml.etree
+                        try:
+                            import xml.etree.ElementTree as ET
+                            xml_string = ET.tostring(job.xml, encoding='unicode')
+                            logger.warning(f"Raw Job XML:\n{xml_string}")
+                            raw_xml_logged = True
+                        except Exception as et_xml_log_err:
+                            logger.warning(f"Failed to log raw job XML using xml.etree: {et_xml_log_err}")
+                    except Exception as xml_log_err:
+                        logger.warning(f"Failed to log raw job XML: {xml_log_err}")
+                # --- End Raw XML Logging ---
+
+                # Construct final log message
+                if error_summary:
+                    job_detail += f". Detail: {error_summary}"
+                elif raw_xml_logged:
+                    job_detail += ". Detail: See raw XML log above."
+                else:
+                    job_detail += ". Detail: No detailed error summary could be extracted."
+
+                logger.warning(f"{job_detail} (Attempt {attempt}/{retries})")
+                last_exception = TapError(job_detail)
+                # --- End Enhanced Error Handling ---
+
+        except DALQueryError as e:
+            job_detail = f"DALQueryError during TAP query (Attempt {attempt}/{retries}): {e}"
+            logger.warning(job_detail)
+            last_exception = TapError(job_detail)
+        except TimeoutError:
+            job_detail = f"TAP job timed out after {job_timeout}s (Attempt {attempt}/{retries})"
+            logger.warning(job_detail)
+            last_exception = TapError(job_detail)
+            if job:
+                job.delete()  # Attempt to clean up timed-out job
+        except Exception as e:
+            job_detail = f"Unexpected error during TAP query (Attempt {attempt}/{retries}): {e}"
+            logger.error(job_detail, exc_info=True)  # Log full traceback for unexpected errors
+            last_exception = TapError(job_detail)
+
+        # Wait before retrying if not the last attempt and error occurred
+        if last_exception and attempt < retries:
+            logger.info(f"Waiting {retry_delay} seconds before retry...")
+            time.sleep(retry_delay)
+            last_exception = None  # Reset for next attempt unless it's the final one
+
+    # If all retries failed
+    logger.error(f"TAP query failed after {retries} attempts.")
     if last_exception:
-        raise TapError(f"TAP query failed: {last_exception}") from last_exception
+        raise last_exception
     else:
-        raise TapError("TAP query failed for an unknown reason.")
+        raise TapError("TAP query failed after all retries for an unknown reason.")

@@ -33,6 +33,7 @@ dependencies = [
     "astroquery >= 0.4.6",
     "astropy-healpix >= 0.6",
     "pyarrow >= 7.0",
+    "healpy >= 1.16.0",
     ]
 
 [project.optional-dependencies]
@@ -53,7 +54,7 @@ dev = [
 
 [project.scripts]
 # This makes the 'xmatch' command available after installation
-xmatch = "xmatch.__main__:main"
+xmatch = "xmatch.cli:main"
 
 [project.urls] # Optional
 Homepage = "https://github.com/sfabbro/xmatch" # Example

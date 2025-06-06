@@ -1,20 +1,21 @@
 #!/bin/bash
-# Test: xmatch vhs_cds gaia_cds -o vhs_gaia.parquet
-
 set -e
 
-TEST_NAME="vhs_cds_vs_gaia_cds"
-OUTPUT_FILE="tests/output_${TEST_NAME}.parquet"
-CONFIG_FILE="src/xmatch/xmatch.yaml"
+TEST_NAME="vhs_gaia"
+
+# Get the directory where the script is located
+testdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p "$testdir/outputs"
+
+OUTPUT_FILE="$testdir/outputs/output_${TEST_NAME}.parquet"
 CAT1="vhs_cds"
 CAT2="gaia_cds"
-RADIUS=1.0 # Example radius
+RADIUS=1.0
 
 rm -f "$OUTPUT_FILE"
 
 echo "Running test: $TEST_NAME"
-python -m src.xmatch.cli "$CAT1" "$CAT2" \
-    --config "$CONFIG_FILE" \
+xmatch "$CAT1" "$CAT2" \
     --radius "$RADIUS" \
     -o "$OUTPUT_FILE"
 
@@ -23,4 +24,3 @@ if [ ! -f "$OUTPUT_FILE" ]; then
     exit 1
 fi
 echo "Test $TEST_NAME PASSED (Basic check - file created)"
-# rm -f "$OUTPUT_FILE" 

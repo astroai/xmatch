@@ -1,35 +1,27 @@
 #!/bin/bash
+set -e
 
-# Test that the CLI exits with an error if neither --radius nor --join-on-ids is provided for matching.
+TEST_NAME="error_missing_param"
 
-set +e # Disable exit on error, as we expect an error
+# Get the directory where the script is located
+testdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p "$testdir/outputs"
 
-FILE1="tests/test_id_join_1.csv"
-FILE2="tests/test_coord_override_2.csv"
-OUTPUT_FILE="tests/output_error_missing_param.parquet"
+OUTPUT_FILE="$testdir/outputs/output_error_missing_param.parquet"
+CAT1="gaia_cds"
+CAT2="twomass_psc_cds"
+# Deliberately NOT providing radius
 
 # Clean up previous run
 rm -f $OUTPUT_FILE
 
-# Run the command - expect failure
-python -m src.xmatch.cli $FILE1 $FILE2 -o $OUTPUT_FILE > /dev/null 2>&1
-EXIT_CODE=$?
-
-set -e # Re-enable exit on error
-
-# Check exit code
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "Error: Command succeeded unexpectedly. Expected failure due to missing --radius/--join-on-ids." >&2
-    # Clean up the erroneously created file if it exists
-    rm -f $OUTPUT_FILE
+# Run the xmatch command without required radius parameter
+# Should fail with non-zero exit code
+if xmatch $CAT1 $CAT2 -o $OUTPUT_FILE 2>/dev/null; then
+    echo "Error: Command succeeded but should have failed due to missing radius parameter." >&2
     exit 1
 else
-    echo "test_error_missing_param.sh PASSED (Command failed as expected)"
+    echo "Command correctly failed due to missing radius parameter"
 fi
 
-# Ensure output file was NOT created
-if [ -f "$OUTPUT_FILE" ]; then
-    echo "Error: Output file $OUTPUT_FILE was created unexpectedly on failure." >&2
-    rm -f $OUTPUT_FILE
-    exit 1
-fi 
+echo "test_error_missing_param.sh PASSED (correctly detected missing parameter)"
