@@ -133,6 +133,7 @@ def _build_stilts_command(
                     f"ensure '{stilts_jar_default}' is in PATH, or place it in the current directory."
                 )
 
+        assert stilts_jar_path is not None
         cmd.extend(["-jar", stilts_jar_path])
         cmd.extend(["-disk"])
 
