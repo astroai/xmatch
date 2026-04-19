@@ -1,41 +1,39 @@
 import logging
-import multiprocessing
 from typing import Any, Dict, List, Optional
-from pathlib import Path
 
-import numpy as np
 import pandas as pd
-from astropy.coordinates import SkyCoord
-from astropy import units as u
 
-from .tap import TapError, TapUploadUnsupportedError, get_tap_service, execute_tap_query # Assuming these are accessible
-from .chunking import _generate_healpix_chunks, _generate_grid_chunks # Import chunking functions
-from astropy.table import Table
-from pyvo.dal import TAPService, DALQueryError
-from .tap import get_tap_service, execute_tap_query, TapError
-from .exceptions import CrossMatchError, TapError, InputError
-import uuid
-import requests
-from requests.auth import HTTPBasicAuth
-import pandas as pd # Ensure pandas is imported
+from .exceptions import CrossMatchError, TapError
+from .tap import (  # Assuming these are accessible
+    execute_tap_query,
+    get_tap_service,
+)
 
 logger = logging.getLogger(__name__)
 
-def _get_coord_cols_from_config(config: Dict[str, Any], prefix: str, params: Dict[str, Any]) -> tuple[str, str]:
+
+def _get_coord_cols_from_config(
+    config: Dict[str, Any], prefix: str, params: Dict[str, Any]
+) -> tuple[str, str]:
     """Gets RA/Dec column names from parameters or config fallback."""
     # Check params first for overrides (e.g., 'ra_column_1', 'dec_column_1')
     ra_col_param = f"ra_column_{prefix}"
     dec_col_param = f"dec_column_{prefix}"
-    
-    ra_col = params.get(ra_col_param, config.get('ra_column'))
-    dec_col = params.get(dec_col_param, config.get('dec_column'))
-    
+
+    ra_col = params.get(ra_col_param, config.get("ra_column"))
+    dec_col = params.get(dec_col_param, config.get("dec_column"))
+
     if not ra_col:
-        raise CrossMatchError(f"RA column name could not be determined for prefix '{prefix}'. Check config or parameters (e.g., '{ra_col_param}')")
+        raise CrossMatchError(
+            f"RA column name could not be determined for prefix '{prefix}'. Check config or parameters (e.g., '{ra_col_param}')"
+        )
     if not dec_col:
-        raise CrossMatchError(f"Dec column name could not be determined for prefix '{prefix}'. Check config or parameters (e.g., '{dec_col_param}')")
-        
+        raise CrossMatchError(
+            f"Dec column name could not be determined for prefix '{prefix}'. Check config or parameters (e.g., '{dec_col_param}')"
+        )
+
     return ra_col, dec_col
+
 
 def download_from_tap(
     config: Dict[str, Any],
@@ -68,24 +66,26 @@ def download_from_tap(
         TapError: If there's an issue with the TAP query execution.
     """
     cat_name = config.get("_catalogue_name", "unknown_remote")
-    tap_url = config.get("tap_url") or config.get("access_url") # Check for both keys
-    table_name = config.get("access_identifier") or config.get("table_name") # Check for both keys
+    tap_url = config.get("tap_url") or config.get("access_url")  # Check for both keys
+    table_name = config.get("access_identifier") or config.get("table_name")  # Check for both keys
 
     if not tap_url or not table_name:
         # Add more detail to the error message
         missing = []
-        if not tap_url: missing.append("'tap_url' or 'access_url'")
-        if not table_name: missing.append("'access_identifier' or 'table_name'")
-        raise CrossMatchError(f"Missing { ' and '.join(missing) } for {cat_name} in config: {config}")
+        if not tap_url:
+            missing.append("'tap_url' or 'access_url'")
+        if not table_name:
+            missing.append("'access_identifier' or 'table_name'")
+        raise CrossMatchError(f"Missing {' and '.join(missing)} for {cat_name} in config: {config}")
 
     logger.info(f"Preparing TAP download for {cat_name} from {tap_url} (Table: {table_name})")
 
     # Get configured coordinate and ID columns using their correct names from config
     ra_col = config.get("ra_column")
     dec_col = config.get("dec_column")
-    id_col = config.get("id_column") # Get ID column name from config
+    id_col = config.get("id_column")  # Get ID column name from config
     if not ra_col or not dec_col:
-         raise CrossMatchError(f"RA/Dec column names missing in config for {cat_name}")
+        raise CrossMatchError(f"RA/Dec column names missing in config for {cat_name}")
 
     essential_cols = {ra_col, dec_col}
     if id_col:
@@ -102,8 +102,10 @@ def download_from_tap(
         if missing_essentials:
             logger.debug(f"Adding missing essential columns: {missing_essentials}")
             cols_to_select.update(missing_essentials)
-        select_cols_str = ", ".join(sorted(list(cols_to_select))) # Use the combined set
-        logger.debug(f"Final columns selected based on user request + essentials: {select_cols_str}")
+        select_cols_str = ", ".join(sorted(list(cols_to_select)))  # Use the combined set
+        logger.debug(
+            f"Final columns selected based on user request + essentials: {select_cols_str}"
+        )
     else:
         # Use default columns from config if available
         default_cols = config.get("default_columns")
@@ -113,10 +115,12 @@ def download_from_tap(
             # Ensure essential columns are included in defaults
             missing_essentials = essential_cols - cols_to_select
             if missing_essentials:
-                 logger.debug(f"Adding missing essential columns to defaults: {missing_essentials}")
-                 cols_to_select.update(missing_essentials)
+                logger.debug(f"Adding missing essential columns to defaults: {missing_essentials}")
+                cols_to_select.update(missing_essentials)
             select_cols_str = ", ".join(sorted(list(cols_to_select)))
-            logger.debug(f"Final columns selected based on defaults + essentials: {select_cols_str}")
+            logger.debug(
+                f"Final columns selected based on defaults + essentials: {select_cols_str}"
+            )
         else:
             # Fallback to selecting all columns if no defaults and no user request
             select_cols_str = "*"
@@ -124,17 +128,19 @@ def download_from_tap(
 
     # Construct ADQL query with table alias
     table_alias = "t1"
-    adql_query = f"SELECT {select_cols_str} FROM {table_name} AS {table_alias}" # Added AS t1
+    adql_query = f"SELECT {select_cols_str} FROM {table_name} AS {table_alias}"  # Added AS t1
 
     # Add spatial constraint if provided
     if ra is not None and dec is not None and radius_deg is not None:
         # Use standard ADQL cone search syntax, but use 1=CONTAINS for compatibility
         # Use alias in POINT function
-        where_clause = f"WHERE 1 = CONTAINS(POINT('ICRS', {table_alias}.{ra_col}, {table_alias}.{dec_col}), CIRCLE('ICRS', {ra}, {dec}, {radius_deg}))" # Reverted to 1 = CONTAINS
+        where_clause = f"WHERE 1 = CONTAINS(POINT('ICRS', {table_alias}.{ra_col}, {table_alias}.{dec_col}), CIRCLE('ICRS', {ra}, {dec}, {radius_deg}))"  # Reverted to 1 = CONTAINS
         adql_query += f" {where_clause}"
         logger.info(f"Applying cone search: RA={ra}, Dec={dec}, Radius={radius_deg} deg")
     elif any(arg is not None for arg in [ra, dec, radius_deg]):
-        logger.warning("Partial cone search parameters provided (RA, Dec, Radius). All three are required. Ignoring spatial constraint.")
+        logger.warning(
+            "Partial cone search parameters provided (RA, Dec, Radius). All three are required. Ignoring spatial constraint."
+        )
 
     # Add MAXREC if specified
     if maxrec:
@@ -147,13 +153,13 @@ def download_from_tap(
         # Get the TAP service object first, passing auth_session as keyword
         tap_service = get_tap_service(tap_url, auth_session=auth_session)
         if not tap_service:
-             # Handle case where get_tap_service might return None or raise error implicitly
-             raise TapError(f"Could not establish TAP service connection to {tap_url}")
+            # Handle case where get_tap_service might return None or raise error implicitly
+            raise TapError(f"Could not establish TAP service connection to {tap_url}")
 
         # Use the generic execute_tap_query function, passing only required args
         results_table = execute_tap_query(
-            tap_service, # 1st positional: service object
-            adql_query   # 2nd positional: query string
+            tap_service,  # 1st positional: service object
+            adql_query,  # 2nd positional: query string
         )
         logger.info(f"Successfully downloaded {len(results_table)} records for {cat_name}.")
         return results_table.to_pandas()
@@ -165,13 +171,14 @@ def download_from_tap(
         logger.error(f"Unexpected error during TAP download for {cat_name}: {e}", exc_info=True)
         raise CrossMatchError(f"Unexpected download error for {cat_name}: {e}") from e
 
+
 # Placeholder for TAP Upload Match Strategy
 def execute_upload_and_tap_match(
     local_df: pd.DataFrame,
     local_config: Dict[str, Any],
     remote_config: Dict[str, Any],
-    crossmatch_instance: Any, # Assuming CrossMatch instance might be needed
-    **params
+    crossmatch_instance: Any,  # Assuming CrossMatch instance might be needed
+    **params,
 ) -> pd.DataFrame:
     """
     Executes a crossmatch by uploading a local table to a TAP service
@@ -187,12 +194,13 @@ def execute_upload_and_tap_match(
     raise NotImplementedError("execute_upload_and_tap_match needs implementation")
     # return pd.DataFrame() # Example return
 
+
 # Placeholder for Remote TAP Join Strategy
 def execute_remote_join_match(
     config1: Dict[str, Any],
     config2: Dict[str, Any],
-    crossmatch_instance: Any, # Assuming CrossMatch instance might be needed
-    **params
+    crossmatch_instance: Any,  # Assuming CrossMatch instance might be needed
+    **params,
 ) -> pd.DataFrame:
     """
     Executes a crossmatch by joining two tables directly on the same TAP service.

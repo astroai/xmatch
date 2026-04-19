@@ -37,7 +37,7 @@ for test_script in "${TEST_FILES[@]}"; do
 
   # Make executable
   chmod +x "$test_script"
-  
+
   # Run the test script.
   # Individual scripts should have 'set -e' to exit on error.
   if "$test_script"; then
@@ -75,4 +75,4 @@ else
   done
   echo "=====================" >> /dev/stderr
   exit 1
-fi 
+fi

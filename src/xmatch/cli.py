@@ -1,60 +1,62 @@
 import argparse
-import sys
 import logging
-import ast
+import sys
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
 from . import __version__
-from .crossmatch import CrossMatch, CrossMatchError
+from .crossmatch import CrossMatch
 
 logger = logging.getLogger(__name__)
 
+
 def resolve_catalogue_name(name: str, cm: CrossMatch) -> str:
     """Resolves a catalogue alias to its full name.
-    
+
     Checks if the name is an alias and returns the resolved name,
     otherwise returns the original name.
-    
+
     Args:
         name: The catalogue name or alias
         cm: CrossMatch instance with loaded config
-        
+
     Returns:
         The resolved catalogue name
     """
-    if not hasattr(cm, 'config') or not cm.config:
+    if not hasattr(cm, "config") or not cm.config:
         return name
-        
+
     # Check catalogue aliases if available
-    aliases = cm.config.get('catalogue_aliases', {})
+    aliases = cm.config.get("catalogue_aliases", {})
     if name.lower() in aliases:
         return aliases[name.lower()]
-    
+
     return name
+
 
 def handle_archive_override(name: str, archive_prefix: str, cm: CrossMatch) -> str:
     """Apply archive override to catalogue name if needed.
-    
+
     Args:
         name: Original catalogue name
         archive_prefix: Archive prefix to apply (e.g., 'esa', 'cds')
         cm: CrossMatch instance with config
-        
+
     Returns:
         Updated catalogue name with archive prefix if applicable
     """
     resolved = resolve_catalogue_name(name, cm)
-    
+
     # Handle the case where a simple name is given but archive override is specified
     if resolved == name:  # No alias found
         # Try constructing a catalogue name with archive prefix
         with_archive = f"{name}_{archive_prefix}"
-        if with_archive in cm.config.get('catalogues', {}):
+        if with_archive in cm.config.get("catalogues", {}):
             logger.info(f"Using {with_archive} based on archive override")
             return with_archive
-    
+
     return name
+
 
 def parse_args(args: List[str] = None) -> argparse.Namespace:
     """Parse command line arguments."""
@@ -98,7 +100,7 @@ def parse_args(args: List[str] = None) -> argparse.Namespace:
         help="Comma-separated list of columns to select from second catalogue (e.g., 'ra,dec,mag_r')",
         dest="columns_2",
     )
-    
+
     # Option to show default columns
     parser.add_argument(
         "--show-default-columns",
@@ -109,7 +111,7 @@ def parse_args(args: List[str] = None) -> argparse.Namespace:
 
     # Output options
     parser.add_argument(
-        "-o", 
+        "-o",
         "--output",
         dest="output_file",
         help="Output file path (.parquet, .fits, or .csv)",
@@ -117,184 +119,141 @@ def parse_args(args: List[str] = None) -> argparse.Namespace:
 
     # Matching parameters
     parser.add_argument(
-        "-r", 
+        "-r",
         "--radius",
         dest="radius_arcsec",
         type=float,
         default=1.0,
         help="Match radius in arcseconds",
     )
-    
+
     # Column overrides for local files
-    parser.add_argument(
-        "--ra1", 
-        dest="ra_column_1", 
-        help="RA column name for first catalogue"
-    )
-    parser.add_argument(
-        "--dec1", 
-        dest="dec_column_1", 
-        help="Dec column name for first catalogue"
-    )
-    parser.add_argument(
-        "--ra2", 
-        dest="ra_column_2", 
-        help="RA column name for second catalogue"
-    )
-    parser.add_argument(
-        "--dec2", 
-        dest="dec_column_2", 
-        help="Dec column name for second catalogue"
-    )
-    
+    parser.add_argument("--ra1", dest="ra_column_1", help="RA column name for first catalogue")
+    parser.add_argument("--dec1", dest="dec_column_1", help="Dec column name for first catalogue")
+    parser.add_argument("--ra2", dest="ra_column_2", help="RA column name for second catalogue")
+    parser.add_argument("--dec2", dest="dec_column_2", help="Dec column name for second catalogue")
+
     # For ID-based joins
+    parser.add_argument("--id1", dest="id_column_1", help="ID column name for first catalogue")
+    parser.add_argument("--id2", dest="id_column_2", help="ID column name for second catalogue")
     parser.add_argument(
-        "--id1", 
-        dest="id_column_1", 
-        help="ID column name for first catalogue"
-    )
-    parser.add_argument(
-        "--id2", 
-        dest="id_column_2", 
-        help="ID column name for second catalogue"
-    )
-    parser.add_argument(
-        "--join-on-ids", 
-        dest="join_on_ids", 
+        "--join-on-ids",
+        dest="join_on_ids",
         action="store_true",
-        help="Perform ID-based join instead of spatial join"
+        help="Perform ID-based join instead of spatial join",
     )
-    
+
     # Join type
     parser.add_argument(
-        "--join", 
-        dest="join_type", 
+        "--join",
+        dest="join_type",
         choices=["1and2", "1or2", "all", "1not2", "2not1", "all1", "all2"],
         default="1and2",
-        help="Join type: 1and2=inner, 1or2=outer, 1not2=left anti, 2not1=right anti, all=full"
+        help="Join type: 1and2=inner, 1or2=outer, 1not2=left anti, 2not1=right anti, all=full",
     )
-    
+
     # For specifying spatial region
-    parser.add_argument(
-        "--ra", 
-        dest="ra", 
-        type=float,
-        help="RA of region center in degrees"
-    )
-    parser.add_argument(
-        "--dec", 
-        dest="dec", 
-        type=float,
-        help="Dec of region center in degrees"
-    )
-    
+    parser.add_argument("--ra", dest="ra", type=float, help="RA of region center in degrees")
+    parser.add_argument("--dec", dest="dec", type=float, help="Dec of region center in degrees")
+
     # Advanced error handling options
     parser.add_argument(
-        "--matcher", 
-        dest="matcher", 
+        "--matcher",
+        dest="matcher",
         choices=["sky", "skyerr", "skyellipse"],
-        help="Matcher algorithm: 'sky' for fixed radius, 'skyerr' for symmetric errors, 'skyellipse' for error ellipses"
+        help="Matcher algorithm: 'sky' for fixed radius, 'skyerr' for symmetric errors, 'skyellipse' for error ellipses",
     )
     parser.add_argument(
-        "--max-error", 
-        dest="max_error", 
+        "--max-error",
+        dest="max_error",
         type=float,
-        help="Maximum separation in units of sigma (for skyerr/skyellipse matchers)"
+        help="Maximum separation in units of sigma (for skyerr/skyellipse matchers)",
     )
-    
+
     # Strategy selection
-    parser.add_argument(
-        "--strategy", 
-        dest="strategy", 
-        help="Force specific matching strategy"
-    )
-    
+    parser.add_argument("--strategy", dest="strategy", help="Force specific matching strategy")
+
     # Performance tuning
     parser.add_argument(
-        "--n-workers", 
-        dest="n_workers", 
+        "--n-workers",
+        dest="n_workers",
         type=int,
-        help="Number of worker processes for parallel matching"
+        help="Number of worker processes for parallel matching",
     )
     parser.add_argument(
-        "--chunk-size", 
-        dest="chunk_size", 
-        type=int,
-        help="Chunk size for processing large catalogs"
+        "--chunk-size", dest="chunk_size", type=int, help="Chunk size for processing large catalogs"
     )
-    
+
     # Info commands
     parser.add_argument(
-        "--list-catalogues", 
-        dest="list_catalogues", 
+        "--list-catalogues",
+        dest="list_catalogues",
         action="store_true",
-        help="List available catalogues"
+        help="List available catalogues",
     )
     parser.add_argument(
-        "--describe", 
-        dest="describe_catalogue",
-        help="Describe a specific catalogue"
+        "--describe", dest="describe_catalogue", help="Describe a specific catalogue"
     )
 
     # Config handling
     parser.add_argument(
-        "--config", 
-        dest="config_file", 
-        help="Path to config file (default: use builtin config)"
+        "--config", dest="config_file", help="Path to config file (default: use builtin config)"
     )
-    
+
     # Authentication
     parser.add_argument(
-        "--auth-config",
-        dest="auth_config",
-        help="Path to authentication config file"
+        "--auth-config", dest="auth_config", help="Path to authentication config file"
     )
-    
+
     # Verbosity/logging
     parser.add_argument(
-        "-v", 
-        "--verbose", 
-        dest="verbose", 
+        "-v",
+        "--verbose",
+        dest="verbose",
         action="count",
         default=0,
-        help="Increase verbosity (can be used multiple times)"
+        help="Increase verbosity (can be used multiple times)",
     )
-    parser.add_argument(
-        "--log-file", 
-        dest="log_file",
-        help="Log file path"
-    )
-    
+    parser.add_argument("--log-file", dest="log_file", help="Log file path")
+
     # Dry run
     parser.add_argument(
-        "--dry-run", 
-        dest="dry_run", 
+        "--dry-run",
+        dest="dry_run",
         action="store_true",
-        help="Show what would be done without executing"
+        help="Show what would be done without executing",
     )
-    
+
     # Version
-    parser.add_argument(
-        "--version", 
-        action="version", 
-        version=f"%(prog)s {__version__}"
-    )
-    
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+
     # Parse args
     parsed_args = parser.parse_args(args)
-    
+
     # Add default output file if not provided but catalogues are
-    if (parsed_args.catalogue_1 and parsed_args.catalogue_2 and 
-        not parsed_args.output_file and
-        not parsed_args.list_catalogues and
-        not parsed_args.describe_catalogue):
+    if (
+        parsed_args.catalogue_1
+        and parsed_args.catalogue_2
+        and not parsed_args.output_file
+        and not parsed_args.list_catalogues
+        and not parsed_args.describe_catalogue
+    ):
         # Generate default output name based on input catalogues
-        cat1_name = Path(parsed_args.catalogue_1).stem if Path(parsed_args.catalogue_1).suffix else parsed_args.catalogue_1
-        cat2_name = Path(parsed_args.catalogue_2).stem if Path(parsed_args.catalogue_2).suffix else parsed_args.catalogue_2
+        cat1_name = (
+            Path(parsed_args.catalogue_1).stem
+            if Path(parsed_args.catalogue_1).suffix
+            else parsed_args.catalogue_1
+        )
+        cat2_name = (
+            Path(parsed_args.catalogue_2).stem
+            if Path(parsed_args.catalogue_2).suffix
+            else parsed_args.catalogue_2
+        )
         parsed_args.output_file = f"{cat1_name}_{cat2_name}.parquet"
         logger.info(f"No output file specified, using default: {parsed_args.output_file}")
-    
+
     return parsed_args
+
 
 def setup_logging(args: argparse.Namespace) -> None:
     """Set up logging based on command-line arguments."""
@@ -305,196 +264,200 @@ def setup_logging(args: argparse.Namespace) -> None:
         log_level = logging.DEBUG
 
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    
+
     # Configure root logger
-    logging.basicConfig(
-        level=log_level,
-        format=log_format,
-        handlers=[logging.StreamHandler()]
-    )
-    
+    logging.basicConfig(level=log_level, format=log_format, handlers=[logging.StreamHandler()])
+
     # Add file handler if specified
     if args.log_file:
         file_handler = logging.FileHandler(args.log_file)
         file_handler.setFormatter(logging.Formatter(log_format))
         logging.getLogger().addHandler(file_handler)
-        
+
     # Set level for some noisy libraries
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("pyvo").setLevel(max(logging.INFO, log_level))
 
+
 def list_catalogues(cm: CrossMatch) -> None:
     """Print a list of available catalogues."""
     catalogues = {}
-    
+
     # Get catalogue definitions
-    if hasattr(cm, 'config') and 'catalogues' in cm.config:
-        catalogues = cm.config['catalogues']
+    if hasattr(cm, "config") and "catalogues" in cm.config:
+        catalogues = cm.config["catalogues"]
     else:
         print("No catalogues configured.")
         return
-    
+
     # Get aliases for more helpful output
     aliases = {}
-    if 'catalogue_aliases' in cm.config:
+    if "catalogue_aliases" in cm.config:
         # Invert the aliases mapping for display
-        for alias, cat_name in cm.config['catalogue_aliases'].items():
+        for alias, cat_name in cm.config["catalogue_aliases"].items():
             if cat_name not in aliases:
                 aliases[cat_name] = []
             aliases[cat_name].append(alias)
-    
+
     # Print header
     print("\nAvailable catalogues:")
-    print(f"{'NAME':<16} {'ALIASES':<25} {'ARCHIVE':<12} {'DESCRIPTION':<40}\n{'-'*93}")
-    
+    print(f"{'NAME':<16} {'ALIASES':<25} {'ARCHIVE':<12} {'DESCRIPTION':<40}\n{'-' * 93}")
+
     # Sort catalogues by name
     for cat_name in sorted(catalogues.keys()):
         cat_config = catalogues[cat_name]
-        cat_aliases = ', '.join(aliases.get(cat_name, []))
-        archive = cat_config.get('archive', 'unknown')
-        description = cat_config.get('description', 'No description')
-        
+        cat_aliases = ", ".join(aliases.get(cat_name, []))
+        archive = cat_config.get("archive", "unknown")
+        description = cat_config.get("description", "No description")
+
         print(f"{cat_name:<16} {cat_aliases:<25} {archive:<12} {description:<40}")
-    
+
     print("\nUse 'xmatch --describe CATALOGUE' for more details on a specific catalogue.")
+
 
 def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> None:
     """Print detailed information about a specific catalogue."""
     # Resolve alias if needed
     original_name = catalogue_name
     catalogue_name = resolve_catalogue_name(catalogue_name, cm)
-    
+
     # Get catalogue definition
-    if not hasattr(cm, 'config') or 'catalogues' not in cm.config:
+    if not hasattr(cm, "config") or "catalogues" not in cm.config:
         print("No catalogues configured.")
         return
-        
-    catalogues = cm.config['catalogues']
+
+    catalogues = cm.config["catalogues"]
     if catalogue_name not in catalogues:
         print(f"Catalogue '{catalogue_name}' not found.")
         if original_name != catalogue_name:
             print(f"Note: '{original_name}' was resolved to '{catalogue_name}'.")
         return
-    
+
     cat_config = catalogues[catalogue_name]
-    
+
     # Print catalogue details
     print(f"\nCatalogue: {catalogue_name}")
     if original_name != catalogue_name:
         print(f"Alias: {original_name}")
-    
+
     # Get all aliases for this catalogue
-    if 'catalogue_aliases' in cm.config:
-        aliases = [alias for alias, name in cm.config['catalogue_aliases'].items() 
-                  if name == catalogue_name and alias != original_name]
+    if "catalogue_aliases" in cm.config:
+        aliases = [
+            alias
+            for alias, name in cm.config["catalogue_aliases"].items()
+            if name == catalogue_name and alias != original_name
+        ]
         if aliases:
             print(f"Other aliases: {', '.join(aliases)}")
-    
+
     # Print general info
     print(f"Description: {cat_config.get('description', 'No description')}")
     print(f"Archive: {cat_config.get('archive', 'unknown')}")
     print(f"Service: {cat_config.get('service_id', 'unknown')}")
     print(f"Release: {cat_config.get('release', 'unknown')}")
-    
+
     # Print table info
     print(f"Table identifier: {cat_config.get('access_identifier', 'unknown')}")
-    
+
     # Print spatial column info
     print("\nSpatial columns:")
     print(f"  RA: {cat_config.get('ra_column', 'unknown')}")
     print(f"  Dec: {cat_config.get('dec_column', 'unknown')}")
-    if 'id_column' in cat_config:
+    if "id_column" in cat_config:
         print(f"  ID: {cat_config.get('id_column')}")
-    if 'pm_ra_column' in cat_config and 'pm_dec_column' in cat_config:
-        print(f"  Proper motion: {cat_config.get('pm_ra_column')} / {cat_config.get('pm_dec_column')}")
-    if 'epoch_column' in cat_config or 'epoch' in cat_config:
+    if "pm_ra_column" in cat_config and "pm_dec_column" in cat_config:
+        print(
+            f"  Proper motion: {cat_config.get('pm_ra_column')} / {cat_config.get('pm_dec_column')}"
+        )
+    if "epoch_column" in cat_config or "epoch" in cat_config:
         print(f"  Epoch: {cat_config.get('epoch_column', cat_config.get('epoch', 'unknown'))}")
-    
+
     # Print error info
-    if 'ra_err_column' in cat_config or 'dec_err_column' in cat_config:
+    if "ra_err_column" in cat_config or "dec_err_column" in cat_config:
         print("\nPosition errors:")
         print(f"  RA error: {cat_config.get('ra_err_column', 'unknown')}")
         print(f"  Dec error: {cat_config.get('dec_err_column', 'unknown')}")
-        if 'corr_column' in cat_config:
+        if "corr_column" in cat_config:
             print(f"  Correlation: {cat_config.get('corr_column', 'unknown')}")
-        if 'pos_err_units' in cat_config:
+        if "pos_err_units" in cat_config:
             print(f"  Units: {cat_config.get('pos_err_units', 'unknown')}")
-        if 'default_pos_error_arcsec' in cat_config:
+        if "default_pos_error_arcsec" in cat_config:
             print(f"  Default error: {cat_config.get('default_pos_error_arcsec')} arcsec")
-    
+
     # Print default columns
-    if 'default_columns' in cat_config:
+    if "default_columns" in cat_config:
         print("\nDefault columns:")
-        for col in cat_config['default_columns']:
+        for col in cat_config["default_columns"]:
             print(f"  - {col}")
+
 
 def prepare_crossmatch_params(args: argparse.Namespace) -> Dict[str, Any]:
     """Prepare parameters for the crossmatch function based on command-line arguments."""
     params = {}
-    
+
     # Basic matching params
     if args.radius_arcsec is not None:
-        params['radius_arcsec'] = args.radius_arcsec
-    
+        params["radius_arcsec"] = args.radius_arcsec
+
     # Column selection
     if args.columns_1:
-        params['columns_1'] = [col.strip() for col in args.columns_1.split(',') if col.strip()]
+        params["columns_1"] = [col.strip() for col in args.columns_1.split(",") if col.strip()]
     if args.columns_2:
-        params['columns_2'] = [col.strip() for col in args.columns_2.split(',') if col.strip()]
-    
+        params["columns_2"] = [col.strip() for col in args.columns_2.split(",") if col.strip()]
+
     # Column overrides for local files
     if args.ra_column_1:
-        params['ra_column_1'] = args.ra_column_1
+        params["ra_column_1"] = args.ra_column_1
     if args.dec_column_1:
-        params['dec_column_1'] = args.dec_column_1
+        params["dec_column_1"] = args.dec_column_1
     if args.ra_column_2:
-        params['ra_column_2'] = args.ra_column_2
+        params["ra_column_2"] = args.ra_column_2
     if args.dec_column_2:
-        params['dec_column_2'] = args.dec_column_2
+        params["dec_column_2"] = args.dec_column_2
     if args.id_column_1:
-        params['id_column_1'] = args.id_column_1
+        params["id_column_1"] = args.id_column_1
     if args.id_column_2:
-        params['id_column_2'] = args.id_column_2
-    
+        params["id_column_2"] = args.id_column_2
+
     # Join type
     if args.join_type:
-        params['join_type'] = args.join_type
-    
+        params["join_type"] = args.join_type
+
     # ID join
     if args.join_on_ids:
         if args.id_column_1 and args.id_column_2:
-            params['join_on_ids'] = {
-                'cat1': args.id_column_1,
-                'cat2': args.id_column_2
-            }
+            params["join_on_ids"] = {"cat1": args.id_column_1, "cat2": args.id_column_2}
         else:
-            logger.warning("ID-based join requested but one or more ID columns not specified. "
-                          "Will attempt to use default ID columns from catalog configuration "
-                          "if available. Specify with --id1 and --id2 for explicit control.")
-            params['join_on_ids'] = {}
-    
+            logger.warning(
+                "ID-based join requested but one or more ID columns not specified. "
+                "Will attempt to use default ID columns from catalog configuration "
+                "if available. Specify with --id1 and --id2 for explicit control."
+            )
+            params["join_on_ids"] = {}
+
     # Spatial region
     if args.ra is not None and args.dec is not None:
-        params['ra'] = args.ra
-        params['dec'] = args.dec
-    
+        params["ra"] = args.ra
+        params["dec"] = args.dec
+
     # Error handling
     if args.matcher:
-        params['matcher'] = args.matcher
+        params["matcher"] = args.matcher
     if args.max_error is not None:
-        params['max_error'] = args.max_error
-    
+        params["max_error"] = args.max_error
+
     # Strategy
     if args.strategy:
-        params['strategy'] = args.strategy
-    
+        params["strategy"] = args.strategy
+
     # Performance tuning
     if args.n_workers is not None:
-        params['n_workers'] = args.n_workers
+        params["n_workers"] = args.n_workers
     if args.chunk_size is not None:
-        params['chunk_size'] = args.chunk_size
-    
+        params["chunk_size"] = args.chunk_size
+
     return params
+
 
 def main(args: Optional[List[str]] = None) -> int:
     """Main entry point for the command-line interface."""
@@ -505,7 +468,7 @@ def main(args: Optional[List[str]] = None) -> int:
 
     try:
         # Import exceptions here, just before they might be caught
-        from .exceptions import CrossMatchError, ConfigError, TapError, StiltsError
+        from .exceptions import ConfigError, CrossMatchError, StiltsError, TapError
 
         # Initialize CrossMatch with config
         cm = CrossMatch(config_file=parsed_args.config_file)
@@ -532,21 +495,25 @@ def main(args: Optional[List[str]] = None) -> int:
 
         # Handle archive overrides
         if parsed_args.archive_1:
-            cat1_name = handle_archive_override(cat1_name, parsed_args.archive_1.lower().rstrip('_'), cm)
+            cat1_name = handle_archive_override(
+                cat1_name, parsed_args.archive_1.lower().rstrip("_"), cm
+            )
 
         if parsed_args.archive_2:
-            cat2_name = handle_archive_override(cat2_name, parsed_args.archive_2.lower().rstrip('_'), cm)
+            cat2_name = handle_archive_override(
+                cat2_name, parsed_args.archive_2.lower().rstrip("_"), cm
+            )
 
         # Show default columns if requested
         if parsed_args.show_default_columns:
             # For catalogue 1
             cat1_resolved = resolve_catalogue_name(cat1_name, cm)
-            cat1_is_catalogue = Path(cat1_name).suffix not in ['.csv', '.fits', '.parquet']
-            if cat1_is_catalogue and cat1_resolved in cm.config.get('catalogues', {}):
-                cat1_config = cm.config['catalogues'][cat1_resolved]
+            cat1_is_catalogue = Path(cat1_name).suffix not in [".csv", ".fits", ".parquet"]
+            if cat1_is_catalogue and cat1_resolved in cm.config.get("catalogues", {}):
+                cat1_config = cm.config["catalogues"][cat1_resolved]
                 print(f"\nDefault columns for {cat1_name}:")
-                if 'default_columns' in cat1_config and cat1_config['default_columns']:
-                    for col in cat1_config['default_columns']:
+                if "default_columns" in cat1_config and cat1_config["default_columns"]:
+                    for col in cat1_config["default_columns"]:
                         print(f"  - {col}")
                 else:
                     print("  No default columns specified.")
@@ -555,12 +522,12 @@ def main(args: Optional[List[str]] = None) -> int:
 
             # For catalogue 2
             cat2_resolved = resolve_catalogue_name(cat2_name, cm)
-            cat2_is_catalogue = Path(cat2_name).suffix not in ['.csv', '.fits', '.parquet']
-            if cat2_is_catalogue and cat2_resolved in cm.config.get('catalogues', {}):
-                cat2_config = cm.config['catalogues'][cat2_resolved]
+            cat2_is_catalogue = Path(cat2_name).suffix not in [".csv", ".fits", ".parquet"]
+            if cat2_is_catalogue and cat2_resolved in cm.config.get("catalogues", {}):
+                cat2_config = cm.config["catalogues"][cat2_resolved]
                 print(f"\nDefault columns for {cat2_name}:")
-                if 'default_columns' in cat2_config and cat2_config['default_columns']:
-                    for col in cat2_config['default_columns']:
+                if "default_columns" in cat2_config and cat2_config["default_columns"]:
+                    for col in cat2_config["default_columns"]:
                         print(f"  - {col}")
                 else:
                     print("  No default columns specified.")
@@ -586,7 +553,7 @@ def main(args: Optional[List[str]] = None) -> int:
             catalogue_1_input=cat1_name,
             catalogue_2_input=cat2_name,
             output_file=parsed_args.output_file,
-            **params
+            **params,
         )
 
         # If output_file is None, the result is returned and should be printed
@@ -618,6 +585,7 @@ def main(args: Optional[List[str]] = None) -> int:
     except Exception as e:
         logger.exception(f"Unexpected error: {str(e)}")
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

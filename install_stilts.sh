@@ -121,4 +121,4 @@ fi
 
 echo ""
 echo "STILTS wrapper script using TOPCAT JAR created successfully!"
-echo "You can now try running: stilts -help" 
+echo "You can now try running: stilts -help"

@@ -2,4 +2,4 @@ obj_id,ALPHA_J2000,DELTA_J2000,extra_val
 901,10.01,20.01,aaa
 902,10.11,20.11,bbb # Match for 102
 903,10.21,20.21,ccc # Match for 103
-904,11.00,21.00,ddd # No spatial match 
+904,11.00,21.00,ddd # No spatial match

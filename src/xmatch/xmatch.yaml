@@ -10,13 +10,13 @@ archives:
       column_selection_supported: true
       # Assumed ADQL features, verify if specific ones like UPLOAD are needed/supported
       # TEMPORARILY REMOVED 'table_upload' for testing fallback
-      adql_features: [cone_search, polygon_search, table_join] 
+      adql_features: [cone_search, polygon_search, table_join]
     # CDS X-Match Service (Alternative, potentially faster for simple matches)
     xmatch_service:
       # Astroquery uses a specific mechanism, not just a URL
       access_method: cds_xmatch
       # Check astroquery docs for exact limitations. Assumed it might not allow easy column selection.
-      column_selection_supported: false 
+      column_selection_supported: false
       # Can it accept uploaded tables? Or only VizieR table IDs?
       crossmatch_input_methods: [remote_table_query] # Add 'table_upload' if supported
     has_crossmatch_service: true # Primarily via X-Match service
@@ -59,26 +59,26 @@ archives:
 catalogue_aliases:
   # ESA Gaia Data
   gaia: "gaia_esa" # Default to ESA's version
-  gaia_dr3: "gaia_esa"  
+  gaia_dr3: "gaia_esa"
   gaiadr3: "gaia_esa"
-  
+
   # CDS Data
   galex: "galex_cds"
   vhs: "vhs_cds"
-  
+
   # NOAO Data
   delve: "delve_noao"
-  desils: "desils_noao" 
+  desils: "desils_noao"
   ukidss: "ukidsslas_noao"
   ukidsslas: "ukidsslas_noao"
 
-# --- Catalogue Definitions --- 
+# --- Catalogue Definitions ---
 # Defines specific astronomical catalogues, their location, and properties.
 # NOTE: Catalogue names are lowercase for easier command-line use.
 # NOTE: Column names should reflect the names in the *source* archive table.
 catalogues:
 
-  # --- CDS Catalogues --- 
+  # --- CDS Catalogues ---
   gaia_cds:
     description: "Gaia (Source Catalogue) via CDS VizieR"
     archive: cds
@@ -89,19 +89,19 @@ catalogues:
     epoch: 2016.0
     # Estimated size (rows) - helps strategy selection. Can be 'small', 'medium', 'large', 'huge', or number
     estimated_size: 'huge' # ~1.8 billion
-    ra_column: "RA_ICRS" 
+    ra_column: "RA_ICRS"
     dec_column: "DE_ICRS"
     id_column: "Source" # Add ID column
     # Default columns: VizieR names. pmRA/pmDE are in mas/yr
     default_columns: ["Source", "RA_ICRS", "DE_ICRS", "pmRA", "pmDE", "Plx", "Gmag", "Epoch"]
-    pm_ra_column: "pmRA" 
-    pm_dec_column: "pmDE" 
+    pm_ra_column: "pmRA"
+    pm_dec_column: "pmDE"
     epoch_column: "Epoch"
     # Positional Error Configuration (check VizieR column names)
     ra_err_column: "e_RA_ICRS"
     dec_err_column: "e_DE_ICRS"
     corr_column: "RADECor"
-    pos_err_units: "mas" 
+    pos_err_units: "mas"
     # Default error if specific columns are missing/null (in arcsec)
     default_pos_error_arcsec: 0.05
 
@@ -130,7 +130,7 @@ catalogues:
     epoch: 2000.0
     estimated_size: 'huge' # ~1.3 billion
     ra_column: "RAJ2000"
-    dec_column: "DEJ2000" 
+    dec_column: "DEJ2000"
     id_column: "SrcID" # Add ID column
     default_columns: ["SrcID", "RAJ2000", "DEJ2000", "Yap3", "e_Yap3", "Jap3", "e_Jap3", "Hap3", "e_Hap3", "Ksap3", "e_Ksap3"]
     pos_err_units: "arcsec"
@@ -158,7 +158,7 @@ catalogues:
     archive: noao_datalab
     service_id: tap_service
     release: "dr3"
-    access_identifier: "gaia_dr3.gaia_source" 
+    access_identifier: "gaia_dr3.gaia_source"
     table_name: "gaia_dr3.gaia_source"
     epoch: 2016.0
     estimated_size: 'huge'
@@ -180,7 +180,7 @@ catalogues:
     archive: noao_datalab
     service_id: tap_service
     release: "dr10"
-    access_identifier: "ls_dr10.tractor" 
+    access_identifier: "ls_dr10.tractor"
     table_name: "ls_dr10.tractor"
     epoch: 2015.0
     estimated_size: 'huge' # ~1.5 billion
@@ -207,7 +207,7 @@ catalogues:
     dec_column: "dec"
     id_column: "sourceid" # Add ID column
     default_columns: ["sourceid", "ra", "dec", "yapermag3", "yapermag3err", "hapermag3", "hapermag3err", "kapermag3", "kapermag3err", "japermag3", "japermag3err"]
-    ra_err_column: "sigra" # 
+    ra_err_column: "sigra" #
     dec_err_column: "sigdec"
     # corr_column: # No correlation term usually provided
     pos_err_units: "arcsec"
@@ -257,7 +257,7 @@ catalogues:
     estimated_size: 'large' # Size depends on the overlap
 
 
-# --- Crossmatch Method Definitions --- 
+# --- Crossmatch Method Definitions ---
 # Defines parameters for specific crossmatch algorithms.
 crossmatch_methods:
   stilts_tmatch2_sky:
@@ -298,13 +298,13 @@ crossmatch_methods:
       join: "1and2"
       find: "best"
       # Values expression expects: ra dec err_a err_b pa
-      # STILTS crossmatch_sky function will build the correct values string 
+      # STILTS crossmatch_sky function will build the correct values string
       # including Position Angle (PA) calculated from errors and correlation.
       values1: "$1 $2 $3 $4 $5"
       values2: "$1 $2 $3 $4 $5"
       params: "3" # Default max separation in units of sigma
       action: "keep1"
-      
+
   # Placeholder for TAP-based join (details would be derived dynamically)
   tap_join:
     description: "Crossmatch using ADQL JOIN on a TAP service"
@@ -317,21 +317,21 @@ crossmatch_methods:
     executor: "cds"
     # Parameters determined dynamically
 
-# --- STILTS Configuration --- 
+# --- STILTS Configuration ---
 stilts_config:
   # Optional: Path to stilts.jar or base command (e.g., 'java -jar stilts.jar')
   # If not set, it assumes 'stilts' is in the system PATH
   # stilts_cmd_base: "/path/to/stilts.jar"
   stilts_cmd_base: null
-  
+
   # Optional: Java options for STILTS
   # java_opts: "-Xmx4G"
-  java_opts: null 
-  
+  java_opts: null
+
   # Optional: Temporary directory for STILTS intermediate files
   # tmpdir: "/path/to/tmp"
   tmpdir: null
-  
+
   # Global default positional error floor (arcseconds) applied if no catalogue-specific default found
   default_floor_error_arcsec: 0.01 # Small value, e.g., 10 mas
 

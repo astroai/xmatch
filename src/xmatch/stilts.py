@@ -1,17 +1,16 @@
 import functools
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
 import time
-import shlex
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-from pandas.errors import EmptyDataError
 from astropy.io.fits.verify import VerifyError
 from astropy.table import Table
 
@@ -23,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 def stilts_retry(max_retries=3, delay=5):
     """Decorator to retry STILTS operations on specific transient errors."""
+
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -36,11 +36,19 @@ def stilts_retry(max_retries=3, delay=5):
                     error_str_lower = str(e).lower()
                     if any(
                         pattern in error_str_lower
-                        for pattern in ["connection reset", "timeout", "temporary failure", "broken pipe", "service unavailable"]
+                        for pattern in [
+                            "connection reset",
+                            "timeout",
+                            "temporary failure",
+                            "broken pipe",
+                            "service unavailable",
+                        ]
                     ):
                         retries += 1
                         if retries < max_retries:
-                            sleep_time = (delay * (2 ** (retries - 1))) + (np.random.rand() * delay * 0.5)
+                            sleep_time = (delay * (2 ** (retries - 1))) + (
+                                np.random.rand() * delay * 0.5
+                            )
                             logger.warning(
                                 f"STILTS operation failed (Attempt {retries}/{max_retries}), retrying in {sleep_time:.2f}s: {e}"
                             )
@@ -61,6 +69,7 @@ def stilts_retry(max_retries=3, delay=5):
             raise StiltsError("STILTS retry logic finished unexpectedly.")
 
         return wrapper
+
     return decorator
 
 
@@ -83,7 +92,9 @@ def _build_stilts_command(
             if not cmd:
                 raise ValueError("Provided stilts_cmd_base resulted in empty command list.")
         except Exception as e:
-            raise StiltsError(f"Failed to parse provided stilts_cmd_base '{stilts_cmd_base}': {e}") from e
+            raise StiltsError(
+                f"Failed to parse provided stilts_cmd_base '{stilts_cmd_base}': {e}"
+            ) from e
     else:
         logger.debug("Constructing STILTS command from java_opts/tmpdir/STILTS_JAR.")
         cmd = ["java"]
@@ -100,9 +111,13 @@ def _build_stilts_command(
         if stilts_jar_env:
             if Path(stilts_jar_env).exists():
                 stilts_jar_path = stilts_jar_env
-                logger.debug(f"Using STILTS JAR from environment variable STILTS_JAR: {stilts_jar_path}")
+                logger.debug(
+                    f"Using STILTS JAR from environment variable STILTS_JAR: {stilts_jar_path}"
+                )
             else:
-                logger.warning(f"STILTS_JAR environment variable set to '{stilts_jar_env}', but file not found.")
+                logger.warning(
+                    f"STILTS_JAR environment variable set to '{stilts_jar_env}', but file not found."
+                )
 
         if not stilts_jar_path:
             stilts_jar_default = "stilts.jar"
@@ -169,7 +184,7 @@ def _run_stilts(
             raise StiltsError(f"Failed to build STILTS command for task '{task}': {e}") from e
         command_str = " ".join(shlex.quote(arg) for arg in command_args)
 
-    logger.info(f"Executing STILTS task/command...")
+    logger.info("Executing STILTS task/command...")
     logger.debug(f"Running command: {command_str}")
 
     try:
@@ -179,7 +194,7 @@ def _run_stilts(
             text=True,
             check=True,
             encoding="utf-8",
-            errors="replace"
+            errors="replace",
         )
         if logger.isEnabledFor(logging.DEBUG):
             stdout_log = process.stdout.strip() if process.stdout else "(empty)"
@@ -213,16 +228,18 @@ def _run_stilts(
         raise StiltsError(error_message) from e
 
     except OSError as e:
-        error_message = f"OS error during STILTS execution for task '{task}': {e}. Command: {command_str}"
+        error_message = (
+            f"OS error during STILTS execution for task '{task}': {e}. Command: {command_str}"
+        )
         logger.error(error_message, exc_info=True)
         raise StiltsError(error_message) from e
 
 
 def _prepare_input_table(df: pd.DataFrame, temp_dir: str, filename: str = "input.fits") -> str:
     """Writes a DataFrame to a temporary FITS file for STILTS, handling empty input."""
-    if not filename.lower().endswith(('.fits', '.fit')):
+    if not filename.lower().endswith((".fits", ".fit")):
         original_suffix = Path(filename).suffix
-        filename = Path(filename).stem + '.fits'
+        filename = Path(filename).stem + ".fits"
         logger.debug(
             f"Input filename suffix '{original_suffix}' changed to '.fits' for STILTS compatibility."
         )
@@ -235,21 +252,23 @@ def _prepare_input_table(df: pd.DataFrame, temp_dir: str, filename: str = "input
             if list(df.columns):
                 empty_table = Table({col: [] for col in df.columns})
             else:
-                 empty_table = Table()
+                empty_table = Table()
             empty_table.write(temp_file_path, format="fits", overwrite=True)
             logger.debug(f"Empty FITS file written to: {temp_file_path}")
             return str(temp_file_path)
         except Exception as e:
-             raise StiltsError(f"Failed to write empty temporary input FITS file {temp_file_path}: {e}") from e
+            raise StiltsError(
+                f"Failed to write empty temporary input FITS file {temp_file_path}: {e}"
+            ) from e
 
     try:
         df_copy = df.copy()
-        for col in df_copy.select_dtypes(include=['object']).columns:
+        for col in df_copy.select_dtypes(include=["object"]).columns:
             try:
                 pd.to_numeric(df_copy[col].dropna())
             except (ValueError, TypeError):
-                 logger.debug(f"Converting object column '{col}' to string for FITS output.")
-                 df_copy[col] = df_copy[col].fillna('').astype(str)
+                logger.debug(f"Converting object column '{col}' to string for FITS output.")
+                df_copy[col] = df_copy[col].fillna("").astype(str)
 
         table = Table.from_pandas(df_copy)
         table.write(temp_file_path, format="fits", overwrite=True)
@@ -263,7 +282,7 @@ def _prepare_input_table(df: pd.DataFrame, temp_dir: str, filename: str = "input
     except VerifyError as e:
         raise StiltsError(f"FITS verification error writing {temp_file_path}: {e}") from e
     except OSError as e:
-         raise StiltsError(f"OS error writing temporary FITS file {temp_file_path}: {e}") from e
+        raise StiltsError(f"OS error writing temporary FITS file {temp_file_path}: {e}") from e
 
 
 @stilts_retry()
@@ -323,7 +342,9 @@ def stilts_cdsskymatch(
         elif output_suffix == "csv":
             ofmt_str = "csv-basic"
         else:
-            logger.warning(f"Unsupported output format '{output_format}' requested. Defaulting to parquet.")
+            logger.warning(
+                f"Unsupported output format '{output_format}' requested. Defaulting to parquet."
+            )
             output_suffix = "parquet"
             ofmt_str = "parquet-snappy"
 
@@ -347,24 +368,28 @@ def stilts_cdsskymatch(
         else:
             params["ocmd"] = 'keepcols "*"'
 
-        _run_stilts("cdsskymatch", params, java_opts, tmpdir, stilts_cmd_base, kwargs.get("_raw_command"))
+        _run_stilts(
+            "cdsskymatch", params, java_opts, tmpdir, stilts_cmd_base, kwargs.get("_raw_command")
+        )
 
-        safe_cds_id = cds_id.replace('/', '-').replace(' ', '_')
+        safe_cds_id = cds_id.replace("/", "-").replace(" ", "_")
         final_output_prefix = f"xmatch_cds_{Path(input_fits).stem}_{safe_cds_id}_"
         final_output_file = tempfile.NamedTemporaryFile(
-            prefix=final_output_prefix,
-            suffix=f"_result.{output_suffix}",
-            delete=False
+            prefix=final_output_prefix, suffix=f"_result.{output_suffix}", delete=False
         )
         final_output_path = final_output_file.name
         final_output_file.close()
 
         try:
             shutil.copy2(output_temp_path, final_output_path)
-            logger.info(f"STILTS cdsskymatch result saved to persistent temporary file: {final_output_path}")
+            logger.info(
+                f"STILTS cdsskymatch result saved to persistent temporary file: {final_output_path}"
+            )
             return final_output_path
         except OSError as e:
-             raise StiltsError(f"Failed to copy STILTS result from {output_temp_path} to {final_output_path}: {e}") from e
+            raise StiltsError(
+                f"Failed to copy STILTS result from {output_temp_path} to {final_output_path}: {e}"
+            ) from e
 
     finally:
         if temp_dir_manager:

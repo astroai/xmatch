@@ -1,4 +1,4 @@
 local_id,local_val
 1237666231535164160,val1 # Example UKIDSS ID format (long integer)
 1234567890123456789,val2 # Another example
-9876543210987654321,val3 # Non-matching? 
+9876543210987654321,val3 # Non-matching?

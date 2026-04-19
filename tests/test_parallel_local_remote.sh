@@ -9,7 +9,7 @@ mkdir -p "$testdir/outputs"
 
 OUTPUT_FILE="$testdir/outputs/output_parallel_local_remote.parquet"
 LOCAL_FILE="$testdir/inputs/my_sources.csv"
-REMOTE_CAT="gaia_cds" 
+REMOTE_CAT="gaia_cds"
 RADIUS=1.0
 
 # Clean up previous run

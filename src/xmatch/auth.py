@@ -1,7 +1,8 @@
 import functools
 import logging
 import os
-from typing import Dict, Optional, Any
+from typing import Any, Dict, Optional
+
 import keyring
 import requests  # Assuming requests sessions might be used
 
@@ -86,7 +87,9 @@ class AuthConfig:
                     del username
                     del password
                 else:
-                    logger.debug(f"Credentials for service '{service_name}' not found or incomplete in keyring.")
+                    logger.debug(
+                        f"Credentials for service '{service_name}' not found or incomplete in keyring."
+                    )
 
             except Exception as e:
                 logger.warning(f"Error accessing keyring for service '{service_name}': {e}")
@@ -170,10 +173,10 @@ def set_credentials_interactive(service_name: str) -> bool:
 
 
 # Example usage (optional, for testing)
-if __name__ == '__main__':
+if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     auth_config = load_auth_config()
-    gaia_session = auth_config.get_auth_session('gaia_archive')
+    gaia_session = auth_config.get_auth_session("gaia_archive")
     print(f"Gaia Session: {gaia_session}")
     # Example of adding a session manually (if needed)
     # custom_session = requests.Session()

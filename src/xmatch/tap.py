@@ -1,21 +1,14 @@
 import logging
 import time
-import urllib.parse
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-from io import BytesIO
+from typing import Optional
 
-import pandas as pd
 import pyvo
-from astropy import units as u
-from astropy.coordinates import SkyCoord, match_coordinates_sky
-from astropy.io.votable import parse_single_table
 from astropy.table import Table
+
 # Specific exceptions
-from pandas.errors import EmptyDataError
 # Corrected import: TapService -> TAPService
-from pyvo.dal import DALQueryError, DALServiceError, DALFormatError, TAPService, AsyncTAPJob
-from requests.exceptions import RequestException, ConnectionError, Timeout
+from pyvo.dal import DALQueryError, DALServiceError, TAPService
+from requests.exceptions import ConnectionError, RequestException, Timeout
 
 # Use centralized exceptions
 from .exceptions import TapError, TapUploadUnsupportedError
@@ -30,7 +23,7 @@ def get_tap_service(tap_url: str, **kwargs) -> pyvo.dal.TAPService:
     """Get a cached TAP service connection or create a new one."""
     # Create a cache key based on URL and relevant kwargs (like auth)
     cache_key_parts = [tap_url]
-    auth_session = kwargs.get('auth_session')
+    auth_session = kwargs.get("auth_session")
     if auth_session:
         # Include relevant auth details if present (e.g., credentials identifier)
         # WARNING: Avoid caching sensitive parts directly. Use a hash or identifier if possible.
@@ -79,10 +72,14 @@ def execute_tap_query(
             logger.debug(f"Query: {query}")  # Log the query being sent
 
             if upload_params:
-                raise TapUploadUnsupportedError("Upload via execute_tap_query not fully implemented here.")
+                raise TapUploadUnsupportedError(
+                    "Upload via execute_tap_query not fully implemented here."
+                )
             else:
                 logger.debug("Using service.submit_job method.")
-                job = tap_service.submit_job(query, maxrec=maxrec, language="ADQL")  # Explicitly ADQL
+                job = tap_service.submit_job(
+                    query, maxrec=maxrec, language="ADQL"
+                )  # Explicitly ADQL
                 job.run()  # Start the job
 
             logger.debug(f"Monitoring TAP job (type: {type(job).__name__}, ID: {job.job_id})...")
@@ -101,52 +98,73 @@ def execute_tap_query(
                 error_summary = None  # Initialize error_summary
                 try:
                     # Try common attributes first
-                    if hasattr(job, 'message') and job.message:
+                    if hasattr(job, "message") and job.message:
                         error_summary = str(job.message)
-                    elif hasattr(job, 'error_summary') and job.error_summary and hasattr(job.error_summary, 'message') and job.error_summary.message:
+                    elif (
+                        hasattr(job, "error_summary")
+                        and job.error_summary
+                        and hasattr(job.error_summary, "message")
+                        and job.error_summary.message
+                    ):
                         error_summary = str(job.error_summary.message)
-                    elif hasattr(job, 'parameters') and isinstance(job.parameters, dict) and 'error' in job.parameters:
+                    elif (
+                        hasattr(job, "parameters")
+                        and isinstance(job.parameters, dict)
+                        and "error" in job.parameters
+                    ):
                         # Check job parameters dictionary
-                        error_summary = str(job.parameters['error'])
+                        error_summary = str(job.parameters["error"])
 
                     # Attempt standard XML parsing
-                    if not error_summary and hasattr(job, 'xml'):
+                    if not error_summary and hasattr(job, "xml"):
                         try:
                             # Look for common error elements/attributes in UWS standard
-                            error_node = job.xml.find('.//{http://www.ivoa.net/xml/UWS/v1.0}message')
+                            error_node = job.xml.find(
+                                ".//{http://www.ivoa.net/xml/UWS/v1.0}message"
+                            )
                             if error_node is not None and error_node.text:
                                 error_summary = error_node.text
                             else:
                                 # Try another common pattern (parameter with id='error')
-                                error_param = job.xml.find(".//{http://www.ivoa.net/xml/UWS/v1.0}parameter[@id='error']")
+                                error_param = job.xml.find(
+                                    ".//{http://www.ivoa.net/xml/UWS/v1.0}parameter[@id='error']"
+                                )
                                 if error_param is not None and error_param.text:
                                     error_summary = error_param.text
                         except Exception as xml_parse_err:
-                            logger.warning(f"Could not parse job XML for standard error details: {xml_parse_err}")
+                            logger.warning(
+                                f"Could not parse job XML for standard error details: {xml_parse_err}"
+                            )
 
                 except Exception as detail_err:
                     # Catch errors during standard attribute/parameter checking
-                    logger.warning(f"Could not retrieve detailed error message using standard methods: {detail_err}")
+                    logger.warning(
+                        f"Could not retrieve detailed error message using standard methods: {detail_err}"
+                    )
 
                 # --- Log Raw XML if available, regardless of previous success ---
                 raw_xml_logged = False
-                if hasattr(job, 'xml'):
+                if hasattr(job, "xml"):
                     logger.warning("Inspecting raw job XML for error details:")
                     try:
                         # Use lxml's tostring for potentially cleaner output if available
                         from lxml import etree
-                        xml_string = etree.tostring(job.xml, pretty_print=True, encoding='unicode')
+
+                        xml_string = etree.tostring(job.xml, pretty_print=True, encoding="unicode")
                         logger.warning(f"Raw Job XML:\n{xml_string}")
                         raw_xml_logged = True
                     except ImportError:
                         # Fallback to standard xml.etree
                         try:
                             import xml.etree.ElementTree as ET
-                            xml_string = ET.tostring(job.xml, encoding='unicode')
+
+                            xml_string = ET.tostring(job.xml, encoding="unicode")
                             logger.warning(f"Raw Job XML:\n{xml_string}")
                             raw_xml_logged = True
                         except Exception as et_xml_log_err:
-                            logger.warning(f"Failed to log raw job XML using xml.etree: {et_xml_log_err}")
+                            logger.warning(
+                                f"Failed to log raw job XML using xml.etree: {et_xml_log_err}"
+                            )
                     except Exception as xml_log_err:
                         logger.warning(f"Failed to log raw job XML: {xml_log_err}")
                 # --- End Raw XML Logging ---

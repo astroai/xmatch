@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xmatch"
-version = "0.1.0" 
+version = "0.1.0"
 description = "A tool for cross-matching astronomical catalogues using various methods."
 readme = "README.md"
 requires-python = ">=3.10"

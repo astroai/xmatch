@@ -38,9 +38,9 @@ xmatch $LOCAL_FILE $REMOTE_CATALOGUE \
     --radius $RADIUS_ARCSEC \
     --ra1-col ra_in \
     --dec1-col dec_in \
-    -o $OUTPUT_FILE 
+    -o $OUTPUT_FILE
     # Columns are less configurable via CDS XMatch, often returns fixed set + distance
-    # --columns-1 name 
+    # --columns-1 name
     # --columns-2 "_2MASS,Jmag" # Column selection might not be reliable here
 
 # Basic check: Ensure output file exists

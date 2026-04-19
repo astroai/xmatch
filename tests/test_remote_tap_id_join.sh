@@ -18,7 +18,7 @@ CAT2="askap_possum_cds" # Assuming a name defined in xmatch.yaml for II/281/askp
 
 # ID columns from the *remote* tables, as defined in their YAML entries
 # These MUST match the id_column keys in the YAML for CAT1 and CAT2 respectively.
-JOIN_KEYS="_2MASS:_2MASS" 
+JOIN_KEYS="_2MASS:_2MASS"
 
 # Clean up previous run
 rm -f $OUTPUT_FILE
