@@ -114,7 +114,7 @@ def wise_like_sources(gaia_like_sources):
     # WISE-like source designations
     designations = [
         f"J{int(ra * 100):06d}{'+' if dec >= 0 else '-'}{int(abs(dec) * 100):05d}"
-        for ra, dec in zip(ra, dec)
+        for ra, dec in zip(ra, dec, strict=False)
     ]
 
     # WISE has larger position errors than Gaia
