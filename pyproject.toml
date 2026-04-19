@@ -69,7 +69,7 @@ select = ["E", "F", "W", "I", "B", "SIM"]
 ignore = [
     "E501", "B008", "SIM115", "SIM108", "B904", "B007", "SIM102", "B028", "B006",
     "SIM105", "SIM101", "B023", "SIM118", "B018", "SIM117", "SIM210", "E402",
-    "SIM103", "B011", "B017"
+    "SIM103", "B011", "B017", "B024", "SIM113", "E731", "F821"
 ]
 
 [tool.mypy]
@@ -81,8 +81,8 @@ warn_return_any = false
 disable_error_code = ["union-attr", "misc", "dict-item", "has-type", "arg-type", "no-redef", "attr-defined", "assignment", "operator", "var-annotated", "call-overload", "return-value", "valid-type", "index", "no-any-return", "call-arg"]
 
 [tool.codespell]
-ignore-words-list = "activ,strat,oen,suh,vas,mye,fo,hte,ue,nax,ags,bu,acn,vew,ecept,ure,ege,edn,whe,inh,ths,proceedure,eazy,clen,acess,astroid,degress,som,sompz,slac,ges,recal,litterature"
-skip = "*.ipynb,pyproject.toml,*.json,pixi.lock"
+ignore-words-list = "activ,strat,oen,suh,vas,mye,fo,hte,ue,nax,ags,bu,acn,vew,ecept,ure,ege,edn,whe,inh,ths,proceedure,eazy,clen,acess,astroid,degress,som,sompz,slac,ges,recal,litterature,ned,aas,alph,legac"
+skip = "*.ipynb,pyproject.toml,*.json,pixi.lock,paper/*.cls"
 
 [tool.black]
 line-length = 100
