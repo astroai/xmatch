@@ -379,8 +379,8 @@ def test_crossmatch_sky_skyellipse(
         return (None, None, cfg.get("default_pos_error_arcsec"), cfg.get("pos_err_units"))
 
     m_err_conf.side_effect = err_conf_side_effect
-    m_err_expr.side_effect = (
-        lambda err, ivar, floor, unit: f"{err}*{0.001 if unit == 'mas' else 1.0}"
+    m_err_expr.side_effect = lambda err, ivar, floor, unit: (
+        f"{err}*{0.001 if unit == 'mas' else 1.0}"
     )
     m_corr_expr.side_effect = lambda corr_col: corr_col if corr_col else "0"
 
