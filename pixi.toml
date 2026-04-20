@@ -6,8 +6,7 @@ platforms = ["osx-arm64", "linux-64"]
 [tasks]
 lint = "ruff check ."
 format = "ruff format ."
-test = "pytest -v"
-typecheck = "mypy src"
+test = "pytest"
 
 [dependencies]
 python = ">=3.10"
@@ -23,3 +22,6 @@ healpy = ">=1.16.0"
 ruff = "*"
 pytest = "*"
 mypy = "*"
+
+[pypi-dependencies]
+xmatch = { path = ".", editable = true }
