@@ -461,9 +461,24 @@ class CrossMatch:
                 config["_catalogue_name"] = input_path.stem  # Use filename stem as name
 
             else:
-                raise InputError(
-                    f"Input '{input_path_str}' for catalogue {prefix} is not a valid file path, DataFrame, or known catalogue name."
-                )
+                error_msg = f"Input '{input_path_str}' for catalogue {prefix} is not a valid file path, DataFrame, or known catalogue name."
+
+                # Add suggestion for closely matching catalogue names
+                import difflib
+
+                available_names = list(self.catalogues_config.keys())
+                available_names.extend(self.aliases_config.keys())
+
+                # Perform case-insensitive matching
+                lower_to_original = {name.lower(): name for name in available_names}
+                suggestions = difflib.get_close_matches(input_path_str.lower(), list(lower_to_original.keys()), n=3, cutoff=0.5)
+                if suggestions:
+                    original_suggestions = [lower_to_original[s] for s in suggestions]
+                    # Filter unique names because some aliases might point to the same name or be the same name
+                    original_suggestions = list(dict.fromkeys(original_suggestions))
+                    error_msg += f" Did you mean: {', '.join(original_suggestions)}?"
+
+                raise InputError(error_msg)
         else:
             raise InputError(
                 f"Unsupported input type for catalogue {prefix}: {type(catalogue_input)}. Must be str, Path, or DataFrame."
