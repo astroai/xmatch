@@ -1171,11 +1171,15 @@ class CrossMatch:
                 df.to_parquet(output_path, index=False)
             elif output_path.suffix == ".fits":
                 # Convert object columns to string before saving to FITS
-                for col in df.select_dtypes(include=["object"]).columns:
-                    # Check if column contains non-numeric types that FITS might struggle with
-                    if not pd.api.types.is_numeric_dtype(df[col].dropna()):
-                        logger.debug(f"Converting object column '{col}' to string for FITS output.")
-                        df[col] = df[col].astype(str)
+                object_cols = list(df.select_dtypes(include=["object", "string"]).columns)
+                if object_cols:
+                    for col in object_cols:
+                        # Check if column contains non-numeric types that FITS might struggle with
+                        if not pd.api.types.is_numeric_dtype(df[col].dropna()):
+                            logger.debug(
+                                f"Converting object column '{col}' to string for FITS output."
+                            )
+                            df[col] = df[col].astype(str)
                 table = Table.from_pandas(df)
                 table.write(output_path, overwrite=True)
             else:
