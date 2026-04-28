@@ -263,15 +263,22 @@ def _prepare_input_table(df: pd.DataFrame, temp_dir: str, filename: str = "input
             ) from e
 
     try:
-        df_copy = df.copy()
-        for col in df_copy.select_dtypes(include=["object"]).columns:
-            try:
-                pd.to_numeric(df_copy[col].dropna())
-            except (ValueError, TypeError):
-                logger.debug(f"Converting object column '{col}' to string for FITS output.")
-                df_copy[col] = df_copy[col].fillna("").astype(str)
+        # Bolt Optimization: Avoid unconditional df.copy() which consumes massive memory
+        # for large numeric-only astronomical catalogs. Only copy if object conversion is needed.
+        object_cols = df.select_dtypes(include=["object"]).columns
 
-        table = Table.from_pandas(df_copy)
+        if len(object_cols) > 0:
+            df_to_use = df.copy()
+            for col in object_cols:
+                try:
+                    pd.to_numeric(df_to_use[col].dropna())
+                except (ValueError, TypeError):
+                    logger.debug(f"Converting object column '{col}' to string for FITS output.")
+                    df_to_use[col] = df_to_use[col].fillna("").astype(str)
+        else:
+            df_to_use = df
+
+        table = Table.from_pandas(df_to_use)
         table.write(temp_file_path, format="fits", overwrite=True)
         logger.debug(f"Wrote temporary input table ({len(df)} rows) to: {temp_file_path}")
         return str(temp_file_path)
