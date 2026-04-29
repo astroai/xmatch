@@ -186,12 +186,12 @@ def execute_cds_xmatch_local_remote(
             cat1=local_input,  # Can be Table, file path, or URL
             cat2=f"vizier:{cds_cat_identifier}",
             max_distance=distMaxArcsec * u.arcsec,
-            colRA1=ra_col
-            if isinstance(local_input, (str, Path))
-            else None,  # Only specify for files
-            colDec1=dec_col
-            if isinstance(local_input, (str, Path))
-            else None,  # Only specify for files
+            colRA1=(
+                ra_col if isinstance(local_input, (str, Path)) else None
+            ),  # Only specify for files
+            colDec1=(
+                dec_col if isinstance(local_input, (str, Path)) else None
+            ),  # Only specify for files
             # Potentially add colRA2, colDec2 if remote config specifies non-default names
         )
 

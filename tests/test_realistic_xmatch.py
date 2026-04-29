@@ -196,12 +196,12 @@ def test_gaia_wise_xmatch_skyerr():
 
     # With error-based matching, separations should be reasonable
     # given the error ellipses (typically < 1 arcsec for most matches)
-    assert result_df[sep_col].median() < 1.0, (
-        f"Median separation too large: {result_df[sep_col].median():.3f} arcsec"
-    )
-    assert result_df[sep_col].max() < 5.0, (
-        f"Maximum separation too large: {result_df[sep_col].max():.3f} arcsec"
-    )
+    assert (
+        result_df[sep_col].median() < 1.0
+    ), f"Median separation too large: {result_df[sep_col].median():.3f} arcsec"
+    assert (
+        result_df[sep_col].max() < 5.0
+    ), f"Maximum separation too large: {result_df[sep_col].max():.3f} arcsec"
 
 
 def test_gaia_proper_motion_propagation():
@@ -283,6 +283,6 @@ def test_gaia_proper_motion_propagation():
         )
 
     # We expect more matches with proper motion propagation
-    assert len(result_with_pm) > len(result_no_pm), (
-        f"Expected more matches with PM propagation but got {len(result_with_pm)} vs {len(result_no_pm)}"
-    )
+    assert len(result_with_pm) > len(
+        result_no_pm
+    ), f"Expected more matches with PM propagation but got {len(result_with_pm)} vs {len(result_no_pm)}"

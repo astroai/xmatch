@@ -65,9 +65,9 @@ def test_cli_version_matches_package_version():
         package_version = __version__
 
         # Compare with package __version__
-        assert cli_version == package_version, (
-            f"CLI version '{cli_version}' doesn't match package version '{package_version}'"
-        )
+        assert (
+            cli_version == package_version
+        ), f"CLI version '{cli_version}' doesn't match package version '{package_version}'"
 
     except subprocess.CalledProcessError as e:
         pytest.fail(f"CLI command failed with error: {e.output}")
@@ -89,9 +89,9 @@ def test_version_not_hardcoded_in_parser():
     if re.search(hardcoded_version_pattern, content):
         # If found, check it's using the __version__ variable
         correct_pattern = r'version=f"[^"]+ *\{__version__\}"'
-        assert re.search(correct_pattern, content), (
-            "Version appears to be hardcoded in parser, not using __version__ variable"
-        )
+        assert re.search(
+            correct_pattern, content
+        ), "Version appears to be hardcoded in parser, not using __version__ variable"
 
 
 # When loading test files:
