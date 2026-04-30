@@ -178,7 +178,7 @@ def _propagate_coords_df(
             f"Cannot perform epoch propagation. Columns missing in DataFrame: {missing_in_df}. "
             f"Using original coordinates from '{ra_col}', '{dec_col}'."
         )
-        df_out = df.copy()
+        df_out = df.copy(deep=False)
         df_out["ra_propagated"] = df_out[ra_col]
         df_out["dec_propagated"] = df_out[dec_col]
         return df_out
@@ -188,7 +188,7 @@ def _propagate_coords_df(
     cols_for_prop = [ra_col, dec_col, pm_ra_col, pm_dec_col, epoch_col]
     cols_for_prop = [c for c in cols_for_prop if c is not None]
     try:
-        df_filled = df[cols_for_prop].copy()
+        df_filled = df[cols_for_prop].copy(deep=False)
     except KeyError as e:
         logger.error(f"Internal error: Columns expected for propagation missing: {e}")
         raise ValueError(f"Columns expected for propagation missing: {e}") from e
@@ -221,7 +221,7 @@ def _propagate_coords_df(
 
         coords_propagated = coords.apply_space_motion(new_obstime=target_obstime)
 
-        df_out = df.copy()
+        df_out = df.copy(deep=False)
         df_out["ra_propagated"] = coords_propagated.ra.deg
         df_out["dec_propagated"] = coords_propagated.dec.deg
 
@@ -304,13 +304,14 @@ def apply_epoch_propagation(
         logger.error(msg)
         raise ValueError(msg)
 
-    df_work = df.copy()
-
-    if epoch_col not in df_work.columns:
+    if epoch_col not in df.columns:
+        df_work = df.copy(deep=False)
         logger.debug(
             f"Adding fixed epoch column '{epoch_col}' = {current_epoch} from config for propagation."
         )
         df_work[epoch_col] = current_epoch
+    else:
+        df_work = df
 
     required_df_cols = {ra_col, dec_col, pm_ra_col, pm_dec_col, epoch_col}
     missing_in_df = required_df_cols - set(df_work.columns)

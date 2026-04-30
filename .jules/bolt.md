@@ -9,3 +9,7 @@
 ## 2026-04-29 - Avoid DataFrame copy for numeric datasets
 **Learning:** Unconditionally copying a Pandas DataFrame (`df.copy()`) before checking if any column type conversion is needed (e.g., for object type columns) creates significant memory and execution overhead, especially since astronomical datasets are typically very large and purely numeric.
 **Action:** Always check if a transformation (e.g., string conversion) is actually necessary before making a defensive copy of a DataFrame. For example, conditionally create `df.copy()` only when `df.select_dtypes(include=["object", "string"])` returns non-empty.
+
+## 2026-04-30 - Shallow DataFrame Copies
+**Learning:** For extremely large numeric datasets typical in astronomical data processing, deep copying Pandas DataFrames (`df.copy()`) before applying transformations or generating FITS files can cause a massive spike in memory footprint and latency. Because modifying columns in Pandas with a new Series object does not mutate the original data block underlying a shallow copy, deep copies are usually entirely unnecessary even when type conversions are performed on a column-by-column basis.
+**Action:** When you just need to append new columns (like propagated coordinates) or cast specific columns to strings (like FITS table string conversion), unconditionally use shallow copying: `df.copy(deep=False)`. This shares all unmodified numeric arrays and preserves memory while allowing safe local modifications to the copy.
