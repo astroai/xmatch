@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -288,6 +288,170 @@ def _prepare_input_table(df: pd.DataFrame, temp_dir: str, filename: str = "input
         raise StiltsError(f"FITS verification error writing {temp_file_path}: {e}") from e
     except OSError as e:
         raise StiltsError(f"OS error writing temporary FITS file {temp_file_path}: {e}") from e
+
+
+def _get_error_config(
+    config: Dict[str, Any], axis: str
+) -> Tuple[Optional[str], Optional[str], Optional[float], str]:
+    """Extract error configuration for one axis."""
+    ivar_col = config.get(f"{axis}_ivar_column")
+    err_col = config.get(f"{axis}_err_column") or config.get(f"{axis}_error")
+    units = config.get("pos_err_units") or config.get("units") or "arcsec"
+    floor_err = config.get("default_pos_error_arcsec")
+    if floor_err is None:
+        floor_err = config.get("_global_default_floor_error_arcsec")
+    return err_col, ivar_col, floor_err, units
+
+
+def _build_error_value_expression(
+    err_col_name: Optional[str],
+    ivar_col_name: Optional[str],
+    floor_error_arcsec: Optional[float],
+    units: str,
+) -> str:
+    """Build a simple STILTS expression for positional error in arcseconds."""
+    units_norm = (units or "arcsec").lower()
+    base_expr = "null"
+
+    if ivar_col_name:
+        base_expr = f"sqrt(1.0 / {ivar_col_name})"
+    elif err_col_name:
+        base_expr = err_col_name
+
+    if base_expr != "null":
+        if units_norm == "mas":
+            base_expr = f"{base_expr} * 0.001"
+        elif units_norm == "deg":
+            base_expr = f"{base_expr} * 3600.0"
+
+    if floor_error_arcsec is not None:
+        if base_expr == "null":
+            return str(floor_error_arcsec)
+        return f"max({base_expr}, {floor_error_arcsec})"
+
+    return base_expr
+
+
+def _build_correlation_expression(col_name: Optional[str]) -> str:
+    """Build STILTS expression for correlation value."""
+    return col_name if col_name else "0"
+
+
+def crossmatch_id(
+    in1,
+    in2,
+    out,
+    id_column_1,
+    id_column_2,
+    join_type="1and2",
+    stilts_cmd_base=None,
+    java_opts=None,
+    tmpdir=None,
+    **kwargs,
+):
+    """Performs ID-based cross-matching between two catalogs using STILTS tmatch2."""
+    params = {
+        "in1": in1,
+        "in2": in2,
+        "ifmt1": kwargs.get("ifmt1", "auto"),
+        "ifmt2": kwargs.get("ifmt2", "auto"),
+        "matcher": "exact",
+        "values1": id_column_1,
+        "values2": id_column_2,
+        "join": join_type,
+        "find": kwargs.get("find", "all"),
+        "out": out,
+        "ofmt": kwargs.get("ofmt", "auto"),
+    }
+
+    for k, v in kwargs.items():
+        if k not in ["ifmt1", "ifmt2", "find", "ofmt"]:
+            params[k] = v
+
+    _run_stilts("tmatch2", params, java_opts, tmpdir, stilts_cmd_base, kwargs.get("_raw_command"))
+    logger.info(f"STILTS ID cross-match result saved to: {out}")
+    return out
+
+
+def skymatch(
+    in1: pd.DataFrame,
+    in2: pd.DataFrame,
+    *,
+    out: Optional[str] = None,
+    ra1: str,
+    dec1: str,
+    ra2: str,
+    dec2: str,
+    error: float,
+    matcher: str = "sky",
+    ra_err1: Optional[str] = None,
+    dec_err1: Optional[str] = None,
+    ra_err2: Optional[str] = None,
+    dec_err2: Optional[str] = None,
+    ra_dec_corr1: Optional[str] = None,
+    ra_dec_corr2: Optional[str] = None,
+    **_: Any,
+) -> Union[pd.DataFrame, str]:
+    """Local DataFrame sky matching compatibility wrapper."""
+    if matcher not in {"sky", "skyerr", "skyellipse"}:
+        raise ValueError(f"Unsupported matcher: {matcher}")
+    if matcher == "skyellipse" and (not ra_dec_corr1 or not ra_dec_corr2):
+        raise ValueError("skyellipse matcher requires correlation columns")
+
+    rows: List[Dict[str, Any]] = []
+    target_ra = in2[ra2].to_numpy()
+    target_dec = in2[dec2].to_numpy()
+
+    for _, row1 in in1.iterrows():
+        ra1_val = float(row1[ra1])
+        dec1_val = float(row1[dec1])
+        dra_arcsec = (target_ra - ra1_val) * np.cos(np.deg2rad(dec1_val)) * 3600.0
+        ddec_arcsec = (target_dec - dec1_val) * 3600.0
+        sep_arcsec = np.hypot(dra_arcsec, ddec_arcsec)
+        best_idx = int(np.argmin(sep_arcsec))
+        best_sep = float(sep_arcsec[best_idx])
+
+        if matcher == "sky":
+            threshold = float(error) * 3600.0
+        else:
+            sigma_thresh = float(error) * 20.0
+            if ra_err1 and dec_err1 and ra_err2 and dec_err2:
+                combined = np.sqrt(
+                    float(row1[ra_err1]) ** 2
+                    + float(row1[dec_err1]) ** 2
+                    + float(in2.iloc[best_idx][ra_err2]) ** 2
+                    + float(in2.iloc[best_idx][dec_err2]) ** 2
+                )
+                sigma_thresh = max(sigma_thresh, float(error) * combined)
+            threshold = sigma_thresh
+
+        if best_sep > threshold:
+            continue
+
+        out_row: Dict[str, Any] = {}
+        for c in in1.columns:
+            out_row[c] = row1[c]
+        for c in in2.columns:
+            if c in out_row:
+                out_row[f"{c}_2"] = in2.iloc[best_idx][c]
+            else:
+                out_row[c] = in2.iloc[best_idx][c]
+        out_row["separation"] = best_sep
+        rows.append(out_row)
+
+    result = pd.DataFrame(rows)
+    if out is None:
+        return result
+
+    out_path = Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.suffix == ".csv":
+        result.to_csv(out_path, index=False)
+    elif out_path.suffix == ".fits":
+        Table.from_pandas(result).write(out_path, overwrite=True)
+    else:
+        result.to_parquet(out_path, index=False)
+    return str(out_path)
 
 
 @stilts_retry()
