@@ -61,6 +61,7 @@ def handle_archive_override(name: str, archive_prefix: str, cm: CrossMatch) -> s
 def parse_args(args: List[str] = None) -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
+        prog="xmatch",
         description="Cross-match astronomical catalogues locally or via remote services",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -331,6 +332,21 @@ def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> None:
         print(f"Catalogue '{catalogue_name}' not found.")
         if original_name != catalogue_name:
             print(f"Note: '{original_name}' was resolved to '{catalogue_name}'.")
+
+        import difflib
+
+        available_names = list(catalogues.keys())
+        if "catalogue_aliases" in cm.config:
+            available_names.extend(cm.config["catalogue_aliases"].keys())
+
+        # Perform case-insensitive matching
+        lower_to_original = {name.lower(): name for name in available_names}
+        suggestions = difflib.get_close_matches(
+            catalogue_name.lower(), list(lower_to_original.keys()), n=3, cutoff=0.5
+        )
+        if suggestions:
+            original_suggestions = [lower_to_original[s] for s in suggestions]
+            print(f"Did you mean: {', '.join(original_suggestions)}?")
         return
 
     cat_config = catalogues[catalogue_name]

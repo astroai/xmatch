@@ -263,11 +263,8 @@ def _prepare_input_table(df: pd.DataFrame, temp_dir: str, filename: str = "input
             ) from e
 
     try:
-        # Bolt Optimization: Avoid unconditional df.copy() which consumes massive memory
-        # for large numeric-only astronomical catalogs. Only copy if object conversion is needed.
-        object_cols = df.select_dtypes(include=["object"]).columns
-
-        if len(object_cols) > 0:
+        object_cols = list(df.select_dtypes(include=["object", "string"]).columns)
+        if object_cols:
             df_to_use = df.copy()
             for col in object_cols:
                 try:
