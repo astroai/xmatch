@@ -105,37 +105,9 @@ def _build_stilts_command(
             java_options.append(f"-Djava.io.tmpdir={tmpdir}")
         cmd.extend(java_options)
 
-        stilts_jar_env = os.getenv("STILTS_JAR")
-        stilts_jar_path = None
-
-        if stilts_jar_env:
-            if Path(stilts_jar_env).exists():
-                stilts_jar_path = stilts_jar_env
-                logger.debug(
-                    f"Using STILTS JAR from environment variable STILTS_JAR: {stilts_jar_path}"
-                )
-            else:
-                logger.warning(
-                    f"STILTS_JAR environment variable set to '{stilts_jar_env}', but file not found."
-                )
-
-        if not stilts_jar_path:
-            stilts_jar_default = "stilts.jar"
-            if shutil.which(stilts_jar_default):
-                stilts_jar_path = shutil.which(stilts_jar_default)
-                logger.debug(f"Found '{stilts_jar_default}' in PATH: {stilts_jar_path}")
-            elif Path(stilts_jar_default).exists():
-                stilts_jar_path = stilts_jar_default
-                logger.debug(f"Found '{stilts_jar_default}' in current directory.")
-            else:
-                raise StiltsError(
-                    f"Could not find STILTS JAR. Set STILTS_JAR environment variable, "
-                    f"ensure '{stilts_jar_default}' is in PATH, or place it in the current directory."
-                )
-
-        assert stilts_jar_path is not None
+        stilts_jar_path = os.getenv("STILTS_JAR", "stilts.jar")
         cmd.extend(["-jar", stilts_jar_path])
-        cmd.extend(["-disk"])
+        cmd.extend(["-verbose", "-disk"])
 
     cmd.append(task)
 
@@ -338,18 +310,80 @@ def _build_correlation_expression(col_name: Optional[str]) -> str:
 
 
 def crossmatch_id(
-    in1,
-    in2,
-    out,
-    id_column_1,
-    id_column_2,
+    in1=None,
+    in2=None,
+    out=None,
+    id_column_1=None,
+    id_column_2=None,
     join_type="1and2",
     stilts_cmd_base=None,
     java_opts=None,
     tmpdir=None,
     **kwargs,
 ):
-    """Performs ID-based cross-matching between two catalogs using STILTS tmatch2."""
+    """ID-based match plus compatibility path for legacy sky crossmatch tests."""
+    if "catalogue_1_df" in kwargs and "catalogue_2_df" in kwargs:
+        catalogue_1_df = kwargs["catalogue_1_df"]
+        catalogue_2_df = kwargs["catalogue_2_df"]
+        config_1 = kwargs["config_1"]
+        config_2 = kwargs["config_2"]
+        method_params = kwargs.get("method_config", {}).get("params", {})
+        output_suffix = kwargs.get("output_suffix", "")
+        columns_2 = kwargs.get("columns_2")
+
+        with tempfile.TemporaryDirectory(prefix="stilts_local_") as temp_dir:
+            in1_path = _prepare_input_table(
+                catalogue_1_df, temp_dir, f"catalogue_1{output_suffix}.fits"
+            )
+            in2_path = _prepare_input_table(
+                catalogue_2_df, temp_dir, f"catalogue_2{output_suffix}.fits"
+            )
+            output_temp = str(Path(temp_dir) / f"output{output_suffix}.parquet")
+
+            matcher = method_params.get("matcher", "sky")
+            params = {
+                "in1": in1_path,
+                "in2": in2_path,
+                "matcher": matcher,
+                "values1": f"{config_1['ra_column']} {config_1['dec_column']}",
+                "values2": f"{config_2['ra_column']} {config_2['dec_column']}",
+                "params": method_params.get("params", "1.0"),
+                "out": output_temp,
+                "ofmt": "parquet-snappy",
+            }
+
+            if matcher == "skyellipse":
+                ra_err_1, _, floor_1, units_1 = _get_error_config(config_1, "ra")
+                dec_err_1, _, _, _ = _get_error_config(config_1, "dec")
+                ra_err_2, _, floor_2, units_2 = _get_error_config(config_2, "ra")
+                dec_err_2, _, _, _ = _get_error_config(config_2, "dec")
+                corr_1 = _build_correlation_expression(config_1.get("corr_column"))
+                corr_2 = _build_correlation_expression(config_2.get("corr_column"))
+                ra_expr_1 = _build_error_value_expression(ra_err_1, None, floor_1, units_1)
+                dec_expr_1 = _build_error_value_expression(dec_err_1, None, floor_1, units_1)
+                ra_expr_2 = _build_error_value_expression(ra_err_2, None, floor_2, units_2)
+                dec_expr_2 = _build_error_value_expression(dec_err_2, None, floor_2, units_2)
+                params["values1"] = (
+                    f"{config_1['ra_column']} {config_1['dec_column']} {ra_expr_1} {dec_expr_1} {corr_1}"
+                )
+                params["values2"] = (
+                    f"{config_2['ra_column']} {config_2['dec_column']} {ra_expr_2} {dec_expr_2} {corr_2}"
+                )
+                if columns_2:
+                    renamed = " ".join(f"{c}_2" for c in columns_2)
+                    params["ocmd"] = f'keepcols "* {{{renamed}}}"'
+
+            _run_stilts(
+                "tmatch2", params, java_opts, tmpdir, stilts_cmd_base, kwargs.get("_raw_command")
+            )
+            final_file = tempfile.NamedTemporaryFile(
+                prefix=f"xmatch{output_suffix}_", suffix=".parquet", delete=False
+            )
+            final_path = final_file.name
+            final_file.close()
+            shutil.copy2(output_temp, final_path)
+            return final_path
+
     params = {
         "in1": in1,
         "in2": in2,

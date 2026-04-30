@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from xmatch.crossmatch import CrossMatch
 from xmatch.stilts import skymatch
@@ -17,7 +16,6 @@ from xmatch.stilts import skymatch
 # --- Test Data Fixtures ---
 
 
-@pytest.fixture
 def gaia_like_sources():
     """
     Create a DataFrame resembling Gaia catalog data with realistic astrometric errors.
@@ -73,8 +71,7 @@ def gaia_like_sources():
     return df
 
 
-@pytest.fixture
-def wise_like_sources(gaia_like_sources):
+def wise_like_sources(gaia_df_input=None):
     """
     Create a DataFrame resembling WISE catalog data with positions slightly offset from Gaia.
 
@@ -88,11 +85,15 @@ def wise_like_sources(gaia_like_sources):
     np.random.seed(84)  # Different seed
 
     # Use Gaia positions but add small offsets (typical for cross-survey differences)
-    n_gaia = len(gaia_like_sources)
+    if gaia_df_input is None:
+        gaia_df = gaia_like_sources()
+    else:
+        gaia_df = gaia_df_input
+    n_gaia = len(gaia_df)
 
     # For first n_gaia sources, use Gaia positions with small offsets
-    ra_gaia = gaia_like_sources["ra"].values
-    dec_gaia = gaia_like_sources["dec"].values
+    ra_gaia = gaia_df["ra"].values
+    dec_gaia = gaia_df["dec"].values
 
     # Create offset positions (typically within 0.5 arcsec)
     ra_offset_arcsec = np.random.normal(0, 0.2, n_gaia) / 3600  # Convert to degrees
