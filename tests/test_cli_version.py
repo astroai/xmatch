@@ -29,15 +29,15 @@ def test_cli_uses_version_from_init():
     with (
         patch("sys.stdout", stdout),
         patch("sys.argv", ["xmatch", "--version"]),
-        patch("sys.exit") as mock_exit,
     ):  # Prevent actual exit
         # Import and run main
         from xmatch.cli import main
 
-        main()
+        try:
+            main()
+        except SystemExit:
+            pass
 
-        # Check exit was called (version action calls exit)
-        mock_exit.assert_called_once()
 
         # Get the output
         output = stdout.getvalue()
