@@ -263,21 +263,19 @@ def _prepare_input_table(df: pd.DataFrame, temp_dir: str, filename: str = "input
             ) from e
 
     try:
-        # Performance optimization: Avoid copying the DataFrame for purely numeric datasets.
-        # This saves significant memory and time since astronomical data is mostly numeric and large.
-        object_cols = df.select_dtypes(include=["object"]).columns
-        if not object_cols.empty:
-            df_for_fits = df.copy()
+        object_cols = list(df.select_dtypes(include=["object", "string"]).columns)
+        if object_cols:
+            df_to_use = df.copy()
             for col in object_cols:
                 try:
-                    pd.to_numeric(df_for_fits[col].dropna())
+                    pd.to_numeric(df_to_use[col].dropna())
                 except (ValueError, TypeError):
                     logger.debug(f"Converting object column '{col}' to string for FITS output.")
-                    df_for_fits[col] = df_for_fits[col].fillna("").astype(str)
+                    df_to_use[col] = df_to_use[col].fillna("").astype(str)
         else:
-            df_for_fits = df
+            df_to_use = df
 
-        table = Table.from_pandas(df_for_fits)
+        table = Table.from_pandas(df_to_use)
         table.write(temp_file_path, format="fits", overwrite=True)
         logger.debug(f"Wrote temporary input table ({len(df)} rows) to: {temp_file_path}")
         return str(temp_file_path)
