@@ -37,8 +37,8 @@ repos:
   - repo: local
     hooks:
       - id: ci-parity-pre-push
-        name: CI parity (lint + tests)
-        entry: bash -lc 'pixi run lint && pixi run test'
+        name: pre-push lint gate
+        entry: pixi run lint
         language: system
         pass_filenames: false
         always_run: true
