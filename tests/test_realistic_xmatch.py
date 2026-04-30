@@ -172,8 +172,7 @@ def test_gaia_wise_xmatch_skyerr():
         dec_err1="dec_error",
         ra_err2="ra_err",
         dec_err2="dec_err",
-        pos_err_units_1="mas",
-        pos_err_units_2="mas",
+        # Correctly handle different units
         verbose=True,
     )
 
