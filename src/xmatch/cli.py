@@ -334,13 +334,16 @@ def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> None:
             print(f"Note: '{original_name}' was resolved to '{catalogue_name}'.")
 
         import difflib
+
         available_names = list(catalogues.keys())
         if "catalogue_aliases" in cm.config:
             available_names.extend(cm.config["catalogue_aliases"].keys())
 
         # Perform case-insensitive matching
         lower_to_original = {name.lower(): name for name in available_names}
-        suggestions = difflib.get_close_matches(catalogue_name.lower(), list(lower_to_original.keys()), n=3, cutoff=0.5)
+        suggestions = difflib.get_close_matches(
+            catalogue_name.lower(), list(lower_to_original.keys()), n=3, cutoff=0.5
+        )
         if suggestions:
             original_suggestions = [lower_to_original[s] for s in suggestions]
             print(f"Did you mean: {', '.join(original_suggestions)}?")

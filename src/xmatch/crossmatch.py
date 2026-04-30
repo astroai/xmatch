@@ -471,7 +471,9 @@ class CrossMatch:
 
                 # Perform case-insensitive matching
                 lower_to_original = {name.lower(): name for name in available_names}
-                suggestions = difflib.get_close_matches(input_path_str.lower(), list(lower_to_original.keys()), n=3, cutoff=0.5)
+                suggestions = difflib.get_close_matches(
+                    input_path_str.lower(), list(lower_to_original.keys()), n=3, cutoff=0.5
+                )
                 if suggestions:
                     original_suggestions = [lower_to_original[s] for s in suggestions]
                     # Filter unique names because some aliases might point to the same name or be the same name

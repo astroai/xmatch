@@ -263,19 +263,19 @@ def _prepare_input_table(df: pd.DataFrame, temp_dir: str, filename: str = "input
             ) from e
 
     try:
-        object_cols = df.select_dtypes(include=["object"]).columns
-        if len(object_cols) > 0:
-            df_copy = df.copy()
+        object_cols = list(df.select_dtypes(include=["object", "string"]).columns)
+        if object_cols:
+            df_to_use = df.copy()
             for col in object_cols:
                 try:
-                    pd.to_numeric(df_copy[col].dropna())
+                    pd.to_numeric(df_to_use[col].dropna())
                 except (ValueError, TypeError):
                     logger.debug(f"Converting object column '{col}' to string for FITS output.")
-                    df_copy[col] = df_copy[col].fillna("").astype(str)
-            table = Table.from_pandas(df_copy)
+                    df_to_use[col] = df_to_use[col].fillna("").astype(str)
         else:
-            table = Table.from_pandas(df)
+            df_to_use = df
 
+        table = Table.from_pandas(df_to_use)
         table.write(temp_file_path, format="fits", overwrite=True)
         logger.debug(f"Wrote temporary input table ({len(df)} rows) to: {temp_file_path}")
         return str(temp_file_path)

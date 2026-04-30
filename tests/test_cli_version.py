@@ -38,7 +38,6 @@ def test_cli_uses_version_from_init():
         except SystemExit:
             pass
 
-
         # Get the output
         output = stdout.getvalue()
 
