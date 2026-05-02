@@ -237,7 +237,7 @@ def _prepare_input_table(df: pd.DataFrame, temp_dir: str, filename: str = "input
     try:
         object_cols = list(df.select_dtypes(include=["object", "string"]).columns)
         if object_cols:
-            df_to_use = df.copy()
+            df_to_use = df.copy(deep=False)  # ⚡ Bolt: Use shallow copy for memory optimization before possible string conversion
             for col in object_cols:
                 try:
                     pd.to_numeric(df_to_use[col].dropna())
