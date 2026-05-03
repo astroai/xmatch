@@ -92,7 +92,7 @@ class AuthConfig:
                     )
 
             except Exception as e:
-                logger.warning(f"Error accessing keyring for service '{service_name}': {e}")
+                logger.debug(f"Error accessing keyring for service '{service_name}': {e}")
 
         return loaded_auth
 

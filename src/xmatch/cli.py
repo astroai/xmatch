@@ -499,10 +499,20 @@ def main(args: Optional[List[str]] = None) -> int:
             return 0
 
         # Check if we have catalogues to match
-        if not parsed_args.catalogue_1 or not parsed_args.catalogue_2:
-            print("Error: Two catalogues are required for matching.")
-            print("Use 'xmatch --help' for usage information.")
-            print("Use 'xmatch --list-catalogues' to see available catalogues.")
+        if not parsed_args.catalogue_1 and not parsed_args.catalogue_2:
+            print("Error: Missing required positional arguments. Please provide two catalogues to cross-match.", file=sys.stderr)
+            print("Use 'xmatch --help' for usage information.", file=sys.stderr)
+            print("Use 'xmatch --list-catalogues' to see available catalogues.", file=sys.stderr)
+            return 1
+        elif parsed_args.catalogue_1 and not parsed_args.catalogue_2:
+            print(f"Error: Missing second catalogue. Please provide a second catalogue to cross-match with '{parsed_args.catalogue_1}'.", file=sys.stderr)
+            print("Use 'xmatch --help' for usage information.", file=sys.stderr)
+            print("Use 'xmatch --list-catalogues' to see available catalogues.", file=sys.stderr)
+            return 1
+        elif not parsed_args.catalogue_1 and parsed_args.catalogue_2:
+            print(f"Error: Missing first catalogue. Please provide a first catalogue to cross-match with '{parsed_args.catalogue_2}'.", file=sys.stderr)
+            print("Use 'xmatch --help' for usage information.", file=sys.stderr)
+            print("Use 'xmatch --list-catalogues' to see available catalogues.", file=sys.stderr)
             return 1
 
         # Resolve catalogue names/aliases
