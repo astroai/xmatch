@@ -150,7 +150,8 @@ def execute_chunked_match(
         # For very small catalogs (≤ 50 rows), process each source individually
         all_results = []
 
-        for idx, row in local_df.iterrows():
+        # ⚡ Bolt: Use to_dict('records') instead of slow df.iterrows()
+        for idx, row in zip(local_df.index, local_df.to_dict('records')):
             ra = row[local_ra_col]
             dec = row[local_dec_col]
 
@@ -258,7 +259,8 @@ def _process_coordinate_chunk(
 
     if small_catalog_mode:
         all_results = []
-        for idx, row in local_chunk.iterrows():
+        # ⚡ Bolt: Use to_dict('records') instead of slow df.iterrows()
+        for idx, row in zip(local_chunk.index, local_chunk.to_dict('records')):
             ra = row[ra_col]
             dec = row[dec_col]
             logger.info(
