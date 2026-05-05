@@ -1,0 +1,3 @@
+## 2026-05-05 - Route CLI error messages to stderr
+**Learning:** Application error messages displayed on standard output can break automated scripts and pipes that expect standard output to contain data only. Routing application errors to standard error (stderr) improves CLI UX by cleanly separating diagnostic output from actual results.
+**Action:** When creating CLI tools, always route application-level errors (like missing arguments, invalid configuration, or non-existent files) explicitly to `sys.stderr` rather than using a default `print()` which writes to `stdout`.
