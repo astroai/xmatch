@@ -13,3 +13,7 @@
 ## 2024-05-24 - Pandas Shallow Copy Optimization
 **Learning:** In pandas, `df.copy()` creates a deep copy by default, duplicating both the metadata and the underlying data arrays. In `xmatch`, which processes large astronomical datasets (DataFrames), making deep copies inside internal propagation and local matching functions incurs heavy memory and CPU overhead. Also, `dict.copy()` does not take any arguments, so applying the same optimization to dictionaries blindly causes `TypeError`.
 **Action:** When working with pandas DataFrames, use `df.copy(deep=False)` when you only need to assign new columns (like `ra_propagated`) without modifying existing data. This creates a new object referencing the same data buffer, yielding identical functionality with significantly less overhead. Only apply this to DataFrames and not dictionaries.
+
+## 2024-05-24 - DataFrame Iteration Optimization
+**Learning:** In pandas, `df.iterrows()` and `.iloc` lookups inside a loop are notoriously slow, especially for large astronomical datasets. The metadata handling in pandas iteration creates massive overhead in pure python loops.
+**Action:** Replace `df.iterrows()` with `df.to_dict('records')` when iteration row-by-row is strictly required in a pure python loop. Iterate over the resulting list of dictionaries, which provides significantly faster row and cell access.

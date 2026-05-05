@@ -150,7 +150,11 @@ def execute_chunked_match(
         # For very small catalogs (≤ 50 rows), process each source individually
         all_results = []
 
-        for idx, row in local_df.iterrows():
+        # Bolt Optimization: Convert to list of dicts. iterrows() is very slow.
+        local_df_records = local_df.to_dict("records")
+        local_df_columns = local_df.columns.tolist()
+
+        for idx, row in enumerate(local_df_records):
             ra = row[local_ra_col]
             dec = row[local_dec_col]
 
@@ -160,7 +164,7 @@ def execute_chunked_match(
             source_df = pd.DataFrame({local_ra_col: [ra], local_dec_col: [dec]})
 
             # Add any other columns from the original row
-            for col in local_df.columns:
+            for col in local_df_columns:
                 if col not in source_df.columns:
                     source_df[col] = [row[col]]
 
@@ -258,7 +262,12 @@ def _process_coordinate_chunk(
 
     if small_catalog_mode:
         all_results = []
-        for idx, row in local_chunk.iterrows():
+
+        # Bolt Optimization: Convert to list of dicts. iterrows() is very slow.
+        local_chunk_records = local_chunk.to_dict("records")
+        local_chunk_columns = local_chunk.columns.tolist()
+
+        for idx, row in enumerate(local_chunk_records):
             ra = row[ra_col]
             dec = row[dec_col]
             logger.info(
@@ -282,7 +291,7 @@ def _process_coordinate_chunk(
                 f"Found {len(remote_df)} remote sources near RA={ra:.4f}, Dec={dec:.4f}. Performing match..."
             )
             source_df = pd.DataFrame({ra_col: [ra], dec_col: [dec]})
-            for col in local_chunk.columns:
+            for col in local_chunk_columns:
                 if col not in source_df.columns:
                     source_df[col] = [row[col]]
             remote_ra_col = remote_config.get("ra_column")

@@ -432,11 +432,17 @@ def skymatch(
     if matcher == "skyellipse" and (not ra_dec_corr1 or not ra_dec_corr2):
         raise ValueError("skyellipse matcher requires correlation columns")
 
+    # Bolt Optimization: Convert to list of dicts. iterrows() and .iloc are very slow in loops.
+    in1_records = in1.to_dict("records")
+    in2_records = in2.to_dict("records")
+    in1_columns = in1.columns.tolist()
+    in2_columns = in2.columns.tolist()
+
     rows: List[Dict[str, Any]] = []
     target_ra = in2[ra2].to_numpy()
     target_dec = in2[dec2].to_numpy()
 
-    for _, row1 in in1.iterrows():
+    for row1 in in1_records:
         ra1_val = float(row1[ra1])
         dec1_val = float(row1[dec1])
         dra_arcsec = (target_ra - ra1_val) * np.cos(np.deg2rad(dec1_val)) * 3600.0
@@ -453,8 +459,8 @@ def skymatch(
                 combined = np.sqrt(
                     float(row1[ra_err1]) ** 2
                     + float(row1[dec_err1]) ** 2
-                    + float(in2.iloc[best_idx][ra_err2]) ** 2
-                    + float(in2.iloc[best_idx][dec_err2]) ** 2
+                    + float(in2_records[best_idx][ra_err2]) ** 2
+                    + float(in2_records[best_idx][dec_err2]) ** 2
                 )
                 sigma_thresh = max(sigma_thresh, float(error) * combined)
             threshold = sigma_thresh
@@ -463,13 +469,15 @@ def skymatch(
             continue
 
         out_row: Dict[str, Any] = {}
-        for c in in1.columns:
+        for c in in1_columns:
             out_row[c] = row1[c]
-        for c in in2.columns:
+
+        best_in2_row = in2_records[best_idx]
+        for c in in2_columns:
             if c in out_row:
-                out_row[f"{c}_2"] = in2.iloc[best_idx][c]
+                out_row[f"{c}_2"] = best_in2_row[c]
             else:
-                out_row[c] = in2.iloc[best_idx][c]
+                out_row[c] = best_in2_row[c]
         out_row["separation"] = best_sep
         rows.append(out_row)
 
