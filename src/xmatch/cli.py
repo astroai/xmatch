@@ -500,9 +500,9 @@ def main(args: Optional[List[str]] = None) -> int:
 
         # Check if we have catalogues to match
         if not parsed_args.catalogue_1 or not parsed_args.catalogue_2:
-            print("Error: Two catalogues are required for matching.")
-            print("Use 'xmatch --help' for usage information.")
-            print("Use 'xmatch --list-catalogues' to see available catalogues.")
+            print("Error: Two catalogues are required for matching.", file=sys.stderr)
+            print("Use 'xmatch --help' for usage information.", file=sys.stderr)
+            print("Use 'xmatch --list-catalogues' to see available catalogues.", file=sys.stderr)
             return 1
 
         # Resolve catalogue names/aliases
