@@ -436,7 +436,14 @@ def skymatch(
     target_ra = in2[ra2].to_numpy()
     target_dec = in2[dec2].to_numpy()
 
-    for _, row1 in in1.iterrows():
+    # Optimization: iterate over dicts instead of using iterrows()
+    in1_records = in1.to_dict("records")
+    in2_records = in2.to_dict("records")
+
+    in1_cols = list(in1.columns)
+    in2_cols = list(in2.columns)
+
+    for row1 in in1_records:
         ra1_val = float(row1[ra1])
         dec1_val = float(row1[dec1])
         dra_arcsec = (target_ra - ra1_val) * np.cos(np.deg2rad(dec1_val)) * 3600.0
@@ -444,6 +451,8 @@ def skymatch(
         sep_arcsec = np.hypot(dra_arcsec, ddec_arcsec)
         best_idx = int(np.argmin(sep_arcsec))
         best_sep = float(sep_arcsec[best_idx])
+
+        best_in2_row = in2_records[best_idx]
 
         if matcher == "sky":
             threshold = float(error) * 3600.0
@@ -453,8 +462,8 @@ def skymatch(
                 combined = np.sqrt(
                     float(row1[ra_err1]) ** 2
                     + float(row1[dec_err1]) ** 2
-                    + float(in2.iloc[best_idx][ra_err2]) ** 2
-                    + float(in2.iloc[best_idx][dec_err2]) ** 2
+                    + float(best_in2_row[ra_err2]) ** 2
+                    + float(best_in2_row[dec_err2]) ** 2
                 )
                 sigma_thresh = max(sigma_thresh, float(error) * combined)
             threshold = sigma_thresh
@@ -463,13 +472,13 @@ def skymatch(
             continue
 
         out_row: Dict[str, Any] = {}
-        for c in in1.columns:
+        for c in in1_cols:
             out_row[c] = row1[c]
-        for c in in2.columns:
+        for c in in2_cols:
             if c in out_row:
-                out_row[f"{c}_2"] = in2.iloc[best_idx][c]
+                out_row[f"{c}_2"] = best_in2_row[c]
             else:
-                out_row[c] = in2.iloc[best_idx][c]
+                out_row[c] = best_in2_row[c]
         out_row["separation"] = best_sep
         rows.append(out_row)
 

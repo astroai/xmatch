@@ -150,19 +150,22 @@ def execute_chunked_match(
         # For very small catalogs (≤ 50 rows), process each source individually
         all_results = []
 
-        for idx, row in local_df.iterrows():
+        # Optimization: use to_dict('records') instead of iterrows
+        local_records = local_df.to_dict("records")
+        local_cols = list(local_df.columns)
+
+        for idx, row in enumerate(local_records):
             ra = row[local_ra_col]
             dec = row[local_dec_col]
 
             logger.info(f"Processing source {idx + 1}/{rows}: RA={ra}, Dec={dec}")
 
-            # Create a single-row DataFrame for this source
-            source_df = pd.DataFrame({local_ra_col: [ra], local_dec_col: [dec]})
-
-            # Add any other columns from the original row
-            for col in local_df.columns:
-                if col not in source_df.columns:
-                    source_df[col] = [row[col]]
+            # Create a single-row DataFrame for this source efficiently
+            source_data = {local_ra_col: [ra], local_dec_col: [dec]}
+            for col in local_cols:
+                if col not in source_data:
+                    source_data[col] = [row[col]]
+            source_df = pd.DataFrame(source_data)
 
             # Process this single source - now passing radius_arcsec just once
             result = _process_coordinate_chunk(
@@ -258,7 +261,12 @@ def _process_coordinate_chunk(
 
     if small_catalog_mode:
         all_results = []
-        for idx, row in local_chunk.iterrows():
+
+        # Optimization: use to_dict('records') instead of iterrows
+        chunk_records = local_chunk.to_dict("records")
+        chunk_cols = list(local_chunk.columns)
+
+        for idx, row in enumerate(chunk_records):
             ra = row[ra_col]
             dec = row[dec_col]
             logger.info(
@@ -281,10 +289,13 @@ def _process_coordinate_chunk(
             logger.info(
                 f"Found {len(remote_df)} remote sources near RA={ra:.4f}, Dec={dec:.4f}. Performing match..."
             )
-            source_df = pd.DataFrame({ra_col: [ra], dec_col: [dec]})
-            for col in local_chunk.columns:
-                if col not in source_df.columns:
-                    source_df[col] = [row[col]]
+
+            # Create a single-row DataFrame for this source efficiently
+            source_data = {ra_col: [ra], dec_col: [dec]}
+            for col in chunk_cols:
+                if col not in source_data:
+                    source_data[col] = [row[col]]
+            source_df = pd.DataFrame(source_data)
             remote_ra_col = remote_config.get("ra_column")
             remote_dec_col = remote_config.get("dec_column")
             match_params = {
