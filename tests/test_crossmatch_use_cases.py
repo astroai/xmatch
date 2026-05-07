@@ -117,8 +117,10 @@ def mock_stilts_local():
 
             # Simple mock implementation of spatial join using vectorized operations
             result_dfs = []
-            for _, row1 in df1.iterrows():
-                for _, row2 in df2.iterrows():
+            df1_records = df1.to_dict("records")
+            df2_records = df2.to_dict("records")
+            for row1 in df1_records:
+                for row2 in df2_records:
                     # Calculate separation (simplified version for testing)
                     sep = (
                         np.sqrt(
