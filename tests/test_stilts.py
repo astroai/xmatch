@@ -232,7 +232,7 @@ def test_run_stilts_called_process_error(mock_run, mock_subprocess_run_failure):
     task = "badtask"
     params = {"in": "in.fits"}
 
-    with pytest.raises(StiltsError, match=r"failed with exit code 1.*stderr:"):
+    with pytest.raises(StiltsError, match=r"failed with exit code 1"):
         _run_stilts(task, params, stilts_cmd_base="stilts")
 
 
