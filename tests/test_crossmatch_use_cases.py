@@ -117,13 +117,25 @@ def mock_stilts_local():
 
             # Simple mock implementation of spatial join using vectorized operations
             result_dfs = []
-            for _, row1 in df1.iterrows():
-                for _, row2 in df2.iterrows():
+
+            # ⚡ Bolt performance optimization:
+            # Extract columns into dictionaries of NumPy arrays for fast O(1) access
+            # avoiding slow .iterrows() on DataFrames inside the loop.
+            df1_cols = {col: df1[col].to_numpy() for col in df1.columns}
+            df2_cols = {col: df2[col].to_numpy() for col in df2.columns}
+
+            for i in range(len(df1)):
+                for j in range(len(df2)):
                     # Calculate separation (simplified version for testing)
+                    ra1_val = df1_cols[ra1][i]
+                    dec1_val = df1_cols[dec1][i]
+                    ra2_val = df2_cols[ra2][j]
+                    dec2_val = df2_cols[dec2][j]
+
                     sep = (
                         np.sqrt(
-                            ((row1[ra1] - row2[ra2]) * np.cos(np.radians(row1[dec1]))) ** 2
-                            + (row1[dec1] - row2[dec2]) ** 2
+                            ((ra1_val - ra2_val) * np.cos(np.radians(dec1_val))) ** 2
+                            + (dec1_val - dec2_val) ** 2
                         )
                         * 3600
                     )  # convert to arcsec
@@ -134,10 +146,10 @@ def mock_stilts_local():
                         match_row = {}
                         # Add columns from df1
                         for col in df1.columns:
-                            match_row[f"{col}_1"] = row1[col]
+                            match_row[f"{col}_1"] = df1_cols[col][i]
                         # Add columns from df2
                         for col in df2.columns:
-                            match_row[f"{col}_2"] = row2[col]
+                            match_row[f"{col}_2"] = df2_cols[col][j]
                         # Add separation
                         match_row["separation"] = sep
                         result_dfs.append(pd.DataFrame([match_row]))
