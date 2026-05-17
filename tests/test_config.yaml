@@ -1,0 +1,28 @@
+archives:
+  test_archive:
+    cds_service:
+      access_method: cds_xmatch
+      access_url: http://cdsxmatch.u-strasbg.fr/xmatch
+      service_type: cds_xmatch
+    tap_service:
+      access_method: tap
+      access_url: https://example.com/tap
+      service_type: tap
+catalogues:
+  test_cds_cat:
+    access_identifier: I/350/gaiaedr3
+    archive: test_archive
+    dec_column: dec
+    description: Test CDS Catalogue
+    ra_column: ra
+    service_id: cds_service
+  test_tap_cat:
+    access_identifier: test_schema.test_table
+    archive: test_archive
+    dec_column: dec
+    description: Test TAP Catalogue
+    ra_column: ra
+    service_id: tap_service
+stilts_config:
+  java_opts: -Xmx4G
+  stilts_cmd_base: stilts
