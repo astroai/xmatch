@@ -288,7 +288,7 @@ def list_catalogues(cm: CrossMatch) -> None:
     if hasattr(cm, "config") and "catalogues" in cm.config:
         catalogues = cm.config["catalogues"]
     else:
-        print("No catalogues configured.")
+        print("Error: No catalogues configured.", file=sys.stderr)
         return
 
     # Get aliases for more helpful output
@@ -324,14 +324,14 @@ def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> None:
 
     # Get catalogue definition
     if not hasattr(cm, "config") or "catalogues" not in cm.config:
-        print("No catalogues configured.")
+        print("Error: No catalogues configured.", file=sys.stderr)
         return
 
     catalogues = cm.config["catalogues"]
     if catalogue_name not in catalogues:
-        print(f"Catalogue '{catalogue_name}' not found.")
+        print(f"Error: Catalogue '{catalogue_name}' not found.", file=sys.stderr)
         if original_name != catalogue_name:
-            print(f"Note: '{original_name}' was resolved to '{catalogue_name}'.")
+            print(f"Note: '{original_name}' was resolved to '{catalogue_name}'.", file=sys.stderr)
 
         import difflib
 
@@ -346,7 +346,7 @@ def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> None:
         )
         if suggestions:
             original_suggestions = [lower_to_original[s] for s in suggestions]
-            print(f"Did you mean: {', '.join(original_suggestions)}?")
+            print(f"Did you mean: {', '.join(original_suggestions)}?", file=sys.stderr)
         return
 
     cat_config = catalogues[catalogue_name]
@@ -500,9 +500,9 @@ def main(args: Optional[List[str]] = None) -> int:
 
         # Check if we have catalogues to match
         if not parsed_args.catalogue_1 or not parsed_args.catalogue_2:
-            print("Error: Two catalogues are required for matching.")
-            print("Use 'xmatch --help' for usage information.")
-            print("Use 'xmatch --list-catalogues' to see available catalogues.")
+            print("Error: Two catalogues are required for matching.", file=sys.stderr)
+            print("Use 'xmatch --help' for usage information.", file=sys.stderr)
+            print("Use 'xmatch --list-catalogues' to see available catalogues.", file=sys.stderr)
             return 1
 
         # Resolve catalogue names/aliases
