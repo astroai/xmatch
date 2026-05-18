@@ -436,9 +436,15 @@ def skymatch(
     target_ra = in2[ra2].to_numpy()
     target_dec = in2[dec2].to_numpy()
 
-    for _, row1 in in1.iterrows():
-        ra1_val = float(row1[ra1])
-        dec1_val = float(row1[dec1])
+    # Extract columns to numpy arrays to avoid slow pandas iterrows overhead
+    in1_cols = {c: in1[c].to_numpy() for c in in1.columns}
+    in2_cols = {c: in2[c].to_numpy() for c in in2.columns}
+    in1_col_names = list(in1.columns)
+    in2_col_names = list(in2.columns)
+
+    for i in range(len(in1)):
+        ra1_val = float(in1_cols[ra1][i])
+        dec1_val = float(in1_cols[dec1][i])
         dra_arcsec = (target_ra - ra1_val) * np.cos(np.deg2rad(dec1_val)) * 3600.0
         ddec_arcsec = (target_dec - dec1_val) * 3600.0
         sep_arcsec = np.hypot(dra_arcsec, ddec_arcsec)
@@ -451,10 +457,10 @@ def skymatch(
             sigma_thresh = float(error) * 20.0
             if ra_err1 and dec_err1 and ra_err2 and dec_err2:
                 combined = np.sqrt(
-                    float(row1[ra_err1]) ** 2
-                    + float(row1[dec_err1]) ** 2
-                    + float(in2.iloc[best_idx][ra_err2]) ** 2
-                    + float(in2.iloc[best_idx][dec_err2]) ** 2
+                    float(in1_cols[ra_err1][i]) ** 2
+                    + float(in1_cols[dec_err1][i]) ** 2
+                    + float(in2_cols[ra_err2][best_idx]) ** 2
+                    + float(in2_cols[dec_err2][best_idx]) ** 2
                 )
                 sigma_thresh = max(sigma_thresh, float(error) * combined)
             threshold = sigma_thresh
@@ -463,13 +469,13 @@ def skymatch(
             continue
 
         out_row: Dict[str, Any] = {}
-        for c in in1.columns:
-            out_row[c] = row1[c]
-        for c in in2.columns:
+        for c in in1_col_names:
+            out_row[c] = in1_cols[c][i]
+        for c in in2_col_names:
             if c in out_row:
-                out_row[f"{c}_2"] = in2.iloc[best_idx][c]
+                out_row[f"{c}_2"] = in2_cols[c][best_idx]
             else:
-                out_row[c] = in2.iloc[best_idx][c]
+                out_row[c] = in2_cols[c][best_idx]
         out_row["separation"] = best_sep
         rows.append(out_row)
 
