@@ -150,11 +150,16 @@ def execute_chunked_match(
         # For very small catalogs (≤ 50 rows), process each source individually
         all_results = []
 
-        for idx, row in local_df.iterrows():
-            ra = row[local_ra_col]
-            dec = row[local_dec_col]
+        # ⚡ Bolt: Convert DataFrame columns to dictionaries of NumPy arrays
+        # to avoid the slow .iterrows() lookup during row iteration.
+        local_cols = {c: local_df[c].to_numpy() for c in local_df.columns}
+        local_len = len(local_df)
 
-            logger.info(f"Processing source {idx + 1}/{rows}: RA={ra}, Dec={dec}")
+        for i in range(local_len):
+            ra = local_cols[local_ra_col][i]
+            dec = local_cols[local_dec_col][i]
+
+            logger.info(f"Processing source {i + 1}/{rows}: RA={ra}, Dec={dec}")
 
             # Create a single-row DataFrame for this source
             source_df = pd.DataFrame({local_ra_col: [ra], local_dec_col: [dec]})
@@ -162,7 +167,7 @@ def execute_chunked_match(
             # Add any other columns from the original row
             for col in local_df.columns:
                 if col not in source_df.columns:
-                    source_df[col] = [row[col]]
+                    source_df[col] = [local_cols[col][i]]
 
             # Process this single source - now passing radius_arcsec just once
             result = _process_coordinate_chunk(
@@ -258,9 +263,15 @@ def _process_coordinate_chunk(
 
     if small_catalog_mode:
         all_results = []
-        for idx, row in local_chunk.iterrows():
-            ra = row[ra_col]
-            dec = row[dec_col]
+
+        # ⚡ Bolt: Convert DataFrame columns to dictionaries of NumPy arrays
+        # to avoid the slow .iterrows() lookup during row iteration.
+        local_cols = {c: local_chunk[c].to_numpy() for c in local_chunk.columns}
+        local_len = len(local_chunk)
+
+        for i in range(local_len):
+            ra = local_cols[ra_col][i]
+            dec = local_cols[dec_col][i]
             logger.info(
                 f"Querying remote catalog for point: RA={ra:.4f}, Dec={dec:.4f}, Radius={radius_arcsec} arcsec"
             )
@@ -284,7 +295,7 @@ def _process_coordinate_chunk(
             source_df = pd.DataFrame({ra_col: [ra], dec_col: [dec]})
             for col in local_chunk.columns:
                 if col not in source_df.columns:
-                    source_df[col] = [row[col]]
+                    source_df[col] = [local_cols[col][i]]
             remote_ra_col = remote_config.get("ra_column")
             remote_dec_col = remote_config.get("dec_column")
             match_params = {
