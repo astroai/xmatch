@@ -1,6 +1,7 @@
 import functools
 import logging
 import os
+import sys
 from typing import Any, Dict, Optional
 
 import keyring
@@ -154,12 +155,12 @@ def set_credentials_interactive(service_name: str) -> bool:
 
     username = input("Username: ").strip()
     if not username:
-        print("Username cannot be empty. Aborting.")
+        print("Error: Username cannot be empty. Aborting.", file=sys.stderr)
         return False
 
     password = getpass.getpass("Password: ")
     if not password:
-        print("Password cannot be empty. Aborting.")
+        print("Error: Password cannot be empty. Aborting.", file=sys.stderr)
         return False
 
     try:
@@ -168,7 +169,7 @@ def set_credentials_interactive(service_name: str) -> bool:
         print(f"Credentials for {service_name} saved successfully.")
         return True
     except Exception as e:
-        print(f"Error saving credentials: {e}")
+        print(f"Error saving credentials: {e}", file=sys.stderr)
         return False
 
 
