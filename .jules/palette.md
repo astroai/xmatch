@@ -1,0 +1,3 @@
+## 2024-03-05 - Route CLI errors to stderr
+**Learning:** In CLI applications, routing expected failure messages (e.g., missing arguments, empty required input, invalid identifiers) to stdout pollutes output pipelines and breaks downstream scripts.
+**Action:** Always ensure that error and warning messages from CLI operations, missing data states, and user interaction faults are explicitly printed to `sys.stderr` so that `sys.stdout` remains pristine for successful data/text output.

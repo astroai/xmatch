@@ -324,14 +324,14 @@ def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> None:
 
     # Get catalogue definition
     if not hasattr(cm, "config") or "catalogues" not in cm.config:
-        print("No catalogues configured.")
+        print("No catalogues configured.", file=sys.stderr)
         return
 
     catalogues = cm.config["catalogues"]
     if catalogue_name not in catalogues:
-        print(f"Catalogue '{catalogue_name}' not found.")
+        print(f"Catalogue '{catalogue_name}' not found.", file=sys.stderr)
         if original_name != catalogue_name:
-            print(f"Note: '{original_name}' was resolved to '{catalogue_name}'.")
+            print(f"Note: '{original_name}' was resolved to '{catalogue_name}'.", file=sys.stderr)
 
         import difflib
 
@@ -500,9 +500,9 @@ def main(args: Optional[List[str]] = None) -> int:
 
         # Check if we have catalogues to match
         if not parsed_args.catalogue_1 or not parsed_args.catalogue_2:
-            print("Error: Two catalogues are required for matching.")
-            print("Use 'xmatch --help' for usage information.")
-            print("Use 'xmatch --list-catalogues' to see available catalogues.")
+            print("Error: Two catalogues are required for matching.", file=sys.stderr)
+            print("Use 'xmatch --help' for usage information.", file=sys.stderr)
+            print("Use 'xmatch --list-catalogues' to see available catalogues.", file=sys.stderr)
             return 1
 
         # Resolve catalogue names/aliases
