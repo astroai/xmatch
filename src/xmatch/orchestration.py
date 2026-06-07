@@ -150,9 +150,11 @@ def execute_chunked_match(
         # For very small catalogs (≤ 50 rows), process each source individually
         all_results = []
 
-        for idx, row in local_df.iterrows():
-            ra = row[local_ra_col]
-            dec = row[local_dec_col]
+        local_df_arrays = {col: local_df[col].to_numpy() for col in local_df.columns}
+
+        for idx in range(len(local_df)):
+            ra = local_df_arrays[local_ra_col][idx]
+            dec = local_df_arrays[local_dec_col][idx]
 
             logger.info(f"Processing source {idx + 1}/{rows}: RA={ra}, Dec={dec}")
 
@@ -162,7 +164,7 @@ def execute_chunked_match(
             # Add any other columns from the original row
             for col in local_df.columns:
                 if col not in source_df.columns:
-                    source_df[col] = [row[col]]
+                    source_df[col] = [local_df_arrays[col][idx]]
 
             # Process this single source - now passing radius_arcsec just once
             result = _process_coordinate_chunk(
@@ -258,9 +260,11 @@ def _process_coordinate_chunk(
 
     if small_catalog_mode:
         all_results = []
-        for idx, row in local_chunk.iterrows():
-            ra = row[ra_col]
-            dec = row[dec_col]
+        local_chunk_arrays = {col: local_chunk[col].to_numpy() for col in local_chunk.columns}
+
+        for idx in range(len(local_chunk)):
+            ra = local_chunk_arrays[ra_col][idx]
+            dec = local_chunk_arrays[dec_col][idx]
             logger.info(
                 f"Querying remote catalog for point: RA={ra:.4f}, Dec={dec:.4f}, Radius={radius_arcsec} arcsec"
             )
@@ -284,7 +288,7 @@ def _process_coordinate_chunk(
             source_df = pd.DataFrame({ra_col: [ra], dec_col: [dec]})
             for col in local_chunk.columns:
                 if col not in source_df.columns:
-                    source_df[col] = [row[col]]
+                    source_df[col] = [local_chunk_arrays[col][idx]]
             remote_ra_col = remote_config.get("ra_column")
             remote_dec_col = remote_config.get("dec_column")
             match_params = {
