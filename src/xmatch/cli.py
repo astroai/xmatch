@@ -280,7 +280,7 @@ def setup_logging(args: argparse.Namespace) -> None:
     logging.getLogger("pyvo").setLevel(max(logging.INFO, log_level))
 
 
-def list_catalogues(cm: CrossMatch) -> None:
+def list_catalogues(cm: CrossMatch) -> bool:
     """Print a list of available catalogues."""
     catalogues = {}
 
@@ -288,8 +288,8 @@ def list_catalogues(cm: CrossMatch) -> None:
     if hasattr(cm, "config") and "catalogues" in cm.config:
         catalogues = cm.config["catalogues"]
     else:
-        print("No catalogues configured.")
-        return
+        print("Error: No catalogues configured.", file=sys.stderr)
+        return False
 
     # Get aliases for more helpful output
     aliases = {}
@@ -314,9 +314,10 @@ def list_catalogues(cm: CrossMatch) -> None:
         print(f"{cat_name:<16} {cat_aliases:<25} {archive:<12} {description:<40}")
 
     print("\nUse 'xmatch --describe CATALOGUE' for more details on a specific catalogue.")
+    return True
 
 
-def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> None:
+def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> bool:
     """Print detailed information about a specific catalogue."""
     # Resolve alias if needed
     original_name = catalogue_name
@@ -324,14 +325,14 @@ def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> None:
 
     # Get catalogue definition
     if not hasattr(cm, "config") or "catalogues" not in cm.config:
-        print("No catalogues configured.")
-        return
+        print("Error: No catalogues configured.", file=sys.stderr)
+        return False
 
     catalogues = cm.config["catalogues"]
     if catalogue_name not in catalogues:
-        print(f"Catalogue '{catalogue_name}' not found.")
+        print(f"Error: Catalogue '{catalogue_name}' not found.", file=sys.stderr)
         if original_name != catalogue_name:
-            print(f"Note: '{original_name}' was resolved to '{catalogue_name}'.")
+            print(f"Note: '{original_name}' was resolved to '{catalogue_name}'.", file=sys.stderr)
 
         import difflib
 
@@ -346,8 +347,8 @@ def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> None:
         )
         if suggestions:
             original_suggestions = [lower_to_original[s] for s in suggestions]
-            print(f"Did you mean: {', '.join(original_suggestions)}?")
-        return
+            print(f"Did you mean: {', '.join(original_suggestions)}?", file=sys.stderr)
+        return False
 
     cat_config = catalogues[catalogue_name]
 
@@ -405,6 +406,8 @@ def describe_catalogue(cm: CrossMatch, catalogue_name: str) -> None:
         print("\nDefault columns:")
         for col in cat_config["default_columns"]:
             print(f"  - {col}")
+
+    return True
 
 
 def prepare_crossmatch_params(args: argparse.Namespace) -> Dict[str, Any]:
@@ -491,12 +494,12 @@ def main(args: Optional[List[str]] = None) -> int:
 
         # Handle info commands
         if parsed_args.list_catalogues:
-            list_catalogues(cm)
-            return 0
+            success = list_catalogues(cm)
+            return 0 if success else 1
 
         if parsed_args.describe_catalogue:
-            describe_catalogue(cm, parsed_args.describe_catalogue)
-            return 0
+            success = describe_catalogue(cm, parsed_args.describe_catalogue)
+            return 0 if success else 1
 
         # Check if we have catalogues to match
         if not parsed_args.catalogue_1 or not parsed_args.catalogue_2:
