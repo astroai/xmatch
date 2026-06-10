@@ -236,14 +236,20 @@ def _prepare_input_table(df: pd.DataFrame, temp_dir: str, filename: str = "input
 
     try:
         object_cols = list(df.select_dtypes(include=["object", "string"]).columns)
-        if object_cols:
+        cols_to_convert = []
+        # Optimization: Only copy the DataFrame if string conversions are actually required.
+        # This prevents unnecessary shallow copies when columns are purely numeric.
+        for col in object_cols:
+            try:
+                pd.to_numeric(df[col].dropna())
+            except (ValueError, TypeError):
+                cols_to_convert.append(col)
+
+        if cols_to_convert:
             df_to_use = df.copy(deep=False)
-            for col in object_cols:
-                try:
-                    pd.to_numeric(df_to_use[col].dropna())
-                except (ValueError, TypeError):
-                    logger.debug(f"Converting object column '{col}' to string for FITS output.")
-                    df_to_use[col] = df_to_use[col].fillna("").astype(str)
+            for col in cols_to_convert:
+                logger.debug(f"Converting object column '{col}' to string for FITS output.")
+                df_to_use[col] = df_to_use[col].fillna("").astype(str)
         else:
             df_to_use = df
 
