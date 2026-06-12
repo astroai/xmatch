@@ -12,7 +12,6 @@ environments:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/astropy-base-7.2.0-py314hc02f841_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/astropy-healpix-1.1.3-py314hc02f841_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/aws-c-auth-0.10.1-h2d2dd48_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/aws-c-cal-0.9.13-h2c9d079_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/aws-c-common-0.12.6-hb03c661_0.conda
@@ -38,7 +37,6 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/bzip2-1.0.8-hda65f42_9.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/c-ares-1.34.6-hb03c661_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cffi-2.0.0-py314h4a8dc5f_1.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/cfitsio-4.6.3-ha0b56bc_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/contourpy-1.3.3-py314h97ea11e_4.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cryptography-46.0.7-py314h7fe84b3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/dbus-1.16.2-h24cb091_1.conda
@@ -48,7 +46,6 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/glog-0.7.1-hbabe93e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/h5py-3.16.0-nompi_py314hddf7a69_102.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/hdf5-2.1.0-nompi_hd4fcb43_104.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/healpy-1.19.0-py314hf011560_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/icu-78.3-h33c6efd_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/keyutils-1.6.3-hb9d3cd8_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/kiwisolver-1.5.0-py314h97ea11e_0.conda
@@ -387,7 +384,6 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/astropy-base-7.2.0-py314hdcf55e8_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/astropy-healpix-1.1.3-py314h2115a04_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/aws-c-auth-0.10.1-hcb83491_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/aws-c-cal-0.9.13-h6ee9776_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/aws-c-common-0.12.6-hc919400_0.conda
@@ -412,7 +408,6 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/brotli-python-1.2.0-py314h3daef5d_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/bzip2-1.0.8-hd037594_9.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/c-ares-1.34.6-hc919400_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/cfitsio-4.6.3-hb409788_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/contourpy-1.3.3-py314hf8a3a22_4.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/debugpy-1.8.20-py314he609de1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/freetype-2.14.3-hce30654_0.conda
@@ -420,7 +415,6 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/glog-0.7.1-heb240a5_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/h5py-3.16.0-nompi_py314h658a3ac_102.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/hdf5-2.1.0-nompi_hc95e3eb_104.conda
-      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/healpy-1.19.0-py314ha5511df_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/kiwisolver-1.5.0-py314hf8a3a22_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/krb5-1.22.2-h385eeb1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/lcms2-2.18-hdfa7624_0.conda
@@ -556,22 +550,6 @@ packages:
   - pkg:pypi/astropy?source=hash-mapping
   size: 9880758
   timestamp: 1764120697264
-- conda: https://conda.anaconda.org/conda-forge/linux-64/astropy-healpix-1.1.3-py314hc02f841_0.conda
-  sha256: 82da404b40f71718c44df9c371ad6c89679cf8dffcd8e292b6a87994f9ca1fba
-  md5: 6fa0504c911ad0eef6d3653de4d8e80b
-  depends:
-  - __glibc >=2.17,<3.0.a0
-  - astropy-base >=3
-  - libgcc >=14
-  - numpy >=1.23,<3
-  - python >=3.14,<3.15.0a0
-  - python_abi 3.14.* *_cp314
-  license: BSD-3-Clause
-  license_family: BSD
-  purls:
-  - pkg:pypi/astropy-healpix?source=hash-mapping
-  size: 117176
-  timestamp: 1768880214844
 - conda: https://conda.anaconda.org/conda-forge/linux-64/aws-c-auth-0.10.1-h2d2dd48_2.conda
   sha256: 292aa18fe6ab5351710e6416fbd683eaef3aa5b1b7396da9350ff08efc660e4f
   md5: 675ea6d90900350b1dcfa8231a5ea2dd
@@ -933,19 +911,6 @@ packages:
   - pkg:pypi/cffi?source=hash-mapping
   size: 300271
   timestamp: 1761203085220
-- conda: https://conda.anaconda.org/conda-forge/linux-64/cfitsio-4.6.3-ha0b56bc_0.conda
-  sha256: 31beae4b063f5e39ade020d3ee1ade0fdc8d5556fafac4d004ebe74ffbad44dd
-  md5: 0fb449e4da07934a40db021c84773ed0
-  depends:
-  - __glibc >=2.17,<3.0.a0
-  - bzip2 >=1.0.8,<2.0a0
-  - libcurl >=8.14.1,<9.0a0
-  - libgcc >=14
-  - libzlib >=1.3.1,<2.0a0
-  license: LicenseRef-fitsio
-  purls: []
-  size: 759758
-  timestamp: 1759288114492
 - conda: https://conda.anaconda.org/conda-forge/linux-64/contourpy-1.3.3-py314h97ea11e_4.conda
   sha256: b0314a7f1fb4a294b1a8bcf5481d4a8d9412a9fee23b7e3f93fb10e4d504f2cc
   md5: 95bede9cdb7a30a4b611223d52a01aa4
@@ -1084,29 +1049,6 @@ packages:
   purls: []
   size: 4138489
   timestamp: 1775243967708
-- conda: https://conda.anaconda.org/conda-forge/linux-64/healpy-1.19.0-py314hf011560_2.conda
-  sha256: 6a8e4fa52bf1e5efcbf1d4df08f4acd9f0e35c19d6eb6ffcf13f2551569e2b9f
-  md5: 5324570b55490fd4ad5dff22655c9615
-  depends:
-  - __glibc >=2.17,<3.0.a0
-  - astropy-base
-  - cfitsio >=4.6.3,<4.6.4.0a0
-  - libgcc >=14
-  - libgfortran
-  - libgfortran5 >=14.3.0
-  - libstdcxx >=14
-  - libzlib >=1.3.2,<2.0a0
-  - matplotlib-base
-  - numpy >=1.23,<3
-  - python >=3.14,<3.15.0a0
-  - python_abi 3.14.* *_cp314
-  - scipy
-  license: GPL-2.0-only
-  license_family: GPL
-  purls:
-  - pkg:pypi/healpy?source=hash-mapping
-  size: 2180766
-  timestamp: 1774834004372
 - conda: https://conda.anaconda.org/conda-forge/linux-64/icu-78.3-h33c6efd_0.conda
   sha256: fbf86c4a59c2ed05bbffb2ba25c7ed94f6185ec30ecb691615d42342baa1a16a
   md5: c80d8a3b84358cb967fa81e7075fbc8a
@@ -4276,22 +4218,6 @@ packages:
   - pkg:pypi/astropy?source=hash-mapping
   size: 9696751
   timestamp: 1764121149314
-- conda: https://conda.anaconda.org/conda-forge/osx-arm64/astropy-healpix-1.1.3-py314h2115a04_0.conda
-  sha256: af631ae1e655a2e37ce24058296db2afd049819e65b290a0e2b6dcce1c9e6c80
-  md5: dbf45bac8d3a0be5b8d551e5f2f882b1
-  depends:
-  - __osx >=11.0
-  - astropy-base >=3
-  - numpy >=1.23,<3
-  - python >=3.14,<3.15.0a0
-  - python >=3.14,<3.15.0a0 *_cp314
-  - python_abi 3.14.* *_cp314
-  license: BSD-3-Clause
-  license_family: BSD
-  purls:
-  - pkg:pypi/astropy-healpix?source=hash-mapping
-  size: 110547
-  timestamp: 1768880620761
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/aws-c-auth-0.10.1-hcb83491_2.conda
   sha256: aba942578ad57e7b584434ed4e39c5ff7ed4ad3f326ac3eda26913ca343ea255
   md5: 1c701edc28f543a0e040325b223d5ca0
@@ -4612,18 +4538,6 @@ packages:
   purls: []
   size: 180327
   timestamp: 1765215064054
-- conda: https://conda.anaconda.org/conda-forge/osx-arm64/cfitsio-4.6.3-hb409788_0.conda
-  sha256: 98eec929c3ecfa154418ce4b0445228edf885f98206e7d0acdf1d59a9ad30372
-  md5: f46edcf9db6bb793c34af6c18cb22ebc
-  depends:
-  - __osx >=11.0
-  - bzip2 >=1.0.8,<2.0a0
-  - libcurl >=8.14.1,<9.0a0
-  - libzlib >=1.3.1,<2.0a0
-  license: LicenseRef-fitsio
-  purls: []
-  size: 603272
-  timestamp: 1759288490003
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/contourpy-1.3.3-py314hf8a3a22_4.conda
   sha256: 754ab72f1c1ae99ef7c57995f59224dc9632cbd6731fe7e6277437fd01d43156
   md5: cddc851000ce131d757678c2f329eaad
@@ -4728,29 +4642,6 @@ packages:
   purls: []
   size: 3418702
   timestamp: 1775244340092
-- conda: https://conda.anaconda.org/conda-forge/osx-arm64/healpy-1.19.0-py314ha5511df_2.conda
-  sha256: 1dd7918817e4e43137c6f6ad55a19cf3ac579a1539905181b69fb0db6450d331
-  md5: 769dde0a149fab21c66aef36dbf30e3e
-  depends:
-  - __osx >=11.0
-  - astropy-base
-  - cfitsio >=4.6.3,<4.6.4.0a0
-  - libcxx >=19
-  - libgfortran
-  - libgfortran5 >=14.3.0
-  - libzlib >=1.3.2,<2.0a0
-  - matplotlib-base
-  - numpy >=1.23,<3
-  - python >=3.14,<3.15.0a0
-  - python >=3.14,<3.15.0a0 *_cp314
-  - python_abi 3.14.* *_cp314
-  - scipy
-  license: GPL-2.0-only
-  license_family: GPL
-  purls:
-  - pkg:pypi/healpy?source=hash-mapping
-  size: 2027268
-  timestamp: 1774834646463
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/kiwisolver-1.5.0-py314hf8a3a22_0.conda
   sha256: 840de1b0ba2fa646475bc53ba0f723c8a13e66139633a070831b8279deaa7c64
   md5: eb1465d8a644ef290d18fb86af6e9bc4
@@ -6159,21 +6050,19 @@ packages:
 - pypi: .
   name: xmatch
   requires_dist:
+  - polars>=1.0
   - pandas>=1.3
+  - pyarrow>=7.0
   - astropy>=5.0
   - pyyaml>=5.4
   - pyvo>=1.4
   - keyring>=23.0
   - astroquery>=0.4.6
-  - astropy-healpix>=0.6
-  - pyarrow>=7.0
-  - healpy>=1.16.0
+  - lsdb ; extra == 'hats'
   - keyrings-cryptfile ; extra == 'keyring-backends'
   - keyrings-osx ; extra == 'keyring-backends'
   - keyrings-alt ; extra == 'keyring-backends'
   - pytest ; extra == 'dev'
   - ruff ; extra == 'dev'
-  - black ; extra == 'dev'
   - mypy ; extra == 'dev'
-  - sphinx ; extra == 'dev'
   requires_python: '>=3.10'
