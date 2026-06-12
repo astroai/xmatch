@@ -1,1206 +1,396 @@
+"""Catalogue crossmatch orchestrator.
+
+Resolves inputs into :class:`~xmatch.sources.CatalogueSource` objects, selects a
+strategy from the input types, executes it on the appropriate backend, and
+returns the result as a polars frame (eager by default, lazy on request).
+"""
+
 import logging
 import multiprocessing
-import time  # For timing operations
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Union
 
-import pandas as pd
+import polars as pl
 import yaml
-from astropy.table import Table
 
-from . import auth
-from .astro_utils import (
-    find_coord_columns,
-    get_dataframe_extent,
-)
+from . import auth, io_utils
+from .astro_utils import coord_arrays, find_coord_columns, sky_extent
 from .exceptions import ConfigError, CrossMatchError, InputError
-from .local_match import execute_local_stilts  # Import local execution
-from .remote_cds import execute_cds_xmatch_local_remote  # Import CDS execution
-from .remote_tap import (  # Import TAP execution
-    download_from_tap,
-    execute_remote_join_match,
-    execute_upload_and_tap_match,
-)
-from .tap import TapUploadUnsupportedError, get_tap_service
+from .matchers import MatchSpec, id_join, sky_match
+from .sources import CatalogueSource
 
 logger = logging.getLogger(__name__)
 
+FrameInput = Union[str, Path, pl.DataFrame, pl.LazyFrame]
 
-# --- Constants ---
-def _find_default_config_path():
-    """Find the default configuration file, using multiple strategies."""
-    logger.debug("Searching for default configuration file...")
 
-    # Strategy 1: Try importlib.resources (best for installed packages)
+def _find_default_config_path() -> Optional[Path]:
+    candidates = [Path(__file__).parent / "xmatch.yaml", Path.cwd() / "xmatch.yaml"]
     try:
-        # Use files API if available (Python 3.9+)
         from importlib.resources import files
 
-        config_path = files("xmatch") / "xmatch.yaml"
-        if config_path.is_file():  # Check if it's a file
-            logger.debug(f"Found config via importlib.resources (files): {config_path}")
-            return config_path
-    except (
-        ImportError,
-        TypeError,
-        FileNotFoundError,
-    ):  # Catch errors if files API not available or path invalid
-        try:
-            # Fallback for older Python versions or if files API fails
-            import importlib.resources as pkg_resources
-
-            with pkg_resources.path("xmatch", "xmatch.yaml") as p:
-                if p.exists():
-                    logger.debug(f"Found config via pkg_resources.path: {p}")
-                    return p
-        except Exception as e_pkg:
-            logger.debug(f"importlib.resources approach failed: {e_pkg}")
-
-    # Strategy 2: Look relative to this script for development mode
-    try:
-        script_dir = Path(__file__).parent.resolve()
-        local_config = script_dir / "xmatch.yaml"
-        if local_config.exists():
-            logger.debug(f"Found config relative to script: {local_config}")
-            return local_config
-    except Exception as e_script:
-        logger.debug(f"Script-relative approach failed: {e_script}")
-
-    # Strategy 3: Check current working directory
-    try:
-        cwd_config = Path.cwd() / "xmatch.yaml"
-        if cwd_config.exists():
-            logger.debug(f"Found config in current working directory: {cwd_config}")
-            return cwd_config
-    except Exception as e_cwd:
-        logger.debug(f"Current directory approach failed: {e_cwd}")
-
-    # Strategy 4: Check system config locations (e.g., ~/.config/xmatch/xmatch.yaml)
-    try:
-        home_dir = Path.home()
-        config_locations = [
-            home_dir / ".config" / "xmatch" / "xmatch.yaml",
-            home_dir / ".xmatch" / "xmatch.yaml",
-        ]
-
-        for loc in config_locations:
-            if loc.exists():
-                logger.debug(f"Found config in user config directory: {loc}")
-                return loc
-    except Exception as e_user:
-        logger.debug(f"User config directory approach failed: {e_user}")
-
-    # No config found - will need to be provided explicitly
-    logger.warning("Could not find default configuration file 'xmatch.yaml'")
+        candidates.insert(0, Path(str(files("xmatch") / "xmatch.yaml")))
+    except Exception:
+        pass
+    candidates += [
+        Path.home() / ".config" / "xmatch" / "xmatch.yaml",
+        Path.home() / ".xmatch" / "xmatch.yaml",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
     return None
 
 
 DEFAULT_CONFIG_PATH = _find_default_config_path()
 
-SUPPORTED_INPUT_FORMATS = [".parquet", ".fits", ".csv"]
-
 
 class CrossMatch:
-    """Handles cross-matching of astronomical catalogues."""
+    """Configuration holder and crossmatch entry point."""
 
     def __init__(self, config_file: Optional[Union[str, Path]] = None, **kwargs):
-        """
-        Initializes the CrossMatch object with enhanced configuration loading.
-
-        Args:
-            config_file: Path to the YAML configuration file.
-                        If None, uses the default packaged config found by _find_default_config_path().
-            **kwargs: Additional configuration overrides (e.g., java_opts, chunk_size).
-        """
-        # Determine config file path
         if config_file is None:
             if DEFAULT_CONFIG_PATH is None:
-                raise ConfigError(
-                    "Default configuration file 'xmatch.yaml' could not be found. "
-                    "Ensure the package is installed correctly or provide an explicit --config path."
-                )
+                raise ConfigError("No xmatch.yaml found; pass config_file explicitly.")
             self.config_file = DEFAULT_CONFIG_PATH
-            logger.info(f"Using default configuration file: {self.config_file}")
         else:
             self.config_file = Path(config_file)
-            if not self.config_file.exists():
-                raise ConfigError(f"Specified configuration file not found: {self.config_file}")
-            logger.info(f"Using specified configuration file: {self.config_file}")
+            if not self.config_file.is_file():
+                raise ConfigError(f"Config file not found: {self.config_file}")
 
-        self.config = self._load_config()  # Loads the entire YAML
-
-        # --- Load structured configuration ---
+        self.config = self._load_config()
         self.archives_config = self.config.get("archives", {})
         self.catalogues_config = self.config.get("catalogues", {})
         self.aliases_config = self.config.get("catalogue_aliases", {})
-        self.methods_config = self.config.get("crossmatch_methods", {})
         self.stilts_config = self.config.get("stilts_config", {})
-        self.global_chunking_config = self.config.get("crossmatch", {}).get("chunking", {})
-        # --- End configuration loading ---
 
-        # Apply kwargs overrides to specific settings
-        # STILTS settings
         self.stilts_cmd_base = kwargs.get(
             "stilts_cmd_base", self.stilts_config.get("stilts_cmd_base")
         )
         self.stilts_java_opts = kwargs.get("java_opts", self.stilts_config.get("java_opts"))
         self.stilts_tmpdir = kwargs.get("tmpdir", self.stilts_config.get("tmpdir"))
-        self.global_floor_error = self.stilts_config.get(
-            "default_floor_error_arcsec", 0.01
-        )  # Global floor error
+        self.n_workers = kwargs.get("n_workers", multiprocessing.cpu_count())
 
-        # Chunking/Parallelism settings
-        self.chunk_size = kwargs.get(
-            "chunk_size", self.global_chunking_config.get("chunk_size", 100000)
-        )
-        self.n_workers = kwargs.get(
-            "n_workers", multiprocessing.cpu_count()
-        )  # Default to CPU count
-
-        self.auth_config = auth.load_auth_config()  # Load credentials securely
-
-        self._catalogue_config_cache = {}  # Cache for resolved catalogue configs
-        self._local_file_cache = {}  # Cache for loaded local files
-
+        self.auth_config = auth.load_auth_config()
         self._validate_config()
-        logger.info("CrossMatch initialized.")
-        if kwargs:
-            logger.info(f"Applied config overrides: {kwargs}")
-        if self.stilts_cmd_base:
-            logger.info(f"Using STILTS base command: '{self.stilts_cmd_base}'")
-        else:
-            logger.info("Using STILTS command constructed from Java path and STILTS_JAR.")
+        logger.info("CrossMatch initialised from %s", self.config_file)
 
+    # ------------------------------------------------------------------ config
     def _load_config(self) -> Dict[str, Any]:
-        """Loads the YAML configuration file."""
         try:
-            with open(self.config_file, "r") as f:
-                config = yaml.safe_load(f)
-                if not isinstance(config, dict):
-                    raise CrossMatchError("Configuration file is not a valid YAML dictionary.")
-                return config
-        except FileNotFoundError:
-            logger.error(f"Configuration file not found: {self.config_file}")
-            raise CrossMatchError(f"Configuration file not found: {self.config_file}")
-        except yaml.YAMLError as e:
-            logger.error(f"Error parsing configuration file {self.config_file}: {e}")
-            raise CrossMatchError(f"Error parsing configuration file {self.config_file}: {e}")
-        except IOError as e:
-            logger.error(f"IO error loading configuration file {self.config_file}: {e}")
-            raise CrossMatchError(f"IO error loading config {self.config_file}: {e}") from e
-        except Exception as e:
-            logger.error(f"Unexpected error loading config {self.config_file}: {e}", exc_info=True)
-            raise CrossMatchError(f"Unexpected error loading config {self.config_file}: {e}") from e
+            with open(self.config_file, "r") as fh:
+                config = yaml.safe_load(fh)
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"Error parsing {self.config_file}: {exc}") from exc
+        if not isinstance(config, dict):
+            raise ConfigError("Configuration file is not a YAML mapping.")
+        return config
 
-    def _validate_config(self):
-        """Validates the loaded configuration."""
+    def _validate_config(self) -> None:
         if not isinstance(self.config, dict):
-            raise ConfigError("Configuration must be a dictionary.")
-
-        required_top_level = ["archives", "catalogues"]
-        for key in required_top_level:
+            raise ConfigError("Configuration must be a mapping.")
+        for key in ("archives", "catalogues"):
             if key not in self.config:
-                raise ConfigError(f"Missing required top-level key in config: '{key}'")
+                raise ConfigError(f"Missing required top-level key: '{key}'")
             if not isinstance(self.config[key], dict):
-                raise ConfigError(f"Top-level key '{key}' must be a dictionary.")
+                raise ConfigError(f"Top-level key '{key}' must be a mapping.")
 
-        # Validate Archives Structure
-        for archive_name, archive_config in self.archives_config.items():
-            if not isinstance(archive_config, dict):
-                raise ConfigError(f"Archive '{archive_name}' config must be a dictionary.")
-            # Check for at least one service definition
-            has_service = any(k.endswith("_service") for k in archive_config)
-            if not has_service and not archive_config.get(
-                "description"
-            ):  # Allow description-only entries?
-                logger.warning(
-                    f"Archive '{archive_name}' has no defined services (e.g., tap_service)."
-                )
-            # Validate individual services
-            for service_id, service_config in archive_config.items():
-                if isinstance(service_config, dict) and not service_id.startswith(
-                    ("_", "description", "service_priority", "has_", "crossmatch_")
-                ):
-                    if "access_method" not in service_config:
-                        logger.warning(
-                            f"Service '{service_id}' in archive '{archive_name}' is missing 'access_method'."
-                        )
-                    # Add more checks? e.g., access_url for TAP?
-
-        # Validate Catalogues Structure
-        for cat_name, cat_config in self.catalogues_config.items():
-            if not isinstance(cat_config, dict):
-                raise ConfigError(f"Catalogue '{cat_name}' config must be a dictionary.")
-            # Required keys for any catalogue
-            required_cat_keys = [
+        for name, cat in self.catalogues_config.items():
+            if not isinstance(cat, dict):
+                raise ConfigError(f"Catalogue '{name}' must be a mapping.")
+            for required in (
                 "archive",
                 "service_id",
                 "access_identifier",
                 "ra_column",
                 "dec_column",
-            ]
-            missing_keys = [key for key in required_cat_keys if key not in cat_config]
-            if missing_keys:
-                raise ConfigError(
-                    f"Catalogue '{cat_name}' is missing required keys: {missing_keys}."
-                )
-
-            # Check if archive and service_id exist and are valid
-            archive_name = cat_config["archive"]
-            service_id = cat_config["service_id"]
-            if archive_name not in self.archives_config:
-                raise ConfigError(
-                    f"Archive '{archive_name}' (for catalogue '{cat_name}') not found in 'archives'."
-                )
-            if service_id not in self.archives_config[archive_name]:
-                raise ConfigError(
-                    f"Service '{service_id}' (for catalogue '{cat_name}') not found in archive '{archive_name}'."
-                )
-            if not isinstance(self.archives_config[archive_name][service_id], dict):
-                raise ConfigError(
-                    f"Service '{service_id}' in archive '{archive_name}' must be a dictionary."
-                )
-            # Check if coordinate columns are strings
-            if not isinstance(cat_config["ra_column"], str) or not isinstance(
-                cat_config["dec_column"], str
             ):
+                if required not in cat:
+                    raise ConfigError(f"Catalogue '{name}' is missing '{required}'.")
+            if cat["archive"] not in self.archives_config:
                 raise ConfigError(
-                    f"RA/Dec column names for catalogue '{cat_name}' must be strings."
+                    f"Catalogue '{name}' references unknown archive '{cat['archive']}'."
                 )
-            # Check default columns if present
-            if "default_columns" in cat_config and not isinstance(
-                cat_config["default_columns"], list
-            ):
-                raise ConfigError(f"'default_columns' for catalogue '{cat_name}' must be a list.")
-
-        # Validate Aliases
-        for alias, target_cat in self.aliases_config.items():
-            if not isinstance(alias, str) or not isinstance(target_cat, str):
+            if cat["service_id"] not in self.archives_config[cat["archive"]]:
                 raise ConfigError(
-                    f"Catalogue alias '{alias}' and target '{target_cat}' must be strings."
-                )
-            if target_cat not in self.catalogues_config:
-                raise ConfigError(
-                    f"Catalogue alias '{alias}' points to non-existent catalogue '{target_cat}'."
+                    f"Catalogue '{name}' references unknown service '{cat['service_id']}'."
                 )
 
-        logger.debug("Configuration validation successful.")
+        for alias, target in self.aliases_config.items():
+            if target not in self.catalogues_config:
+                raise ConfigError(f"Alias '{alias}' points to unknown catalogue '{target}'.")
 
-    def get_catalogue_config(self, catalogue_name: str) -> Dict[str, Any]:
-        """Retrieves the fully resolved configuration for a specific catalogue.
+    def get_catalogue_config(self, name: str) -> Dict[str, Any]:
+        name = name.lower()
+        if name not in self.catalogues_config:
+            raise CrossMatchError(f"Catalogue '{name}' not found in configuration.")
+        cat = self.catalogues_config[name]
+        archive = cat.get("archive")
+        service_id = cat.get("service_id")
+        if not archive or not service_id:
+            raise CrossMatchError(f"Catalogue '{name}' is missing 'archive' or 'service_id'.")
+        if archive not in self.archives_config:
+            raise CrossMatchError(f"Archive '{archive}' (for '{name}') not found.")
+        service = self.archives_config[archive].get(service_id)
+        if not isinstance(service, dict):
+            raise CrossMatchError(f"Service '{service_id}' (for '{name}') not found.")
+        resolved = dict(service)
+        resolved.update(cat)
+        resolved["_catalogue_name"] = name
+        resolved["_archive_name"] = archive
+        return resolved
 
-        Merges the catalogue-specific settings with the settings from its
-        designated archive service.
+    def resolve_name(self, name: str) -> str:
+        return self.aliases_config.get(name.lower(), name.lower())
 
-        Args:
-            catalogue_name: The name of the catalogue (lowercase).
+    # ----------------------------------------------------------------- sources
+    def resolve_source(self, value: FrameInput, overrides: Dict[str, Any]) -> CatalogueSource:
+        """Build a CatalogueSource from a path/name/frame plus per-side overrides."""
+        if isinstance(value, (pl.DataFrame, pl.LazyFrame)):
+            lf = value.lazy() if isinstance(value, pl.DataFrame) else value
+            return self._local_source("frame", lf=lf, overrides=overrides)
 
-        Returns:
-            A dictionary containing the merged configuration.
+        # pandas frame support without importing pandas eagerly.
+        if value.__class__.__module__.startswith("pandas"):
+            return self._local_source("frame", lf=pl.from_pandas(value).lazy(), overrides=overrides)
 
-        Raises:
-            ConfigError: If the catalogue, its archive, or its service is not found
-                       or improperly configured.
-        """
-        catalogue_name = catalogue_name.lower()
-        logger.debug(f"Resolving configuration for catalogue: {catalogue_name}")
+        text = str(value)
+        resolved = self.resolve_name(text)
+        if resolved in self.catalogues_config:
+            return self._remote_source(self.get_catalogue_config(resolved), overrides)
 
-        if "catalogues" not in self.config or catalogue_name not in self.config["catalogues"]:
-            logger.error(f"Catalogue '{catalogue_name}' not found in configuration.")
-            raise CrossMatchError(f"Catalogue '{catalogue_name}' not found in configuration.")
+        path = Path(text)
+        if io_utils.is_hats_dir(path):
+            return self._hats_source(path, overrides)
+        if path.is_file():
+            return self._local_source(path.stem, path=path, overrides=overrides)
 
-        cat_config = self.config["catalogues"][catalogue_name]
+        import difflib
 
-        archive_name = cat_config.get("archive")
-        service_id = cat_config.get("service_id")
+        names = list(self.catalogues_config) + list(self.aliases_config)
+        suggestion = difflib.get_close_matches(text.lower(), names, n=3, cutoff=0.5)
+        hint = f" Did you mean: {', '.join(suggestion)}?" if suggestion else ""
+        raise InputError(f"'{text}' is not a file, HATS dir, or known catalogue.{hint}")
 
-        if not archive_name or not service_id:
-            raise CrossMatchError(
-                f"Catalogue '{catalogue_name}' is missing 'archive' or 'service_id'."
-            )
+    def _resolve_coords(self, columns, overrides):
+        ra = overrides.get("ra_column") or find_coord_columns(columns)[0]
+        dec = overrides.get("dec_column") or find_coord_columns(columns)[1]
+        return ra, dec
 
-        if "archives" not in self.config or archive_name not in self.config["archives"]:
-            logger.error(f"Archive '{archive_name}' (for catalogue '{catalogue_name}') not found.")
-            raise CrossMatchError(
-                f"Archive '{archive_name}' (for catalogue '{catalogue_name}') not found."
-            )
-
-        archive_config = self.config["archives"][archive_name]
-
-        if service_id not in archive_config or not isinstance(archive_config[service_id], dict):
-            logger.error(
-                f"Service '{service_id}' not found or invalid in archive '{archive_name}' (for catalogue '{catalogue_name}')."
-            )
-            raise CrossMatchError(
-                f"Service '{service_id}' not found or invalid in archive '{archive_name}' (for catalogue '{catalogue_name}')."
-            )
-
-        service_config = archive_config[service_id]
-
-        # Merge configurations: Start with service config, override with catalogue config
-        # This ensures catalogue specifics take precedence over service defaults.
-        resolved_config = service_config.copy()
-        resolved_config.update(cat_config)  # Catalogue settings override service settings
-
-        # Inject names for reference
-        resolved_config["_catalogue_name"] = catalogue_name
-        resolved_config["_archive_name"] = archive_name
-        # Keep service_id for potential use
-        resolved_config["_service_id"] = service_id
-
-        # Add archive-level description if catalogue lacks one?
-        if "description" not in resolved_config and "description" in archive_config:
-            resolved_config["description"] = (
-                archive_config["description"] + f" ({resolved_config.get('access_identifier', '')})"
-            )
-
-        logger.debug(f"Resolved config for {catalogue_name}: {resolved_config}")
-        return resolved_config
-
-    def _resolve_input_config(
-        self, catalogue_input: Union[str, pd.DataFrame], params: Dict[str, Any], prefix: str
-    ) -> Dict[str, Any]:
-        """
-        Resolves the configuration for a given input (local file/DataFrame or remote catalogue name).
-
-        Args:
-            catalogue_input: The input identifier (path, name, or DataFrame).
-            params: Dictionary of crossmatch parameters containing potential overrides.
-            prefix: Identifier prefix ('1' or '2') for parameter keys.
-
-        Returns:
-            A dictionary containing the resolved configuration for the input.
-
-        Raises:
-            InputError: If the input cannot be resolved or is invalid.
-            ConfigError: If a remote catalogue configuration is invalid.
-        """
-        logger.debug(f"Resolving config for input (prefix {prefix}): {type(catalogue_input)}")
-        config = {}
-
-        # Parameter keys for overrides
-        ra_col_key = f"ra_column_{prefix}"
-        dec_col_key = f"dec_column_{prefix}"
-        epoch_col_key = f"epoch_column_{prefix}"
-        pm_ra_col_key = f"pm_ra_column_{prefix}"
-        pm_dec_col_key = f"pm_dec_column_{prefix}"
-        floor_err_key = f"floor_error_arcsec_{prefix}"
-
-        if isinstance(catalogue_input, pd.DataFrame):
-            logger.info(f"Input {prefix} is a DataFrame.")
-            config["is_local"] = True
-            config["_input_dataframe"] = catalogue_input
-            config["_input_type"] = "dataframe"
-            # Try to auto-detect coordinate columns if not provided
-            ra_col, dec_col = find_coord_columns(catalogue_input)
-            config["ra_column"] = params.get(ra_col_key, ra_col)
-            config["dec_column"] = params.get(dec_col_key, dec_col)
-            # Add other relevant local config defaults or inferred values
-            config["access_identifier"] = f"local_dataframe_{prefix}"
-            config["_catalogue_name"] = f"local_dataframe_{prefix}"  # Internal name
-
-        elif isinstance(catalogue_input, (str, Path)):
-            input_path_str = str(catalogue_input)
-            input_path = Path(input_path_str)
-            logger.debug(f"Input {prefix} is a string/path: '{input_path_str}'")
-
-            # Check if it's a known catalogue name/alias first
-            resolved_name = self.aliases_config.get(input_path_str.lower(), input_path_str.lower())
-            if resolved_name in self.catalogues_config:
-                logger.info(
-                    f"Input {prefix} ('{input_path_str}') resolved as remote catalogue: {resolved_name}"
-                )
-                config = self.get_catalogue_config(resolved_name)  # Fetch remote config
-                config["is_local"] = False
-                config["_input_type"] = "remote_catalogue"
-            # Check if it's a file path
-            elif input_path.exists() and input_path.is_file():
-                logger.info(f"Input {prefix} ('{input_path_str}') resolved as local file.")
-                config["is_local"] = True
-                config["_input_path"] = input_path
-                config["_input_type"] = "local_file"
-                # Determine format
-                suffix = input_path.suffix.lower()
-                if suffix not in SUPPORTED_INPUT_FORMATS:
-                    raise InputError(
-                        f"Unsupported file format for input {prefix}: '{suffix}'. Supported: {SUPPORTED_INPUT_FORMATS}"
-                    )
-                config["format"] = suffix.lstrip(".")  # e.g., 'csv', 'parquet', 'fits'
-
-                # Load a small sample or header to detect columns? Or require params?
-                # For now, require RA/Dec params for local files unless we add auto-detection
-                if not params.get(ra_col_key) or not params.get(dec_col_key):
-                    # Try loading and detecting if not provided
-                    try:
-                        temp_df = self._load_local_catalogue(
-                            input_path, nrows=5
-                        )  # Load small sample
-                        ra_col, dec_col = find_coord_columns(temp_df)
-                        config["ra_column"] = params.get(ra_col_key, ra_col)
-                        config["dec_column"] = params.get(dec_col_key, dec_col)
-                        logger.info(
-                            f"Auto-detected columns for local file {prefix}: RA='{config['ra_column']}', Dec='{config['dec_column']}'"
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"Could not auto-detect columns for local file {prefix}: {e}. Please provide --ra_column_{prefix} and --dec_column_{prefix}."
-                        )
-                        # Raise error if still missing after attempt
-                        if not params.get(ra_col_key) or not params.get(dec_col_key):
-                            raise InputError(
-                                f"RA/Dec columns must be provided for local file input {prefix} (e.g., --{ra_col_key}, --{dec_col_key})"
-                            )
-
-                config["ra_column"] = params.get(
-                    ra_col_key, config.get("ra_column")
-                )  # Apply override if exists
-                config["dec_column"] = params.get(
-                    dec_col_key, config.get("dec_column")
-                )  # Apply override if exists
-                config["access_identifier"] = str(input_path.resolve())
-                config["_catalogue_name"] = input_path.stem  # Use filename stem as name
-
-            else:
-                error_msg = f"Input '{input_path_str}' for catalogue {prefix} is not a valid file path, DataFrame, or known catalogue name."
-
-                # Add suggestion for closely matching catalogue names
-                import difflib
-
-                available_names = list(self.catalogues_config.keys())
-                available_names.extend(self.aliases_config.keys())
-
-                # Perform case-insensitive matching
-                lower_to_original = {name.lower(): name for name in available_names}
-                suggestions = difflib.get_close_matches(
-                    input_path_str.lower(), list(lower_to_original.keys()), n=3, cutoff=0.5
-                )
-                if suggestions:
-                    original_suggestions = [lower_to_original[s] for s in suggestions]
-                    # Filter unique names because some aliases might point to the same name or be the same name
-                    original_suggestions = list(dict.fromkeys(original_suggestions))
-                    error_msg += f" Did you mean: {', '.join(original_suggestions)}?"
-
-                raise InputError(error_msg)
-        else:
+    def _local_source(self, name, *, path=None, lf=None, overrides) -> CatalogueSource:
+        src = CatalogueSource(name=name, is_local=True, path=path)
+        if lf is not None:
+            src = src.with_frame(lf)
+            src.name = name
+        columns = src.columns()
+        src.ra_column, src.dec_column = self._resolve_coords(columns, overrides)
+        src.id_column = overrides.get("id_column")
+        if not src.ra_column or not src.dec_column:
             raise InputError(
-                f"Unsupported input type for catalogue {prefix}: {type(catalogue_input)}. Must be str, Path, or DataFrame."
+                f"Could not determine RA/Dec columns for '{name}'. "
+                f"Provide them explicitly (e.g. --ra1/--dec1)."
             )
+        return src
 
-        # Apply common parameter overrides AFTER initial config setup
-        config["ra_column"] = params.get(ra_col_key, config.get("ra_column"))
-        config["dec_column"] = params.get(dec_col_key, config.get("dec_column"))
-        config["epoch_column"] = params.get(epoch_col_key, config.get("epoch_column"))  # Optional
-        config["pm_ra_column"] = params.get(pm_ra_col_key, config.get("pm_ra_column"))  # Optional
-        config["pm_dec_column"] = params.get(
-            pm_dec_col_key, config.get("pm_dec_column")
-        )  # Optional
-        config["floor_error_arcsec"] = params.get(
-            floor_err_key, config.get("floor_error_arcsec", self.global_floor_error)
-        )  # Use specific, then catalogue default, then global default
-
-        # Validate essential columns are present in the final config
-        if not config.get("ra_column") or not config.get("dec_column"):
-            raise ConfigError(
-                f"Could not determine RA/Dec columns for input {prefix}. Provide --{ra_col_key} and --{dec_col_key}."
-            )
-
-        logger.debug(f"Resolved config for input {prefix}: {config}")
-        return config
-
-    def _load_local_catalogue(self, file_path: Path, nrows: Optional[int] = None) -> pd.DataFrame:
-        """Loads a local catalogue file into a pandas DataFrame."""
-        file_path_str = str(file_path)
-        logger.info(
-            f"Loading local catalogue: {file_path_str}"
-            + (f" (reading first {nrows} rows)" if nrows else "")
+    def _remote_source(self, cfg: Dict[str, Any], overrides) -> CatalogueSource:
+        return CatalogueSource(
+            name=cfg["_catalogue_name"],
+            is_local=False,
+            ra_column=overrides.get("ra_column") or cfg.get("ra_column"),
+            dec_column=overrides.get("dec_column") or cfg.get("dec_column"),
+            id_column=overrides.get("id_column") or cfg.get("id_column"),
+            ra_err_column=cfg.get("ra_err_column"),
+            dec_err_column=cfg.get("dec_err_column"),
+            corr_column=cfg.get("corr_column"),
+            pos_err_units=cfg.get("pos_err_units", "arcsec"),
+            default_pos_error_arcsec=cfg.get("default_pos_error_arcsec"),
+            epoch=cfg.get("epoch"),
+            epoch_column=cfg.get("epoch_column"),
+            pm_ra_column=cfg.get("pm_ra_column"),
+            pm_dec_column=cfg.get("pm_dec_column"),
+            access_method=cfg.get("access_method"),
+            archive=cfg.get("_archive_name"),
+            access_identifier=cfg.get("access_identifier") or cfg.get("table_name"),
+            tap_url=cfg.get("access_url") or cfg.get("tap_url"),
+            default_columns=cfg.get("default_columns"),
         )
 
-        # Check cache first
-        cache_key = (file_path_str, nrows)
-        if cache_key in self._local_file_cache:
-            logger.debug(f"Returning cached DataFrame for {file_path_str} (nrows={nrows})")
-            return self._local_file_cache[cache_key]
-
-        suffix = file_path.suffix.lower()
-        try:
-            if suffix == ".csv":
-                df = pd.read_csv(file_path, nrows=nrows)
-            elif suffix == ".parquet":
-                # pandas read_parquet doesn't directly support nrows, read full then slice
-                if nrows:
-                    # This might be inefficient for large files if only header needed
-                    # Consider pyarrow for more efficient partial reads if needed
-                    df_full = pd.read_parquet(file_path)
-                    df = df_full.head(nrows)
-                else:
-                    df = pd.read_parquet(file_path)
-            elif suffix == ".fits":
-                # Astropy Table read, then convert
-                # FITS can have multiple HDUs, assume first table HDU
-                try:
-                    table = Table.read(file_path, hdu=1)  # Try HDU 1 first (common for tables)
-                except Exception:
-                    try:
-                        logger.debug("Failed to read HDU 1, trying HDU 0...")
-                        table = Table.read(file_path, hdu=0)  # Try HDU 0 as fallback
-                    except Exception as fits_err:
-                        raise InputError(
-                            f"Could not find a readable table HDU in FITS file {file_path}: {fits_err}"
-                        )
-
-                if nrows:
-                    df = table[:nrows].to_pandas()
-                else:
-                    df = table.to_pandas()
-            else:
-                # Should have been caught by _resolve_input_config, but double-check
-                raise InputError(f"Unsupported file format: {suffix}")
-
-            logger.info(f"Successfully loaded {len(df)} rows from {file_path_str}")
-            # Cache the result only if the full file was read (nrows is None)
-            if nrows is None:
-                self._local_file_cache[cache_key] = df
-            return df
-        except FileNotFoundError:
-            logger.error(f"Local file not found: {file_path_str}")
-            raise InputError(f"Local file not found: {file_path_str}")
-        except Exception as e:
-            logger.error(f"Failed to load local file {file_path_str}: {e}", exc_info=True)
-            raise InputError(f"Failed to load local file {file_path_str}: {e}")
-
-    def _determine_crossmatch_strategy(
-        self, config1: Dict[str, Any], config2: Dict[str, Any], **params
-    ) -> Tuple[str, Dict[str, Any]]:
-        """
-        Determines the optimal crossmatch strategy based on input types and configurations.
-
-        Args:
-            config1: Resolved configuration for the first catalogue.
-            config2: Resolved configuration for the second catalogue.
-            **params: Additional crossmatch parameters.
-
-        Returns:
-            A tuple containing:
-                - The name of the selected strategy (str).
-                - A dictionary of parameters potentially modified or added by the strategy logic (dict).
-        """
-        logger.info("Determining crossmatch strategy...")
-        strategy_params = params.copy()  # Start with incoming params
-        strategy_name = "unknown"  # Default
-
-        is_local1 = config1.get("is_local", False)
-        is_local2 = config2.get("is_local", False)
-        access_method1 = config1.get("access_method")
-        access_method2 = config2.get("access_method")
-        archive1 = config1.get("_archive_name")
-        archive2 = config2.get("_archive_name")
-        service1 = config1.get("_service_id")
-        service2 = config2.get("_service_id")
-
-        logger.debug(
-            f"Input 1: local={is_local1}, access={access_method1}, archive={archive1}, service={service1}"
-        )
-        logger.debug(
-            f"Input 2: local={is_local2}, access={access_method2}, archive={archive2}, service={service2}"
+    def _hats_source(self, path: Path, overrides) -> CatalogueSource:
+        return CatalogueSource(
+            name=path.name,
+            is_local=False,
+            access_method="hats",
+            access_identifier=str(path),
+            path=path,
+            ra_column=overrides.get("ra_column"),
+            dec_column=overrides.get("dec_column"),
+            id_column=overrides.get("id_column"),
         )
 
-        # --- Strategy Logic ---
-
-        # 1. Both Local: Always use local STILTS
-        if is_local1 and is_local2:
-            strategy_name = "local_stilts"
-            logger.info("Strategy: Both inputs are local -> local_stilts")
-
-        # 2. One Local, One Remote
-        elif is_local1 != is_local2:  # XOR condition
-            local_config = config1 if is_local1 else config2
-            remote_config = config2 if is_local1 else config1
-            local_prefix = "1" if is_local1 else "2"
-            remote_prefix = "2" if is_local1 else "1"
-            remote_access = remote_config.get("access_method")
-            remote_archive = remote_config.get("_archive_name")
-            remote_config.get("_service_id")
-            remote_cat_name = remote_config.get("_catalogue_name")
-
-            logger.info(
-                f"Strategy: One local ({local_prefix}), one remote ({remote_prefix}, {remote_cat_name}, method={remote_access})"
-            )
-
-            # 2a. Remote is CDS XMatch Service
-            if remote_access == "cds_xmatch":
-                # Check if CDS supports remote table name directly
-                if remote_config.get("access_identifier"):  # e.g., "vizier:I/355/gaiadr3"
-                    strategy_name = "cds_xmatch_local_remote"
-                    logger.info("Strategy: Local vs CDS XMatch -> cds_xmatch_local_remote")
-                else:
-                    logger.warning(
-                        "CDS XMatch selected, but remote catalogue 'access_identifier' missing. Falling back."
-                    )
-                    # Fallback: Download remote via TAP (if possible) and match locally
-                    if remote_config.get("tap_url"):  # Check if TAP info is available as fallback
-                        remote_config["access_method"] = "tap"  # Temporarily override for download
-                        logger.warning("Falling back to download_and_match (using TAP).")
-                        strategy_name = "download_and_match"
-                        strategy_params["_catalogue_to_download"] = remote_prefix
-                        # Calculate extent of local file for download region
-                        extent = self._get_local_file_extent(local_config, params, local_prefix)
-                        if extent:
-                            strategy_params.update(extent)  # Add ra, dec, radius_deg
-                        else:
-                            logger.warning(
-                                "Could not determine local file extent for download. Download may be very large or fail."
-                            )
-                    else:
-                        raise ConfigError(
-                            f"Cannot execute CDS XMatch for {remote_cat_name} (missing identifier) and no TAP fallback available."
-                        )
-
-            # 2b. Remote is TAP Service
-            elif remote_access == "tap":
-                tap_service_url = remote_config.get("tap_url")
-                # Need auth session for the *remote* archive
-                remote_auth = self.auth_config.get_auth_session(remote_archive)
-                tap_service = get_tap_service(tap_service_url, auth_session=remote_auth)
-
-                # Check TAP capabilities (UPLOAD capability)
-                can_upload = False
-                try:
-                    # Check for UPLOAD table - this is the standard way
-                    upload_tables = [t for t in tap_service.tables if t.type == "UPLOAD"]
-                    if upload_tables:
-                        can_upload = True
-                        logger.info(f"Remote TAP service ({remote_cat_name}) supports UPLOAD.")
-                    else:
-                        # Some services might advertise upload capability differently
-                        # Check capabilities endpoint (less reliable parsing needed)
-                        # For now, rely on UPLOAD table presence
-                        logger.info(
-                            f"Remote TAP service ({remote_cat_name}) does not explicitly list UPLOAD tables."
-                        )
-                        # Heuristic: Check if it's a known service that supports uploads (e.g., CADC, GAIA)
-                        known_upload_services = ["gaia_archive", "cadc"]  # Example
-                        if remote_archive in known_upload_services:
-                            logger.warning(
-                                f"Assuming TAP service {remote_archive} supports uploads based on known services list."
-                            )
-                            can_upload = True  # Tentatively assume yes
-
-                except Exception as e:
-                    logger.warning(
-                        f"Could not reliably determine TAP upload capability for {remote_cat_name}: {e}. Assuming no upload support."
-                    )
-                    can_upload = False
-
-                if can_upload:
-                    strategy_name = "upload_and_tap_match"
-                    logger.info("Strategy: Local vs TAP (Upload supported) -> upload_and_tap_match")
-                else:
-                    # Fallback: Download remote and match locally
-                    strategy_name = "download_and_match"
-                    strategy_params["_catalogue_to_download"] = remote_prefix
-                    logger.info("Strategy: Local vs TAP (No Upload) -> download_and_match")
-                    # Calculate extent of local file for download region
-                    extent = self._get_local_file_extent(local_config, params, local_prefix)
-                    if extent:
-                        strategy_params.update(extent)  # Add ra, dec, radius_deg
-                    else:
-                        logger.warning(
-                            "Could not determine local file extent for download. Download may be very large or fail."
-                        )
-
-            # 2c. Other Remote Access Methods (Add more as needed)
-            else:
-                logger.warning(
-                    f"Remote access method '{remote_access}' for {remote_cat_name} not directly supported for local/remote match. Falling back."
-                )
-                # Fallback: Try download and match if TAP info exists
-                if remote_config.get("tap_url"):
-                    remote_config["access_method"] = "tap"  # Temporarily override for download
-                    logger.warning("Falling back to download_and_match (using TAP).")
-                    strategy_name = "download_and_match"
-                    strategy_params["_catalogue_to_download"] = remote_prefix
-                    extent = self._get_local_file_extent(local_config, params, local_prefix)
-                    if extent:
-                        strategy_params.update(extent)
-                    else:
-                        logger.warning("Could not determine local file extent for download.")
-                else:
-                    raise CrossMatchError(
-                        f"Unsupported remote access method '{remote_access}' for catalogue {remote_cat_name} and no TAP fallback."
-                    )
-
-        # 3. Both Remote
-        elif not is_local1 and not is_local2:
-            logger.info("Strategy: Both inputs are remote.")
-            # 3a. Both are CDS XMatch Service (unlikely to be efficient?)
-            if access_method1 == "cds_xmatch" and access_method2 == "cds_xmatch":
-                # CDS XMatch service typically matches an uploaded table against ONE remote catalogue.
-                # Matching two remote CDS catalogues directly via the service isn't standard.
-                logger.warning("Strategy: Both remote CDS XMatch. This is unusual. Falling back.")
-                # Fallback: Download one (or both?) and match locally? Or use TAP?
-                # Simplest fallback: Download both via TAP (if possible) and match locally.
-                if config1.get("tap_url") and config2.get("tap_url"):
-                    config1["access_method"] = "tap"
-                    config2["access_method"] = "tap"
-                    logger.warning("Falling back to download_and_match (using TAP for both).")
-                    strategy_name = "download_and_match"
-                    strategy_params["_catalogue_to_download"] = "both"
-                    # Need a region for download - use user params or default?
-                    if not ("ra" in params and "dec" in params and "radius_deg" in params):
-                        logger.warning(
-                            "No region specified for remote-remote download. Downloads might be very large or fail."
-                        )
-                        # Could potentially try to get full sky if service allows? Risky.
-                else:
-                    raise CrossMatchError(
-                        "Cannot match two remote CDS catalogues directly, and no TAP fallback available for download."
-                    )
-
-            # 3b. Both are TAP Services
-            elif access_method1 == "tap" and access_method2 == "tap":
-                # Check if they are on the SAME TAP service
-                if config1.get("tap_url") == config2.get("tap_url"):
-                    strategy_name = "remote_join"
-                    logger.info("Strategy: Both remote TAP, same service -> remote_join")
-                else:
-                    # Different TAP services - need to download at least one
-                    logger.info("Strategy: Both remote TAP, different services.")
-                    # Heuristic: Download the smaller catalogue? Or the one less common?
-                    # Simple approach: Download catalogue 2, match locally with catalogue 1 (downloaded on demand)
-                    # This becomes download_and_match, downloading #2 first.
-                    strategy_name = "download_and_match"
-                    strategy_params["_catalogue_to_download"] = (
-                        "both"  # Need to download both eventually
-                    )
-                    logger.info("Falling back to download_and_match (downloading both).")
-                    if not ("ra" in params and "dec" in params and "radius_deg" in params):
-                        logger.warning(
-                            "No region specified for remote-remote download. Downloads might be very large or fail."
-                        )
-
-            # 3c. Mixed Remote (TAP vs CDS)
-            elif access_method1 == "tap" and access_method2 == "cds_xmatch":
-                logger.warning("Strategy: Remote TAP vs Remote CDS. Falling back.")
-                # Fallback: Download both (via TAP if possible) and match locally
-                if config1.get("tap_url") and config2.get("tap_url"):
-                    config1["access_method"] = "tap"
-                    config2["access_method"] = "tap"
-                    logger.warning("Falling back to download_and_match (using TAP for both).")
-                    strategy_name = "download_and_match"
-                    strategy_params["_catalogue_to_download"] = "both"
-                    if not ("ra" in params and "dec" in params and "radius_deg" in params):
-                        logger.warning("No region specified for remote-remote download.")
-                else:
-                    raise CrossMatchError(
-                        "Cannot match remote TAP vs CDS, and no TAP fallback available for download."
-                    )
-
-            elif access_method1 == "cds_xmatch" and access_method2 == "tap":
-                # Symmetric to above
-                logger.warning("Strategy: Remote CDS vs Remote TAP. Falling back.")
-                if config1.get("tap_url") and config2.get("tap_url"):
-                    config1["access_method"] = "tap"
-                    config2["access_method"] = "tap"
-                    logger.warning("Falling back to download_and_match (using TAP for both).")
-                    strategy_name = "download_and_match"
-                    strategy_params["_catalogue_to_download"] = "both"
-                    if not ("ra" in params and "dec" in params and "radius_deg" in params):
-                        logger.warning("No region specified for remote-remote download.")
-                else:
-                    raise CrossMatchError(
-                        "Cannot match remote CDS vs TAP, and no TAP fallback available for download."
-                    )
-
-            # 3d. Other Remote Combinations
-            else:
-                raise CrossMatchError(
-                    f"Unsupported combination of remote access methods: {access_method1} and {access_method2}"
-                )
-
-        # --- Final Check ---
-        if strategy_name == "unknown":
-            # Default fallback if no specific strategy matched (should ideally not happen)
-            logger.warning(
-                "Could not determine a specific strategy. Defaulting to 'download_and_match'."
-            )
-            strategy_name = "download_and_match"
-            # Determine which needs download based on original types
-            if is_local1 and not is_local2:
-                strategy_params["_catalogue_to_download"] = "2"
-            elif not is_local1 and is_local2:
-                strategy_params["_catalogue_to_download"] = "1"
-            else:
-                strategy_params["_catalogue_to_download"] = (
-                    "both"  # Both remote or both local (though local/local handled above)
-                )
-            # Add extent calculation if one is local
-            if is_local1 != is_local2:
-                local_c = config1 if is_local1 else config2
-                local_pfx = "1" if is_local1 else "2"
-                extent = self._get_local_file_extent(local_c, params, local_pfx)
-                if extent:
-                    strategy_params.update(extent)
-
-        logger.info(f"Selected strategy: {strategy_name}")
-        logger.debug(f"Final strategy parameters: {strategy_params}")
-        return strategy_name, strategy_params
-
+    # --------------------------------------------------------------- execution
     def crossmatch(
         self,
-        catalogue_1_input: Union[str, pd.DataFrame],
-        catalogue_2_input: Union[str, pd.DataFrame],
+        catalogue_1_input: FrameInput,
+        catalogue_2_input: FrameInput,
         output_file: Optional[Union[str, Path]] = None,
+        *,
+        lazy: bool = False,
         **params,
-    ) -> Optional[pd.DataFrame]:
-        """
-        Performs the crossmatch operation between two catalogues.
+    ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
+        ov1 = _side_overrides(params, "1")
+        ov2 = _side_overrides(params, "2")
+        src1 = self.resolve_source(catalogue_1_input, ov1)
+        src2 = self.resolve_source(catalogue_2_input, ov2)
 
-        Args:
-            catalogue_1_input: Path/name of the first catalogue or DataFrame.
-            catalogue_2_input: Path/name of the second catalogue or DataFrame.
-            output_file: Path to save the output results. If None, returns DataFrame.
-            **params: Additional crossmatch parameters (radius, columns, join_type, etc.).
+        spec = MatchSpec(
+            radius_arcsec=float(params.get("radius_arcsec", 1.0)),
+            matcher=params.get("matcher") or "sky",
+            max_error=float(params.get("max_error", 3.0)),
+            join_type=params.get("join_type", "1and2"),
+            find=params.get("find", "best"),
+        )
+        result_lf = self._dispatch(src1, src2, spec, params)
 
-        Returns:
-            Optional[pd.DataFrame]: The crossmatch result as a DataFrame if output_file is None.
-                                    Returns None if output_file is specified.
-
-        Raises:
-            CrossMatchError: If the crossmatch fails for any reason.
-        """
-        start_time = time.time()
-        logger.info("Starting crossmatch process...")
-
-        # --- 1. Resolve Configurations ---
-        try:
-            config1 = self._resolve_input_config(catalogue_1_input, params, prefix="1")
-            config2 = self._resolve_input_config(catalogue_2_input, params, prefix="2")
-            logger.debug(f"Config 1 resolved: {config1}")
-            logger.debug(f"Config 2 resolved: {config2}")
-        except Exception as e:
-            logger.error(f"Failed to resolve input configurations: {e}", exc_info=True)
-            raise CrossMatchError(f"Configuration error: {e}") from e
-
-        # --- 2. Determine Strategy ---
-        try:
-            strategy_params = params.copy()  # Pass relevant params down
-            strategy_name, determined_strategy_params = self._determine_crossmatch_strategy(
-                config1, config2, **strategy_params
-            )
-            strategy_params.update(
-                determined_strategy_params
-            )  # Add params determined by strategy logic
-            logger.info(f"Selected strategy: {strategy_name}")
-        except Exception as e:
-            logger.error(f"Failed to determine crossmatch strategy: {e}", exc_info=True)
-            raise CrossMatchError(f"Strategy determination failed: {e}") from e
-
-        # --- 3. Execute Strategy ---
-        result_df = None
-        try:
-            # Inject resolved configs into params for execution functions
-            strategy_params["_config1"] = config1
-            strategy_params["_config2"] = config2
-
-            if strategy_name == "local_stilts":
-                result_df = execute_local_stilts(config1, config2, self, **strategy_params)
-            elif strategy_name == "cds_xmatch_local_remote":
-                result_df = execute_cds_xmatch_local_remote(
-                    config1, config2, self, **strategy_params
-                )
-            elif strategy_name == "upload_and_tap_match":
-                try:
-                    result_df = execute_upload_and_tap_match(
-                        config1, config2, self, **strategy_params
-                    )
-                except TapUploadUnsupportedError as upload_err:
-                    logger.warning(
-                        f"TAP upload failed or not supported: {upload_err}. Falling back to 'download_and_match' strategy."
-                    )
-                    # Fallback strategy: Download remote, match locally
-                    strategy_name = (
-                        "download_and_match"  # Update strategy name for logging/consistency
-                    )
-                    # Determine which catalogue needs downloading based on original config
-                    strategy_params["_catalogue_to_download"] = (
-                        "2" if config1.get("is_local") else "1"
-                    )
-                    result_df = self._execute_download_and_match(
-                        config1, config2, self, **strategy_params
-                    )
-                except Exception as tap_err:
-                    # Catch other errors during TAP upload/match
-                    logger.error(f"Error during 'upload_and_tap_match': {tap_err}", exc_info=True)
-                    raise CrossMatchError(f"TAP match failed: {tap_err}") from tap_err
-            elif strategy_name == "remote_join":
-                result_df = execute_remote_join_match(config1, config2, self, **strategy_params)
-            elif strategy_name == "download_and_match":
-                result_df = self._execute_download_and_match(
-                    config1, config2, self, **strategy_params
-                )
-            else:
-                raise CrossMatchError(f"Unknown or unsupported strategy: {strategy_name}")
-
-            if result_df is None:
-                logger.warning(f"Strategy '{strategy_name}' did not return a DataFrame.")
-                result_df = pd.DataFrame()  # Ensure result_df is a DataFrame
-
-        except Exception as e:
-            logger.error(
-                f"Crossmatch execution failed using strategy '{strategy_name}': {e}", exc_info=True
-            )
-            raise CrossMatchError(f"Execution failed: {e}") from e
-
-        # --- 4. Handle Output ---
         if output_file:
-            logger.info(f"Saving {len(result_df)} results to {output_file}")
-            self._save_output(result_df, output_file)
-            end_time = time.time()
-            logger.info(f"Crossmatch completed in {end_time - start_time:.2f} seconds.")
-            return None  # Indicate success but no DataFrame returned
-        else:
-            logger.info(f"Crossmatch finished, returning {len(result_df)} results as DataFrame.")
-            end_time = time.time()
-            logger.info(f"Crossmatch completed in {end_time - start_time:.2f} seconds.")
-            return result_df
-
-    def _get_local_file_extent(
-        self, local_config: Dict[str, Any], params: Dict[str, Any], prefix: str
-    ) -> Optional[Dict[str, float]]:
-        """Calculates the approximate sky coverage of a local file."""
-        logger.info(f"Calculating extent for local file (prefix {prefix})...")
-        df = None
-        if "_input_dataframe" in local_config:
-            df = local_config["_input_dataframe"]
-        elif "_input_path" in local_config:
-            # Avoid reloading if already loaded during config resolution
-            # This might require caching the loaded DataFrame in _resolve_input_config
-            # For now, reload - less efficient but safer.
-            try:
-                df = self._load_local_catalogue(local_config["_input_path"])
-            except Exception as e:
-                logger.error(
-                    f"Failed to load local file {local_config['_input_path']} to get extent: {e}"
-                )
-                return None  # Cannot determine extent
-        else:
-            logger.warning("Cannot determine extent: No DataFrame or path found in local config.")
+            io_utils.write_frame(result_lf, output_file)
             return None
+        return result_lf if lazy else result_lf.collect()
 
-        if df is None or df.empty:
-            logger.warning("Cannot determine extent: Local DataFrame is empty or failed to load.")
+    def _dispatch(self, src1, src2, spec, params) -> pl.LazyFrame:
+        if src1.access_method == "hats" or src2.access_method == "hats":
+            from . import hats_source
+
+            lf1 = src1.lazy() if src1.is_local else None
+            lf2 = src2.lazy() if src2.is_local else None
+            return hats_source.hats_crossmatch(
+                src1, src2, spec, local_lf1=lf1, local_lf2=lf2
+            ).lazy()
+
+        if src1.is_local and src2.is_local:
+            return self._local_match(src1, src2, src1.lazy(), src2.lazy(), spec, params)
+
+        if src1.is_local != src2.is_local:
+            return self._local_vs_remote(src1, src2, spec, params)
+
+        return self._remote_vs_remote(src1, src2, spec, params)
+
+    def _id_columns(self, src1, src2, params):
+        join_on_ids = params.get("join_on_ids")
+        if not join_on_ids and not params.get("id_join"):
             return None
-
-        # Get RA/Dec columns (already resolved in local_config)
-        ra_col = local_config.get("ra_column")
-        dec_col = local_config.get("dec_column")
-
-        if not ra_col or not dec_col:
-            logger.error("Cannot determine extent: RA/Dec columns not resolved for local file.")
-            # Attempt auto-detection again? Or rely on initial resolution.
-            # For now, fail if not present in config.
-            return None
-
-        if ra_col not in df.columns or dec_col not in df.columns:
-            logger.error(
-                f"Cannot determine extent: Resolved RA ('{ra_col}') or Dec ('{dec_col}') columns not found in DataFrame."
-            )
-            return None
-
-        try:
-            # Use the utility function
-            extent_result = get_dataframe_extent(df, ra_col, dec_col)
-            # Check if the function returned a valid result before unpacking
-            if extent_result is None:
-                logger.error(
-                    "Failed to calculate extent for local file (get_dataframe_extent returned None)."
-                )
-                return None
-
-            # Correctly unpack the dictionary using keys
-            center_ra = extent_result["ra_center_deg"]
-            center_dec = extent_result["dec_center_deg"]
-            radius_deg = extent_result["radius_deg"]
-
-            logger.info(
-                f"Local file extent: RA={center_ra:.4f}, Dec={center_dec:.4f}, Radius={radius_deg:.4f} deg"
-            )
-            # Add a buffer based on the crossmatch radius
-            match_radius_arcsec = params.get("radius_arcsec", 1.0)
-            buffer_deg = match_radius_arcsec / 3600.0  # Convert match radius to degrees
-            # Ensure buffer isn't excessively large if radius_deg is tiny
-            # Use max(radius_deg, some_min_radius) + buffer? Or just add buffer? Adding seems fine.
-            total_radius_deg = radius_deg + buffer_deg
-            logger.info(
-                f"Using download radius: {total_radius_deg:.4f} deg (extent radius {radius_deg:.4f} deg + match radius buffer {buffer_deg:.4f} deg)"
-            )
-
-            # Return the center and the *total* radius needed for download
-            return {"ra": center_ra, "dec": center_dec, "radius_deg": total_radius_deg}
-
-        except Exception as e:
-            logger.error(f"Error calculating extent for local file: {e}", exc_info=True)
-            return None
-
-    def _execute_download_and_match(
-        self, config1: Dict[str, Any], config2: Dict[str, Any], crossmatch_instance: Any, **params
-    ) -> pd.DataFrame:
-        """Executes the download-and-match strategy."""
-        logger.info("Executing download and match strategy...")
-
-        cat_to_download = params.get(
-            "_catalogue_to_download", "both"
-        )  # Default to both if not specified
-        df1, df2 = None, None
-        # Extract region params determined by strategy selection (if any)
-        region_params = {k: v for k, v in params.items() if k in ["ra", "dec", "radius_deg"]}
-
-        # --- Load/Download Catalogue 1 ---
-        if config1.get("is_local"):
-            if "_input_dataframe" in config1:
-                df1 = config1["_input_dataframe"]
-            elif "_input_path" in config1:
-                df1 = self._load_local_catalogue(config1["_input_path"])
-        elif cat_to_download in ["1", "both"]:
-            logger.info(f"Downloading remote catalogue 1: {config1.get('_catalogue_name')}")
-            # Pass necessary params for download (columns, auth)
-            download_params = self._prepare_download_params(config1, params, prefix="1")
-            # Combine specific download params with general region params
-            all_download_params = {**download_params, **region_params}
-            df1 = self._download_catalogue(config1, **all_download_params)
-        else:  # Remote but not downloading (shouldn't happen with this strategy?)
+        spec = join_on_ids if isinstance(join_on_ids, dict) else {}
+        id1 = params.get("id_column_1") or spec.get("cat1") or src1.id_column
+        id2 = params.get("id_column_2") or spec.get("cat2") or src2.id_column
+        if not id1 or not id2:
             raise CrossMatchError(
-                "Invalid state in download_and_match: Remote cat 1 not marked for download."
+                "ID join requested but id columns are unknown. Provide --id1 and --id2."
             )
+        return id1, id2
 
-        # --- Load/Download Catalogue 2 ---
-        if config2.get("is_local"):
-            if "_input_dataframe" in config2:
-                df2 = config2["_input_dataframe"]
-            elif "_input_path" in config2:
-                df2 = self._load_local_catalogue(config2["_input_path"])
-        elif cat_to_download in ["2", "both"]:
-            logger.info(f"Downloading remote catalogue 2: {config2.get('_catalogue_name')}")
-            download_params = self._prepare_download_params(config2, params, prefix="2")
-            # Combine specific download params with general region params
-            all_download_params = {**download_params, **region_params}
-            df2 = self._download_catalogue(config2, **all_download_params)
-        else:  # Remote but not downloading
-            raise CrossMatchError(
-                "Invalid state in download_and_match: Remote cat 2 not marked for download."
-            )
-
-        # Check if dataframes were loaded/downloaded
-        if df1 is None or df2 is None:
-            raise CrossMatchError("Failed to load or download data for one or both catalogues.")
-        if df1.empty or df2.empty:
-            logger.warning(
-                "One or both catalogues are empty after loading/downloading. No matches possible."
-            )
-            return pd.DataFrame()
-
-        # --- Perform Local Match ---
-        logger.info("Performing local match on downloaded/loaded data...")
-        # Update configs to mark them as effectively local for the execution step
-        config1_local = config1.copy()
-        config2_local = config2.copy()
-        config1_local["is_local"] = True
-        config2_local["is_local"] = True
-        config1_local["_input_dataframe"] = df1  # Pass loaded dataframes
-        config2_local["_input_dataframe"] = df2
-
-        # Use the existing local execution function
-        return execute_local_stilts(config1_local, config2_local, self, **params)
-
-    def _prepare_download_params(
-        self, config: Dict[str, Any], params: Dict[str, Any], prefix: str
-    ) -> Dict[str, Any]:
-        """Prepares parameters specifically for downloading a remote catalogue."""
-        download_params = {}
-        # Columns to download
-        cols_key = f"columns_{prefix}"
-        download_params["columns_to_download"] = params.get(cols_key) or config.get(
-            "default_columns"
+    def _local_match(self, src1, src2, lf1, lf2, spec, params) -> pl.LazyFrame:
+        ids = self._id_columns(src1, src2, params)
+        if ids:
+            return id_join(lf1, lf2, ids[0], ids[1], spec.join_type)
+        return sky_match(
+            src1,
+            src2,
+            lf1,
+            lf2,
+            spec,
+            engine=params.get("engine", "auto"),
+            stilts_cmd_base=self.stilts_cmd_base,
+            java_opts=self.stilts_java_opts,
+            tmpdir=self.stilts_tmpdir,
         )
 
-        # Spatial region (RA, Dec, Radius) - these are handled separately now
-        # by extracting from the main 'params' dict in the calling function.
+    def _local_vs_remote(self, src1, src2, spec, params) -> pl.LazyFrame:
+        local, remote = (src1, src2) if src1.is_local else (src2, src1)
+        local_lf = local.lazy()
 
-        # Authentication
-        archive_name = config.get("_archive_name")
-        if archive_name:
-            # Corrected line: Use dict.get() instead of method call
-            download_params["auth_session"] = self.auth_config.get_auth_session(archive_name)
+        if remote.access_method == "cds_xmatch" and not self._id_columns(src1, src2, params):
+            from .remote_cds import cds_xmatch_local_remote
 
-        # Add other relevant params? e.g., row limits?
-        # download_params['maxrec'] = params.get('download_maxrec')
+            result = cds_xmatch_local_remote(local, remote, local_lf, spec)
+            return result.lazy()
 
-        return download_params
+        remote_prefix = "2" if src1.is_local else "1"
+        remote_lf = self._download_remote(
+            remote, params, prefix=remote_prefix, region_from=local_lf, local=local
+        ).lazy()
+        downloaded = remote.with_frame(remote_lf)
+        new1 = src1 if src1.is_local else downloaded
+        new2 = downloaded if src1.is_local else src2
+        return self._local_match(new1, new2, new1.lazy(), new2.lazy(), spec, params)
 
-    def _download_catalogue(self, config: Dict[str, Any], **params) -> pd.DataFrame:
-        """Downloads data for a single remote catalogue based on its config."""
-        access_method = config.get("access_method")
-        cat_name = config.get("_catalogue_name", "remote")
-        logger.debug(
-            f"Downloading {cat_name} via {access_method} with params: {params}"
-        )  # Log params
+    def _remote_vs_remote(self, src1, src2, spec, params) -> pl.LazyFrame:
+        if (
+            src1.access_method == "tap"
+            and src2.access_method == "tap"
+            and src1.tap_url == src2.tap_url
+            and not self._id_columns(src1, src2, params)
+        ):
+            from .remote_tap import tap_self_join
 
-        try:
-            if access_method == "tap":
-                logger.debug(
-                    f"Config passed to download_from_tap for {cat_name}: {config}"
-                )  # Add this line
-                # Ensure download_from_tap accepts ra, dec, radius_deg etc. from **params
-                return download_from_tap(config, **params)
-            elif (
-                access_method == "cds_xmatch"
-            ):  # Can we download via CDS service? Assume Vizier TAP for now.
-                # Check if remote_cds.download_from_cds exists and handles params
-                try:
-                    from .remote_cds import download_from_cds
+            auth_session = self.auth_config.get_auth_session(src1.archive)
+            return tap_self_join(src1, src2, spec, auth_session=auth_session).lazy()
 
-                    # Need to map params if download_from_cds expects different names
-                    return download_from_cds(config, **params)
-                except ImportError:
-                    logger.warning(
-                        "remote_cds.download_from_cds not found. Cannot download via cds_xmatch method."
-                    )
-                    # Fallback? Or error? For now, error.
-                    raise CrossMatchError("Download via 'cds_xmatch' method not implemented/found.")
+        lf1 = self._download_remote(src1, params, prefix="1").lazy()
+        lf2 = self._download_remote(src2, params, prefix="2").lazy()
+        new1 = src1.with_frame(lf1)
+        new2 = src2.with_frame(lf2)
+        return self._local_match(new1, new2, lf1, lf2, spec, params)
 
-            # Add other access methods (e.g., http download) if needed
-            else:
-                raise CrossMatchError(
-                    f"Unsupported access method '{access_method}' for downloading '{cat_name}'"
-                )
-        except Exception as e:
-            logger.error(f"Failed to download catalogue '{cat_name}': {e}", exc_info=True)
-            raise CrossMatchError(f"Download failed for '{cat_name}': {e}") from e
+    def _download_remote(
+        self, src, params, *, prefix, region_from=None, local=None
+    ) -> pl.DataFrame:
+        ra = params.get("ra")
+        dec = params.get("dec")
+        radius_deg = params.get("radius_deg")
+        if region_from is not None and (ra is None or dec is None):
+            ra_arr, dec_arr = coord_arrays(region_from, local.ra_column, local.dec_column)
+            extent = sky_extent(ra_arr, dec_arr)
+            if extent:
+                ra, dec = extent["ra_center_deg"], extent["dec_center_deg"]
+                radius_deg = extent["radius_deg"] + float(params.get("radius_arcsec", 1.0)) / 3600.0
+        if ra is None or dec is None or radius_deg is None:
+            raise CrossMatchError(
+                f"Downloading remote catalogue '{src.name}' needs a region "
+                f"(provide ra/dec and radius_deg)."
+            )
 
-    def _save_output(self, df: pd.DataFrame, output_file: Union[str, Path]):
-        """Saves the output DataFrame to the specified file."""
-        try:
-            output_path = Path(output_file)
-            output_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure output directory exists
-            if output_path.suffix == ".csv":
-                df.to_csv(output_path, index=False)
-            elif output_path.suffix == ".parquet":
-                df.to_parquet(output_path, index=False)
-            elif output_path.suffix == ".fits":
-                # Convert object columns to string before saving to FITS
-                object_cols = list(df.select_dtypes(include=["object", "string"]).columns)
-                if object_cols:
-                    for col in object_cols:
-                        if not pd.api.types.is_numeric_dtype(df[col].dropna()):
-                            logger.debug(
-                                f"Converting object column '{col}' to string for FITS output."
-                            )
-                            df[col] = df[col].astype(str)
-                table = Table.from_pandas(df)
-                table.write(output_path, overwrite=True)
-            else:
-                raise CrossMatchError(f"Unsupported output format: {output_path.suffix}")
-            logger.info(f"Output saved to {output_path}")
-        except Exception as e:
-            logger.error(f"Failed to save output to {output_file}: {e}", exc_info=True)
-            raise CrossMatchError(f"Failed to save output: {e}") from e
+        columns = params.get(f"columns_{prefix}")
+        auth_session = self.auth_config.get_auth_session(src.archive)
+        if src.access_method == "tap":
+            from .remote_tap import download_from_tap
+
+            return download_from_tap(
+                src,
+                ra=ra,
+                dec=dec,
+                radius_deg=radius_deg,
+                columns=columns,
+                auth_session=auth_session,
+            )
+        if src.access_method == "cds_xmatch":
+            from .remote_cds import download_from_cds
+
+            return download_from_cds(
+                src,
+                ra=ra,
+                dec=dec,
+                radius_arcsec=radius_deg * 3600.0,
+                columns=columns,
+            )
+        raise CrossMatchError(f"Cannot download from access method '{src.access_method}'.")
+
+
+def _side_overrides(params: Dict[str, Any], prefix: str) -> Dict[str, Any]:
+    out = {}
+    for field in ("ra_column", "dec_column", "id_column"):
+        value = params.get(f"{field}_{prefix}")
+        if value is not None:
+            out[field] = value
+    cols = params.get(f"columns_{prefix}")
+    if cols is not None:
+        out["columns"] = cols
+    return out

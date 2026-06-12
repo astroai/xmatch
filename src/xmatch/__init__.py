@@ -1,9 +1,6 @@
-"""xmatch: A tool for cross-matching astronomical catalogues using various methods."""
+"""xmatch: cross-match astronomical catalogues (local files, remote archives, HATS)."""
 
-# Import core class
 from .crossmatch import CrossMatch
-
-# Import exceptions for easier access
 from .exceptions import (
     ConfigError,
     CrossMatchError,
@@ -12,18 +9,20 @@ from .exceptions import (
     TapError,
     TapUploadUnsupportedError,
 )
+from .matchers import MatchSpec
+from .sources import CatalogueSource
 
-# Define version
-__version__ = "0.1.2"  # Increment version
+__version__ = "0.2.0"
 
 __all__ = [
     "CrossMatch",
-    # Exceptions
+    "CatalogueSource",
+    "MatchSpec",
     "CrossMatchError",
     "ConfigError",
     "InputError",
     "TapError",
     "StiltsError",
     "TapUploadUnsupportedError",
-    # Add other public classes/functions if needed
+    "__version__",
 ]

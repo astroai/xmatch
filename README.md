@@ -1,194 +1,122 @@
 # xmatch
 
-A flexible tool for cross-matching astronomical catalogues using various methods (STILTS, TAP, CDS XMatch).
+Cross-match astronomical catalogues with a single command:
+
+```bash
+xmatch cat1 cat2
+```
+
+`cat1`/`cat2` can each be a **local file** (Parquet, CSV, FITS), a **HATS catalogue
+directory**, or the **name of a configured remote catalogue** (TAP service or the
+CDS XMatch service). xmatch auto-detects the type, the coordinate columns, and the
+matching strategy.
+
+Internally all catalogue data flows through [polars](https://pola.rs) `LazyFrame`s;
+results stream straight to disk so large matches never need to fit in memory.
 
 ## Features
 
-- Cross-match local files (Parquet, FITS, CSV) or remote catalogues defined in configuration.
-- Supports multiple matching backends:
-  - Local matching via STILTS `tmatch2` (sky, skyerr, skyellipse).
-  - Remote TAP service joins (fixed radius).
-  - Remote CDS XMatch service (requires `astroquery`).
-- Strategy selection based on input types (local/remote) and service capabilities.
-- Handles epoch propagation between catalogues with proper motion (e.g., Gaia J2016.0 vs J2000.0) for local/downloaded matches.
-- Spatial chunking for large remote catalogues using HEALPix (requires `astropy-healpix`).
-- Configuration via YAML files (`catalogues.yaml`, `auth.yaml`).
-- Command-line interface and Python API.
+- One simple command: `xmatch cat1 cat2`.
+- Inputs: local Parquet/CSV/FITS files, polars/pandas frames (Python API), remote
+  TAP catalogues, the CDS XMatch service, and HATS catalogues (optional).
+- Spatial matching engines:
+  - **STILTS** `tmatch2` (`sky`/`skyerr`/`skyellipse`) when a `stilts` command is
+    available (default).
+  - **astropy** KD-tree matcher as a pure-Python fallback (no Java required).
+- ID joins (relational joins on identifier columns) via polars.
+- All standard join modes: inner, outer, left/right-outer, and anti joins.
+- Returns an eager polars `DataFrame` by default, or a `LazyFrame` on request.
 
 ## Installation
 
-Requires Java (for STILTS) and Python >= 3.10.
+Requires Python >= 3.10. For STILTS-backed matching you also need Java and a
+`stilts` command (or set `STILTS_JAR`); otherwise the astropy fallback is used
+automatically.
 
 ```bash
-# Install from PyPI (if published)
-# pip install xmatch
-
-# Install from source
-git clone https://github.com/sfabbro/xmatch.git
-cd xmatch
-pip install .
-
-# For development
-pip install -e ".[dev]"
+pip install .          # from source
+pip install -e ".[dev]"  # development
+pip install -e ".[hats]" # optional HATS/LSDB support
 ```
 
-**STILTS Setup:** Ensure the `stilts` command is available in your system PATH, or set the `STILTS_JAR` environment variable, or provide the path via the `stilts_cmd_base` configuration setting in `catalogues.yaml` or Python API.
-
-## Usage
-
-### Command Line Interface (`xmatch`)
+## Command line
 
 ```bash
-# Basic: Match two configured catalogues (e.g., gaia_esa vs delve_noao)
-xmatch gaia_esa delve_noao --output gaia_delve_match.parquet --radius 1.5
+# Two local files (coordinate columns auto-detected); CSV result on stdout
+xmatch a.parquet b.csv
 
-# Match a local file against a configured remote catalogue
-xmatch /path/to/my_sources.csv gaia_esa --output my_gaia_match.parquet --radius 2.0
+# Write the result to a file (.parquet/.csv/.fits)
+xmatch a.parquet b.csv -o matches.parquet -r 1.5
 
-# Use CDS XMatch service (if remote catalogue configured for it)
-xmatch /path/to/my_sources.csv galex_cds --output my_galex_match.parquet --radius 3.0
+# Local file vs a configured remote catalogue (downloaded around the local footprint)
+xmatch my_sources.csv gaia -o my_gaia.parquet -r 2.0
 
-# Specify matcher explicitly (for local/download strategies)
-xmatch gaia_esa ukidsslas_noao --output gaia_ukidss_skyerr.parquet --matcher skyerr --max-error 5.0
+# Error-ellipse match (needs error columns in the catalogue config)
+xmatch gaia desils_noao --matcher skyerr --max-error 3.0 -o out.parquet
 
-# Run remote spatial chunking (requires ra, dec, radius)
-xmatch gaia_esa vhs_cds --output gaia_vhs_chunked.parquet --radius 1.0 --ra 150.1 --dec 2.5 --strategy remote_spatial_chunked_match --nside 64
+# Keep all matches within the radius, and use an outer join
+xmatch a.csv b.csv --find all --join 1or2
 
-# List available catalogues
-xmatch --list-catalogues
+# ID join instead of sky position
+xmatch a.csv b.csv --id-join --id1 source_id --id2 source_id
 
-# Describe a catalogue
-xmatch --describe gaia_esa
-
-# See all options
-xmatch --help
+# Inspect the catalogue configuration
+xmatch --list
+xmatch --describe gaia
 ```
 
-### Python API
+Run `xmatch --help` for the full option list.
+
+`--matcher` / `--max-error`: with `skyerr`/`skyellipse` a pair matches when
+`separation ≤ max_error · (err₁ + err₂)` using the catalogues' positional errors
+(`--radius` applies only to `sky`). `skyellipse` currently behaves like `skyerr`
+(correlation is not yet modelled).
+
+## Python API
 
 ```python
-from xmatch import CrossMatch
-
-# Initialize with default config
-cm = CrossMatch()
-
-# Perform cross-match (local file vs configured catalogue)
-result_df = cm.crossmatch(
-    catalogue_1_input='my_local_sources.parquet',
-    catalogue_2_input='gaia_esa',
-    output_file='local_vs_gaia.parquet', # Optional: save directly
-    radius_arcsec=1.5,
-    matcher='skyerr', # Optional: suggest matcher for local/download
-    max_error=5.0    # Optional: separation for skyerr/skyellipse
-)
-
-# Perform spatial chunked remote match
-result_df_chunked = cm.crossmatch(
-    catalogue_1_input='gaia_esa',
-    catalogue_2_input='vhs_cds',
-    strategy='remote_spatial_chunked_match', # Force strategy
-    ra=150.1, # Required for spatial chunking
-    dec=2.5,  # Required for spatial chunking
-    radius_arcsec=1.0, # Defines area for chunking
-    nside=64 # Optional: HEALPix nside for chunking
-)
-
-print(result_df_chunked.head())
-```
-
-## Advanced Error Ellipse Matching
-
-The xmatch library provides comprehensive support for error ellipse matching, including correlation between position errors. This is especially important for high-precision astrometric catalogs like Gaia.
-
-### Error Ellipse Matching Types
-
-1. **Simple position match** (`sky`): Fixed radius search, ignoring error information.
-2. **Error ellipse without correlation** (`skyerr`): Uses RA/Dec errors but assumes no correlation.
-3. **Full error ellipse with correlation** (`skyellipse`): Uses the complete error ellipse including correlation.
-
-### Command Line Examples
-
-```bash
-# Match with explicit skyerr matcher (using error ellipses without correlation)
-xmatch gaia_dr3 legacy_dr10 --output gaia_legacy_skyerr.parquet --matcher skyerr
-
-# Match with skyellipse matcher (full error ellipse including correlation)
-xmatch gaia_dr3 ps1 --output gaia_ps1_skyellipse.parquet --matcher skyellipse
-
-# Match with explicit max-error scaling factor (N-sigma criterion)
-xmatch gaia_dr3 des_dr2 --output gaia_des_skyerr.parquet --matcher skyerr --max-error 5.0
-```
-
-### Python API Examples
-
-```python
+import polars as pl
 from xmatch import CrossMatch
 
 cm = CrossMatch()
 
-# Example 1: Match with skyerr when both catalogs have position errors but no correlation
-result_df = cm.crossmatch(
-    catalogue_1_input='gaia_dr3',
-    catalogue_2_input='legacy_dr10',
-    matcher='skyerr',  # Use error ellipses without correlation
-    max_error=3.0,     # 3-sigma matching criterion
-    output_file='gaia_legacy_skyerr.parquet'
-)
+# Local frame vs a configured remote catalogue
+sources = pl.read_csv("my_sources.csv")
+matches = cm.crossmatch(sources, "gaia", radius_arcsec=1.5)   # -> polars.DataFrame
+print(matches.head())
 
-# Example 2: Match with skyellipse when both catalogs have position errors AND correlation
-result_df = cm.crossmatch(
-    catalogue_1_input='gaia_dr3',
-    catalogue_2_input='catalog_with_correlations',
-    matcher='skyellipse',  # Use full error ellipses with correlation
-    max_error=5.0,         # 5-sigma matching criterion
-    output_file='gaia_correlated_skyellipse.parquet'
-)
+# Lazy result (you call .collect() / .sink_parquet() yourself)
+lazy = cm.crossmatch("a.parquet", "b.parquet", radius_arcsec=1.0, lazy=True)
+lazy.sink_parquet("out.parquet")
 
-# Example 3: Let xmatch automatically select the best matcher based on available error information
-result_df = cm.crossmatch(
-    catalogue_1_input='gaia_dr3',
-    catalogue_2_input='wise_allwise',
-    # No matcher specified - will auto-select based on available error columns in configs
-    output_file='gaia_wise_auto.parquet'
-)
+# ID join
+cm.crossmatch(a, b, id_join=True, id_column_1="id", id_column_2="id",
+              join_type="1and2")
 ```
 
-### Catalog Configuration for Error Ellipse Matching
+`crossmatch()` returns a polars `DataFrame` by default, a `LazyFrame` when
+`lazy=True`, and `None` when `output_file=` is given (the result is streamed to
+that file). Use `.to_pandas()` if you need a pandas frame.
 
-To use error ellipse matching, your catalog configurations should include:
+## Strategy selection
 
-```yaml
-catalogues:
-  gaia_dr3:
-    description: "Gaia Data Release 3"
-    # Required base columns
-    ra_column: "ra"
-    dec_column: "dec"
-    # Error columns for skyerr/skyellipse matchers
-    ra_err_column: "ra_error"
-    dec_err_column: "dec_error"
-    # Correlation column required for skyellipse matcher
-    corr_column: "ra_dec_corr"
-    # Specify error units if not in arcseconds
-    pos_err_units: "mas"  # Options: "mas" (milliarcsec), "arcsec" (default), "deg" (degrees)
-    # Optional: Default position error to use if column values are missing
-    default_pos_error_arcsec: 0.1
-    # Other catalog configuration...
-```
-
-### Error Handling Behavior
-
-- If both catalogs have error columns, the `skyerr` matcher is used automatically.
-- If both catalogs have error columns AND correlation columns, the `skyellipse` matcher is used automatically.
-- If error information is incomplete or missing, the basic `sky` matcher is used as fallback.
-- Different error units are automatically converted (e.g., milliarcseconds to arcseconds).
-- When using a matcher that requires information not available in the catalogs, the system will validate and report errors.
+| cat1 / cat2                         | strategy                                            |
+|-------------------------------------|-----------------------------------------------------|
+| local / local                       | STILTS or astropy sky match (or polars id join)     |
+| local / remote TAP                  | cone-download remote around the local footprint, then local match |
+| local / remote CDS XMatch           | CDS XMatch service (results rejoined by surrogate id) |
+| remote TAP / remote TAP (same svc)  | ADQL spatial self-join on the service               |
+| remote / remote (other)             | download both for a region, then local match        |
+| any HATS                            | LSDB partition-aware crossmatch                      |
 
 ## Configuration
 
-- `catalogues.yaml`: Defines data archives (TAP/CDS services) and specific catalogues (access details, columns, errors, epoch). See the file for structure and examples.
-- `auth.yaml`: Stores credentials for authenticated services (e.g., NOIRLab Data Lab TAP). Uses the `keyring` library for secure storage. Create this file manually if needed (see `auth.py` for expected format).
+- `xmatch.yaml` defines archives (TAP/CDS services) and catalogues (access
+  identifiers, coordinate / id / error columns, epoch). The packaged config is
+  used by default; override with `--config` or `CrossMatch(config_file=...)`.
+- `auth.py` loads credentials for authenticated TAP services via `keyring` or the
+  `XMATCH_<SERVICE>_USER` / `XMATCH_<SERVICE>_PASSWORD` environment variables.
 
 ## License
 
-This project is licensed under the MIT License.
+MIT.

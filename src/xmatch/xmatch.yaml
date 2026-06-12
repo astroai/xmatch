@@ -257,66 +257,6 @@ catalogues:
     estimated_size: 'large' # Size depends on the overlap
 
 
-# --- Crossmatch Method Definitions ---
-# Defines parameters for specific crossmatch algorithms.
-crossmatch_methods:
-  stilts_tmatch2_sky:
-    description: "STILTS tmatch2 sky algorithm (fixed radius search)"
-    executor: "stilts" # Indicates which backend handles this
-    stilts_command: "tmatch2"
-    params:
-      matcher: sky
-      join: "1and2" # Default join type
-      find: "best" # Find best match within radius
-      values1: "$1 $2"
-      values2: "$1 $2"
-      params: "1" # Default radius in arcsec
-      action: "keep1"
-
-  stilts_tmatch2_skyerr:
-    description: "STILTS tmatch2 skyerr algorithm (Gaussian errors)"
-    executor: "stilts"
-    stilts_command: "tmatch2"
-    params:
-      matcher: skyerr
-      join: "1and2"
-      find: "best"
-      # Values expression expects: ra dec err_a err_b pa
-      # Assuming pa=0 (no rotation) if only ra/dec errors are given
-      # STILTS crossmatch_sky function will build the correct values string based on available error columns
-      values1: "$1 $2 $3 $4 0"
-      values2: "$1 $2 $3 $4 0"
-      params: "3" # Default max separation in units of sigma
-      action: "keep1"
-
-  stilts_tmatch2_skyellipse:
-    description: "STILTS tmatch2 skyellipse algorithm (elliptical errors with correlation)"
-    executor: "stilts"
-    stilts_command: "tmatch2"
-    params:
-      matcher: skyellipse
-      join: "1and2"
-      find: "best"
-      # Values expression expects: ra dec err_a err_b pa
-      # STILTS crossmatch_sky function will build the correct values string
-      # including Position Angle (PA) calculated from errors and correlation.
-      values1: "$1 $2 $3 $4 $5"
-      values2: "$1 $2 $3 $4 $5"
-      params: "3" # Default max separation in units of sigma
-      action: "keep1"
-
-  # Placeholder for TAP-based join (details would be derived dynamically)
-  tap_join:
-    description: "Crossmatch using ADQL JOIN on a TAP service"
-    executor: "tap"
-    # Parameters like join condition, columns etc. are determined dynamically
-
-  # Placeholder for CDS X-Match service (details would be derived dynamically)
-  cds_xmatch:
-    description: "Crossmatch using the CDS X-Match service"
-    executor: "cds"
-    # Parameters determined dynamically
-
 # --- STILTS Configuration ---
 stilts_config:
   # Optional: Path to stilts.jar or base command (e.g., 'java -jar stilts.jar')
@@ -334,9 +274,3 @@ stilts_config:
 
   # Global default positional error floor (arcseconds) applied if no catalogue-specific default found
   default_floor_error_arcsec: 0.01 # Small value, e.g., 10 mas
-
-crossmatch:
-  chunking:
-    enabled: true
-    nside: 8  # HEALPix resolution parameter
-    automatic_detection: true  # Auto-detect large catalogs
