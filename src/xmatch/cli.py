@@ -129,11 +129,11 @@ def list_catalogues(cm: CrossMatch) -> None:
         print(f"  {name:<24} {cat.get('description', '')}")
 
 
-def describe(cm: CrossMatch, name: str) -> None:
+def describe(cm: CrossMatch, name: str) -> int:
     resolved = cm.resolve_name(name)
     if resolved not in cm.catalogues_config:
         print(f"Catalogue '{name}' not found.", file=sys.stderr)
-        return
+        return 1
     cat = cm.catalogues_config[resolved]
     print(f"Catalogue: {resolved}")
     for key in (
@@ -149,6 +149,7 @@ def describe(cm: CrossMatch, name: str) -> None:
     ):
         if key in cat:
             print(f"  {key}: {cat[key]}")
+    return 0
 
 
 def _params(args: argparse.Namespace) -> dict:
@@ -195,8 +196,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             list_catalogues(cm)
             return 0
         if args.describe:
-            describe(cm, args.describe)
-            return 0
+            return describe(cm, args.describe)
         if not args.catalogue_1 or not args.catalogue_2:
             print("Error: two catalogues are required.", file=sys.stderr)
             print("Try 'xmatch --list' or 'xmatch --help'.", file=sys.stderr)

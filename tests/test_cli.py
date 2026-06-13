@@ -48,3 +48,8 @@ def test_cli_match_to_file(local_files, tmp_path):
 def test_cli_unknown_catalogue_returns_error(capsys):
     assert main(["nope_not_real", "also_not_real"]) == 1
     assert "Error" in capsys.readouterr().err
+
+
+def test_cli_describe_unknown_catalogue(capsys):
+    assert main(["--describe", "nope_not_real"]) == 1
+    assert "not found" in capsys.readouterr().err
