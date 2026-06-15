@@ -27,7 +27,15 @@ def test_cli_requires_two_catalogues(capsys):
 
 def test_cli_list(capsys):
     assert main(["--list"]) == 0
-    assert "gaia_esa" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Available catalogues:" in out
+    assert "gaia_esa" in out
+
+
+def test_cli_describe_missing(capsys):
+    assert main(["--describe", "nonexistent"]) == 1
+    err = capsys.readouterr().err
+    assert "Catalogue 'nonexistent' not found." in err
 
 
 def test_cli_match_to_stdout(local_files, capsys):
