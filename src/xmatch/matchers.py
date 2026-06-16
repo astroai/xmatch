@@ -194,14 +194,12 @@ def _astropy_match(
     if spec.find == "best" and len(left_idx) > 0:
         score = seps / np.where(combined > 0, combined, np.inf)
         order = np.argsort(score)
-        seen: set = set()
-        chosen = []
-        for pos in order:
-            li = int(left_idx[pos])
-            if li not in seen:
-                seen.add(li)
-                chosen.append(pos)
-        sel = np.array(chosen, dtype=int)
+        # ⚡ Bolt Optimization: Use vectorized np.unique instead of a slow Python
+        # loop with set() tracking. For large cross-matches, this C-level filtering
+        # significantly speeds up removing duplicate left_idx matches while keeping
+        # the best scores. Sorting unique_indices preserves the "best" score ordering.
+        _, unique_indices = np.unique(left_idx[order], return_index=True)
+        sel = order[np.sort(unique_indices)]
         left_idx, right_idx, seps = left_idx[sel], right_idx[sel], seps[sel]
     return left_idx, right_idx, seps
 
