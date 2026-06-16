@@ -123,7 +123,7 @@ def setup_logging(verbose: int) -> None:
 
 
 def list_catalogues(cm: CrossMatch) -> None:
-    print("Available catalogues:", file=sys.stderr)
+    print("Available catalogues:")
     for name in sorted(cm.catalogues_config):
         cat = cm.catalogues_config[name]
         print(f"  {name:<24} {cat.get('description', '')}")
