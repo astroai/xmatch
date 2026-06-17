@@ -123,17 +123,17 @@ def setup_logging(verbose: int) -> None:
 
 
 def list_catalogues(cm: CrossMatch) -> None:
-    print("Available catalogues:", file=sys.stderr)
+    print("Available catalogues:")
     for name in sorted(cm.catalogues_config):
         cat = cm.catalogues_config[name]
         print(f"  {name:<24} {cat.get('description', '')}")
 
 
-def describe(cm: CrossMatch, name: str) -> None:
+def describe(cm: CrossMatch, name: str) -> bool:
     resolved = cm.resolve_name(name)
     if resolved not in cm.catalogues_config:
         print(f"Catalogue '{name}' not found.", file=sys.stderr)
-        return
+        return False
     cat = cm.catalogues_config[resolved]
     print(f"Catalogue: {resolved}")
     for key in (
@@ -149,6 +149,7 @@ def describe(cm: CrossMatch, name: str) -> None:
     ):
         if key in cat:
             print(f"  {key}: {cat[key]}")
+    return True
 
 
 def _params(args: argparse.Namespace) -> dict:
@@ -195,8 +196,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             list_catalogues(cm)
             return 0
         if args.describe:
-            describe(cm, args.describe)
-            return 0
+            return 0 if describe(cm, args.describe) else 1
         if not args.catalogue_1 or not args.catalogue_2:
             print("Error: two catalogues are required.", file=sys.stderr)
             print("Try 'xmatch --list' or 'xmatch --help'.", file=sys.stderr)
