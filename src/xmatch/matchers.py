@@ -194,14 +194,11 @@ def _astropy_match(
     if spec.find == "best" and len(left_idx) > 0:
         score = seps / np.where(combined > 0, combined, np.inf)
         order = np.argsort(score)
-        seen: set = set()
-        chosen = []
-        for pos in order:
-            li = int(left_idx[pos])
-            if li not in seen:
-                seen.add(li)
-                chosen.append(pos)
-        sel = np.array(chosen, dtype=int)
+        # ⚡ Bolt Optimization: Use vectorized numpy unique instead of slow python set tracking.
+        # np.unique with return_index=True gets the first occurrence index.
+        # Sorting unq_idx restores the `score`-ordered sequence of occurrences.
+        _, unq_idx = np.unique(left_idx[order], return_index=True)
+        sel = order[np.sort(unq_idx)]
         left_idx, right_idx, seps = left_idx[sel], right_idx[sel], seps[sel]
     return left_idx, right_idx, seps
 
