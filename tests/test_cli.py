@@ -27,7 +27,9 @@ def test_cli_requires_two_catalogues(capsys):
 
 def test_cli_list(capsys):
     assert main(["--list"]) == 0
-    assert "gaia_esa" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Available catalogues:" in out
+    assert "gaia_esa" in out
 
 
 def test_cli_match_to_stdout(local_files, capsys):
@@ -48,3 +50,13 @@ def test_cli_match_to_file(local_files, tmp_path):
 def test_cli_unknown_catalogue_returns_error(capsys):
     assert main(["nope_not_real", "also_not_real"]) == 1
     assert "Error" in capsys.readouterr().err
+
+
+def test_cli_describe(capsys):
+    assert main(["--describe", "not_real"]) == 1
+    err = capsys.readouterr().err
+    assert "Catalogue 'not_real' not found." in err
+
+    assert main(["--describe", "gaia_cds"]) == 0
+    out = capsys.readouterr().out
+    assert "Catalogue: gaia_cds" in out
