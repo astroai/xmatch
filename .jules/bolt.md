@@ -17,3 +17,7 @@
 ## 2026-06-08 - Pandas iterrows / iloc loop optimization (LANDED — do not reopen)
 **Learning:** `DataFrame.iterrows()` and per-row `.iloc[]` in hot loops (`skymatch`, chunked orchestration) are very slow on astronomical catalog sizes. The fix is to pre-extract columns to `{col: ndarray}` once, then index by integer position in the loop.
 **Action:** **Already merged on main** (PR #79, commit `8a37fd2`). Do not open new PRs for this pattern in `orchestration.py` / `stilts.py`.
+
+## 2024-06-18 - NumPy Unique Vectorization Over Python Sets
+**Learning:** When performing duplicate filtering in large array operations (such as finding the best astropy matches), using a native Python `for` loop with a `set` for lookup incurs significant overhead due to Python's variable tracking and dynamic typing.
+**Action:** Prefer vectorized NumPy operations like `np.unique(array, return_index=True)` followed by `np.sort` on the indices. This pushes the loop down to the fast C backend, providing a substantial speedup for massive astronomical arrays.
