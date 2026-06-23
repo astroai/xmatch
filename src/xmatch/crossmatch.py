@@ -123,7 +123,12 @@ class CrossMatch:
     def get_catalogue_config(self, name: str) -> Dict[str, Any]:
         name = name.lower()
         if name not in self.catalogues_config:
-            raise CrossMatchError(f"Catalogue '{name}' not found in configuration.")
+            import difflib
+
+            names = list(self.catalogues_config) + list(self.aliases_config)
+            suggestion = difflib.get_close_matches(name.lower(), names, n=3, cutoff=0.5)
+            hint = f" Did you mean: {', '.join(suggestion)}?" if suggestion else ""
+            raise CrossMatchError(f"Catalogue '{name}' not found in configuration.{hint}")
         cat = self.catalogues_config[name]
         archive = cat.get("archive")
         service_id = cat.get("service_id")
