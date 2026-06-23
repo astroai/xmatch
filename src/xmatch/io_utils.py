@@ -43,9 +43,12 @@ def astropy_table_to_polars(table) -> pl.DataFrame:
         logger.warning("Dropping multi-dimensional columns: %s", sorted(dropped))
     pdf = table[keep].to_pandas() if keep else table.to_pandas()
 
-    for col in pdf.columns:
-        if pdf[col].dtype == object and len(pdf) and isinstance(pdf[col].iloc[0], bytes):
-            pdf[col] = pdf[col].str.decode("utf-8", "replace")
+    if len(pdf) > 0:
+        # Fast vectorized check for object columns to avoid iterating over numeric columns
+        obj_cols = pdf.columns[pdf.dtypes == "object"]
+        for col in obj_cols:
+            if isinstance(pdf[col].iloc[0], bytes):
+                pdf[col] = pdf[col].str.decode("utf-8", "replace")
     return pl.from_pandas(pdf)
 
 
