@@ -60,3 +60,8 @@ def test_cli_describe(capsys):
     assert main(["--describe", "gaia_cds"]) == 0
     out = capsys.readouterr().out
     assert "Catalogue: gaia_cds" in out
+
+def test_cli_describe_missing_catalogue_with_suggestion(capsys):
+    assert main(["--describe", "gaja"]) == 1
+    err = capsys.readouterr().err
+    assert "Catalogue 'gaja' not found. Did you mean: gaia" in err

@@ -5,3 +5,7 @@
 ## 2024-06-18 - CLI standard output routing and logical error exit codes are critical for shell script UX
 **Learning:** When users chain CLI commands in shell scripts, they expect data arrays (like list output) and their headers to group in `stdout` to allow clean piping, while application errors and warnings should specifically route to `stderr`. Additionally, non-zero error codes must be issued when requested data is not found; silent `0` exits on "not found" cases break logic branching in bash files.
 **Action:** In `src/xmatch/cli.py`, updated `list_catalogues` so its header outputs to `stdout` to maintain stream consistency. Additionally, updated `describe` logic to properly signal logical failures with boolean returns and subsequently output an error `1` exit code in `main()`.
+
+## 2026-06-25 - Actionable error suggestions via fuzzy matching for CLI
+**Learning:** When users mistype a resource name (like a catalogue), failing with a plain "not found" error creates a poor UX. Providing a "Did you mean?" suggestion based on available valid options significantly reduces friction.
+**Action:** Use Python's built-in `difflib.get_close_matches` to compare user input against known valid configuration keys (`catalogues_config` and `aliases_config`) and append the best suggestions to the error message sent to `sys.stderr`.

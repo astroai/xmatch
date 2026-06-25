@@ -130,9 +130,13 @@ def list_catalogues(cm: CrossMatch) -> None:
 
 
 def describe(cm: CrossMatch, name: str) -> bool:
+    import difflib
     resolved = cm.resolve_name(name)
     if resolved not in cm.catalogues_config:
-        print(f"Catalogue '{name}' not found.", file=sys.stderr)
+        names = list(cm.catalogues_config) + list(cm.aliases_config)
+        suggestion = difflib.get_close_matches(name.lower(), names, n=3, cutoff=0.5)
+        hint = f" Did you mean: {', '.join(suggestion)}?" if suggestion else ""
+        print(f"Catalogue '{name}' not found.{hint}", file=sys.stderr)
         return False
     cat = cm.catalogues_config[resolved]
     print(f"Catalogue: {resolved}")
