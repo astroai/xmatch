@@ -57,6 +57,10 @@ def test_cli_describe(capsys):
     err = capsys.readouterr().err
     assert "Catalogue 'not_real' not found." in err
 
+    assert main(["--describe", "gaya"]) == 1
+    err = capsys.readouterr().err
+    assert "Catalogue 'gaya' not found. Did you mean: gaia" in err
+
     assert main(["--describe", "gaia_cds"]) == 0
     out = capsys.readouterr().out
     assert "Catalogue: gaia_cds" in out
