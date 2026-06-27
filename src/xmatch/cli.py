@@ -132,7 +132,21 @@ def list_catalogues(cm: CrossMatch) -> None:
 def describe(cm: CrossMatch, name: str) -> bool:
     resolved = cm.resolve_name(name)
     if resolved not in cm.catalogues_config:
-        print(f"Catalogue '{name}' not found.", file=sys.stderr)
+        import difflib
+
+        names = list(cm.catalogues_config) + list(cm.aliases_config)
+        suggestion = difflib.get_close_matches(
+            name.lower(), [n.lower() for n in names], n=3, cutoff=0.5
+        )
+        # Map back to original name if possible
+        original_suggestions = []
+        for s in suggestion:
+            for n in names:
+                if n.lower() == s:
+                    original_suggestions.append(n)
+                    break
+        hint = f" Did you mean: {', '.join(original_suggestions)}?" if original_suggestions else ""
+        print(f"Catalogue '{name}' not found.{hint}", file=sys.stderr)
         return False
     cat = cm.catalogues_config[resolved]
     print(f"Catalogue: {resolved}")
