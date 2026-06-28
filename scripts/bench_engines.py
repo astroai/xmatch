@@ -117,7 +117,20 @@ def main() -> int:
     parser.add_argument(
         "--n-timed", type=int, default=3, help="Timed iterations per engine."
     )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help="Override _scipy_match_nd chunk size (default: 50000). "
+             "Only affects N-d matching via the fast engine.",
+    )
     args = parser.parse_args()
+
+    # Apply chunk-size override to the matchers module before any matching.
+    from xmatch import matchers  # noqa: E402
+
+    if args.chunk_size is not None:
+        matchers._ND_CHUNK_SIZE = args.chunk_size
 
     # Parse sizes.
     sizes: List[int] = []
@@ -193,6 +206,7 @@ def main() -> int:
     print("-" * 55)
     print(f"Engines: {', '.join(engines)}")
     print(f"Radius: {args.radius} arcsec, warmup={args.n_warmup}, timed={args.n_timed}")
+    print(f"N-d chunk size: {matchers._ND_CHUNK_SIZE:,}")
     if ray_ok:
         import ray  # noqa: F811
 

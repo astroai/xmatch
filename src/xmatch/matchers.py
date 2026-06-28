@@ -453,6 +453,10 @@ def _scipy_match(
     return left_idx, right_idx, sep
 
 
+# Module-level configuration — tunable for benchmarking / memory tuning.
+_ND_CHUNK_SIZE = 50_000
+
+
 def _scipy_match_nd(
     l_xyz: np.ndarray,
     r_xyz: np.ndarray,
@@ -477,7 +481,7 @@ def _scipy_match_nd(
     """
     from scipy.spatial import cKDTree
 
-    CHUNK_SIZE = 50_000
+    CHUNK_SIZE = _ND_CHUNK_SIZE
 
     empty = (np.array([], int), np.array([], int), np.array([], float))
     n_left = l_xyz.shape[0]
