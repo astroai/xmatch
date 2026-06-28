@@ -228,3 +228,475 @@ def test_probabilistic_pmatch_pos_v_sep_distinguishes():
         f"Expected sep-driven posterior gap >= 0.2; got closer={closer_p} "
         f"farther={farther_p} seps={sorted(sep.tolist())}"
     )
+
+
+# ------------------------------------------------------------------- proper motion
+@pytest.fixture
+def pm_frames():
+    """Gaia-like frames with proper motion and epoch columns."""
+    # Two stars: one with significant PM, one with zero PM.
+    left = pl.DataFrame({
+        "ra": [10.0, 20.0],
+        "dec": [5.0, 6.0],
+        "pmra": [100.0, 0.0],   # mas/yr (already cosDec-scaled)
+        "pmdec": [50.0, 0.0],
+        "ref_epoch": [2015.5, 2015.5],
+    })
+    right = pl.DataFrame({
+        "ra": [10.0, 20.0],
+        "dec": [5.0, 6.0],
+        "pmra": [-50.0, 50.0],
+        "pmdec": [-25.0, 25.0],
+        "ref_epoch": [2015.5, 2015.5],
+    })
+    return left, right
+
+
+def test_proper_motion_propagates_both_sides(pm_frames):
+    """Both sides with PM columns should have coordinates shifted."""
+    from xmatch.matchers import _apply_proper_motion
+
+    left, right = pm_frames
+    l_src = _src("a", pm_ra_column="pmra", pm_dec_column="pmdec", epoch_column="ref_epoch")
+    r_src = _src("b", pm_ra_column="pmra", pm_dec_column="pmdec", epoch_column="ref_epoch")
+
+    new_left, new_right = _apply_proper_motion(
+        left, right, l_src, r_src, target_epoch=2016.0,
+    )
+    # First left star has 100 mas/yr PM for 0.5 yr → ~50 mas → ~0.0139 deg RA shift
+    delta_ra_left = abs(new_left["ra"][0] - left["ra"][0])
+    assert delta_ra_left > 1e-7, f"Expected RA shift from PM, got {delta_ra_left}"
+    # Second left star has zero PM → no shift
+    assert abs(new_left["ra"][1] - left["ra"][1]) < 1e-10
+    # Right side should also shift
+    delta_ra_right = abs(new_right["ra"][0] - right["ra"][0])
+    assert delta_ra_right > 1e-7, f"Expected RA shift on right side, got {delta_ra_right}"
+
+
+def test_proper_motion_nan_pm_treated_as_zero(pm_frames):
+    """NaN proper motions should be treated as zero (no propagation)."""
+    from xmatch.matchers import _apply_proper_motion
+
+    left, right = pm_frames
+    # Set PM to NaN for first star
+    left = left.with_columns(pl.Series("pmra", [np.nan, 0.0]))
+    left = left.with_columns(pl.Series("pmdec", [np.nan, 0.0]))
+
+    l_src = _src("a", pm_ra_column="pmra", pm_dec_column="pmdec", epoch_column="ref_epoch")
+    r_src = _src("b")  # no PM on right
+
+    new_left, new_right = _apply_proper_motion(
+        left, right, l_src, r_src, target_epoch=2016.0,
+    )
+    # NaN PM → no shift
+    assert abs(new_left["ra"][0] - left["ra"][0]) < 1e-10
+
+
+def test_proper_motion_no_pm_columns_returns_unchanged(pm_frames):
+    """When neither source has PM columns, frames are returned as-is."""
+    from xmatch.matchers import _apply_proper_motion
+
+    left, right = pm_frames
+    l_src = _src("a")  # no PM columns
+    r_src = _src("b")  # no PM columns
+
+    new_left, new_right = _apply_proper_motion(
+        left, right, l_src, r_src, target_epoch=2016.0,
+    )
+    assert new_left is left
+    assert new_right is right
+
+
+def test_proper_motion_catalogue_level_epoch(pm_frames):
+    """Catalogue-level epoch attribute should be used when epoch_column is absent."""
+    from xmatch.matchers import _apply_proper_motion
+
+    left, right = pm_frames
+    # Drop the ref_epoch column; use catalogue-level epoch instead.
+    left = left.drop("ref_epoch")
+    right = right.drop("ref_epoch")
+
+    l_src = _src("a", pm_ra_column="pmra", pm_dec_column="pmdec", epoch=2015.5)
+    r_src = _src("b", pm_ra_column="pmra", pm_dec_column="pmdec", epoch=2015.5)
+
+    new_left, new_right = _apply_proper_motion(
+        left, right, l_src, r_src, target_epoch=2016.0,
+    )
+    delta_ra = abs(new_left["ra"][0] - left["ra"][0])
+    assert delta_ra > 1e-7, f"Expected RA shift using catalogue-level epoch, got {delta_ra}"
+
+
+def test_proper_motion_one_side_only(pm_frames):
+    """When only one side has PM info, only that side is propagated."""
+    from xmatch.matchers import _apply_proper_motion
+
+    left, right = pm_frames
+    l_src = _src("a", pm_ra_column="pmra", pm_dec_column="pmdec", epoch_column="ref_epoch")
+    r_src = _src("b")  # no PM
+
+    new_left, new_right = _apply_proper_motion(
+        left, right, l_src, r_src, target_epoch=2016.0,
+    )
+    # Left should shift
+    assert abs(new_left["ra"][0] - left["ra"][0]) > 1e-7
+    # Right unchanged
+    assert abs(new_right["ra"][0] - right["ra"][0]) < 1e-10
+
+
+def test_proper_motion_missing_epoch_skips(pm_frames):
+    """When no epoch info is available, PM propagation is skipped."""
+    from xmatch.matchers import _apply_proper_motion
+
+    left, right = pm_frames
+    # Drop epoch column and don't set catalogue-level epoch.
+    left = left.drop("ref_epoch")
+    right = right.drop("ref_epoch")
+
+    l_src = _src("a", pm_ra_column="pmra", pm_dec_column="pmdec")  # no epoch!
+    r_src = _src("b")
+
+    new_left, new_right = _apply_proper_motion(
+        left, right, l_src, r_src, target_epoch=2016.0,
+    )
+    assert new_left is left  # unchanged
+
+
+def test_proper_motion_end_to_end_via_sky_match():
+    """End-to-end: PM-corrected match should give different results than uncorrected.
+    Propagate to a different epoch (20 years later) and confirm coordinates shift."""
+    import numpy as np
+
+    left = pl.DataFrame({
+        "ra": [10.0],
+        "dec": [5.0],
+        "pmra": [100.0],   # 100 mas/yr
+        "pmdec": [50.0],
+        "ref_epoch": [2000.0],
+    })
+    right = pl.DataFrame({
+        "ra": [10.0],
+        "dec": [5.0],
+        "pmra": [0.0],
+        "pmdec": [0.0],
+        "ref_epoch": [2000.0],
+    })
+
+    l_src = _src("a", pm_ra_column="pmra", pm_dec_column="pmdec", epoch_column="ref_epoch")
+    r_src = _src("b", pm_ra_column="pmra", pm_dec_column="pmdec", epoch_column="ref_epoch")
+
+    # Without PM correction: same position, 0 arcsec separation
+    spec_no_pm = MatchSpec(radius_arcsec=1.0)
+    out_no_pm = sky_match(l_src, r_src, left.lazy(), right.lazy(), spec_no_pm, engine="fast").collect()
+    assert out_no_pm.height == 1
+    sep_no_pm = out_no_pm["sep_arcsec"][0]
+
+    # With PM correction to 2020.0 (20-year baseline): left star moves ~2000 mas = 2 arcsec
+    spec_pm = MatchSpec(radius_arcsec=1.0, target_epoch=2020.0)
+    out_pm = sky_match(l_src, r_src, left.lazy(), right.lazy(), spec_pm, engine="fast").collect()
+    # After PM propagation, left star moves away → should NOT match within 1 arcsec
+    assert out_pm.height == 0, (
+        f"Expected 0 matches after 20yr PM propagation (star moved {100*20/1000:.1f} arcsec), "
+        f"got {out_pm.height}"
+    )
+
+
+# ------------------------------------------------------------------- filter expression
+def test_filter_expr_keeps_matching_pairs():
+    """filter_expr should keep only pairs satisfying the SQL WHERE clause."""
+    left = pl.DataFrame({"ra": [10.0, 10.0], "dec": [5.0, 5.0], "mag": [10.0, 14.0]})
+    right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005], "mag": [10.1]})
+    spec = MatchSpec(radius_arcsec=1.0, filter_expr="abs(mag - mag_2) < 1.0", find="all")
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+    # Only the first left star (mag=10.0) matches right (mag=10.1) → diff=0.1 < 1.0
+    # Second left star (mag=14.0) → diff=3.9 >= 1.0 → filtered out
+    assert out.height == 1
+    assert out["mag"][0] == 10.0
+
+
+def test_filter_expr_empty_result():
+    """When filter excludes all pairs, result should be empty."""
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "mag": [10.0]})
+    right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005], "mag": [20.0]})
+    spec = MatchSpec(radius_arcsec=1.0, filter_expr="abs(mag - mag_2) < 0.1", find="best")
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+    assert out.height == 0
+
+
+def test_filter_expr_all_pass():
+    """When filter is always true, all pairs survive."""
+    left = pl.DataFrame({"ra": [10.0, 10.0], "dec": [5.0, 5.0]})
+    right = pl.DataFrame({"ra": [10.00005, 10.0001], "dec": [5.00005, 5.0]})
+    spec = MatchSpec(radius_arcsec=1.0, filter_expr="1 = 1", find="all")
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+    assert out.height == 4  # 2 left × 2 right = 4 matches within 1 arcsec
+
+
+def test_filter_expr_invalid_sql_falls_back():
+    """Invalid SQL should be caught and all pairs kept with a warning."""
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
+    right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005]})
+    spec = MatchSpec(radius_arcsec=1.0, filter_expr="THIS IS NOT VALID SQL !!!", find="best")
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+    # Should keep the pair despite invalid filter (graceful fallback)
+    assert out.height == 1
+
+
+def test_filter_expr_with_find_best_reduces_after_filter():
+    """filter_expr applied before find='best' reduction: multiple candidates
+    get filtered, then the best among survivors is picked."""
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "mag": [10.0]})
+    right = pl.DataFrame({
+        "ra": [10.00002, 10.0001],
+        "dec": [5.00002, 5.0],
+        "mag": [10.05, 20.0],  # second has bad photometry
+    })
+    # Both right stars are within 1 arcsec spatially.
+    # filter_expr removes the bad-photometry match (mag diff = 10.0 > 1.0).
+    # Then find="best" picks the sole survivor.
+    spec = MatchSpec(
+        radius_arcsec=1.0, find="best",
+        filter_expr="abs(mag - mag_2) < 1.0",
+    )
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+    assert out.height == 1
+    assert abs(out["mag_2"][0] - 10.05) < 0.01
+
+
+def test_filter_expr_engine_zone_supported():
+    """filter_expr should work with the zone engine."""
+    left = pl.DataFrame({"ra": [10.0, 10.0], "dec": [5.0, 5.0], "mag": [10.0, 14.0]})
+    right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005], "mag": [10.1]})
+    spec = MatchSpec(radius_arcsec=1.0, filter_expr="abs(mag - mag_2) < 1.0", find="all")
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="zone").collect()
+    assert out.height == 1
+
+
+# ------------------------------------------------------------------- N-dimensional cKDTree
+def test_nd_match_identical_photometry_same_as_spatial():
+    """When extra columns are identical on both sides, N-d matching should
+    produce the same results as spatial-only matching."""
+    left = pl.DataFrame({"ra": [10.0, 20.0], "dec": [5.0, 6.0], "mag": [10.0, 10.0]})
+    # Right: both stars are within 1 arcsec of their left counterparts
+    right = pl.DataFrame({
+        "ra": [10.00005, 20.00005],
+        "dec": [5.00005, 6.00005],
+        "mag": [10.0, 10.0],
+    })
+
+    spec_spatial = MatchSpec(radius_arcsec=1.0, find="best")
+    spec_nd = MatchSpec(radius_arcsec=1.0, find="best", extra_distance_cols={"mag": 1.0})
+
+    out_sp = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec_spatial, engine="fast").collect()
+    out_nd = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec_nd, engine="fast").collect()
+
+    assert out_sp.height == out_nd.height == 2
+    assert np.allclose(sorted(out_sp["sep_arcsec"].to_list()),
+                       sorted(out_nd["sep_arcsec"].to_list()), atol=1e-6)
+
+
+def test_nd_match_picks_photometrically_closer_star():
+    """Given two spatial candidates, the N-d matcher should pick the one with
+    more similar photometry even if it's spatially slightly farther."""
+    # Star A: spatially closer (~0.18 arcsec) but photometrically off (diff=5.0)
+    # Star B: spatially farther (~0.29 arcsec) but photometrically perfect (diff=0.05)
+    # Spatial-only engine picks A (closer spatially).
+    # N-d engine should pick B (better overall N-d distance).
+    left = pl.DataFrame({
+        "ra": [10.0, 10.0],
+        "dec": [5.0, 5.0],
+        "mag": [10.0, 10.0],
+    })
+    right = pl.DataFrame({
+        "ra": [10.00005, 10.00008],  # first is closer spatially
+        "dec": [5.00005, 5.0],
+        "mag": [15.0, 10.05],       # second is photometrically closer
+    })
+
+    spec_spatial = MatchSpec(radius_arcsec=1.0, find="best")
+    spec_nd = MatchSpec(radius_arcsec=1.0, find="best", extra_distance_cols={"mag": 1.0})
+
+    out_spatial = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                            spec_spatial, engine="fast").collect()
+    out_nd = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                       spec_nd, engine="fast").collect()
+
+    assert out_spatial.height == 2  # both left stars match within 1 arcsec
+    assert out_nd.height == 2
+    # Spatial-only: both left stars pick the spatially closer right star (mag=15)
+    assert all(abs(out_spatial["mag_2"].to_numpy() - 15.0) < 0.01)
+    # N-d: both left stars should pick the photometrically similar star (mag=10.05)
+    # because the N-d distance (spatial chord diff + z-score normalized mag diff)
+    # favors the photometric match over the tiny spatial advantage
+    assert all(abs(out_nd["mag_2"].to_numpy() - 10.05) < 0.01)
+
+
+def test_nd_match_missing_column_warns_but_matches():
+    """When extra_distance_cols references a column not in the data,
+    the engine should warn and fall back to spatial-only."""
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
+    right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005]})
+    spec = MatchSpec(radius_arcsec=1.0, find="best",
+                     extra_distance_cols={"nonexistent_col": 1.0})
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+    assert out.height == 1  # still matches spatially
+
+
+def test_nd_match_find_all_unaffected():
+    """extra_distance_cols should not affect find='all' mode — it only
+    affects best-match ranking."""
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "mag": [10.0]})
+    right = pl.DataFrame({
+        "ra": [10.00005, 10.0001],
+        "dec": [5.00005, 5.0],
+        "mag": [10.5, 15.0],
+    })
+    spec = MatchSpec(radius_arcsec=1.0, find="all", extra_distance_cols={"mag": 1.0})
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+    # Both right stars are within 1 arcsec; find="all" returns both
+    assert out.height == 2
+
+
+def test_nd_match_multiple_extra_columns():
+    """Multiple extra_distance_cols should all contribute to N-d ranking.
+    Verify N-d picks a photometrically better star even when it's spatially
+    slightly farther."""
+    left = pl.DataFrame({"ra": [10.0, 10.0], "dec": [5.0, 5.0], "g": [10.0, 10.0], "r": [9.0, 9.0]})
+    right = pl.DataFrame({
+        "ra": [10.00005, 10.00008],
+        "dec": [5.00005, 5.0],
+        "g": [16.0, 10.1],     # first is photometrically wrong
+        "r": [15.0, 9.1],       # second is photometrically close
+    })
+
+    spec_spatial = MatchSpec(radius_arcsec=1.0, find="best")
+    spec_nd = MatchSpec(radius_arcsec=1.0, find="best",
+                        extra_distance_cols={"g": 0.5, "r": 0.5})
+
+    out_spatial = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                            spec_spatial, engine="fast").collect()
+    out_nd = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                       spec_nd, engine="fast").collect()
+
+    assert out_spatial.height == out_nd.height == 2
+    # Spatial-only picks the spatially closer right star (mag g=16, r=15)
+    assert all(abs(out_spatial["g_2"].to_numpy() - 16.0) < 0.01)
+    # N-d picks the photometrically similar star (g=10.1, r=9.1)
+    assert all(abs(out_nd["g_2"].to_numpy() - 10.1) < 0.01)
+
+
+# ------------------------------------------------------------------- batch_size / out-of-core
+def test_batch_size_parity_with_no_batching():
+    """batch_size must produce identical results to no-batching."""
+    rng = np.random.default_rng(42)
+    left = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.1, 200),
+        "dec": rng.uniform(5.0, 5.1, 200),
+    })
+    right = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.1, 300),
+        "dec": rng.uniform(5.0, 5.1, 300),
+    })
+
+    spec_full = MatchSpec(radius_arcsec=10.0, find="best")
+    spec_batch = MatchSpec(radius_arcsec=10.0, find="best", batch_size=5)
+
+    out_full = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                         spec_full, engine="zone").collect()
+    out_batch = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                          spec_batch, engine="zone").collect()
+
+    assert out_full.height == out_batch.height
+    assert np.allclose(
+        sorted(out_full["sep_arcsec"].to_list()),
+        sorted(out_batch["sep_arcsec"].to_list()),
+        atol=1e-6,
+    )
+
+
+def test_batch_size_one_pixel_per_batch():
+    """batch_size=1 should process one pixel group at a time and produce
+    correct results."""
+    rng = np.random.default_rng(123)
+    left = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.05, 100),
+        "dec": rng.uniform(5.0, 5.05, 100),
+    })
+    right = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.05, 150),
+        "dec": rng.uniform(5.0, 5.05, 150),
+    })
+
+    spec = MatchSpec(radius_arcsec=5.0, find="best", batch_size=1)
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="zone").collect()
+    # Just verify it doesn't crash and returns valid results
+    assert out.height >= 1
+    assert "sep_arcsec" in out.columns
+
+
+def test_batch_size_larger_than_pixel_count():
+    """batch_size larger than available pixel groups should degrade
+    gracefully to all-at-once."""
+    rng = np.random.default_rng(99)
+    left = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.02, 50),
+        "dec": rng.uniform(5.0, 5.02, 50),
+    })
+    right = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.02, 60),
+        "dec": rng.uniform(5.0, 5.02, 60),
+    })
+
+    spec = MatchSpec(radius_arcsec=5.0, find="best", batch_size=10_000)
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="zone").collect()
+    assert out.height >= 1
+
+
+def test_batch_size_find_all():
+    """batch_size should work with find='all'."""
+    rng = np.random.default_rng(42)
+    left = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.05, 80),
+        "dec": rng.uniform(5.0, 5.05, 80),
+    })
+    right = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.05, 100),
+        "dec": rng.uniform(5.0, 5.05, 100),
+    })
+
+    spec_full = MatchSpec(radius_arcsec=5.0, find="all")
+    spec_batch = MatchSpec(radius_arcsec=5.0, find="all", batch_size=3)
+
+    out_full = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                         spec_full, engine="zone").collect()
+    out_batch = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                          spec_batch, engine="zone").collect()
+
+    assert out_full.height == out_batch.height
+
+
+def test_margin_caching_correctness_vs_fast():
+    """The margin-cached zone engine must produce the same matches as the
+    fast (scipy cKDTree) engine."""
+    rng = np.random.default_rng(7)
+    left = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.1, 150),
+        "dec": rng.uniform(5.0, 5.1, 150),
+    })
+    right = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.1, 200),
+        "dec": rng.uniform(5.0, 5.1, 200),
+    })
+
+    spec = MatchSpec(radius_arcsec=8.0, find="best")
+
+    out_fast = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                         spec, engine="fast").collect()
+    out_zone = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                         spec, engine="zone").collect()
+
+    assert out_fast.height == out_zone.height
+    assert np.allclose(
+        sorted(out_fast["sep_arcsec"].to_list()),
+        sorted(out_zone["sep_arcsec"].to_list()),
+        atol=1e-6,
+    )

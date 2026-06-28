@@ -356,7 +356,7 @@ def _apply_match_filter(
         ctx = pl.SQLContext(tmp=tmp)
         filtered = ctx.execute(
             f"SELECT _row_id FROM tmp WHERE {filter_expr}"
-        )
+        ).collect()
         keep_rows = set(int(r) for r in filtered["_row_id"].to_list())
         keep = np.array([i in keep_rows for i in range(tmp.height)], dtype=bool)
     except Exception as exc:
