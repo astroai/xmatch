@@ -5,10 +5,11 @@ strategy from the input types, executes it on the appropriate backend, and
 returns the result as a polars frame (eager by default, lazy on request).
 """
 
+import difflib
 import logging
 import multiprocessing
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import polars as pl
 import yaml
@@ -143,6 +144,21 @@ class CrossMatch:
     def resolve_name(self, name: str) -> str:
         return self.aliases_config.get(name.lower(), name.lower())
 
+    def suggest(self, name: str, *, n: int = 3, cutoff: float = 0.4) -> List[str]:
+        """Return catalogue or alias names similar to ``name`` for hinting.
+
+        Compares ``name`` (case-insensitively) against the union of
+        ``catalogues_config`` and ``aliases_config`` using :mod:`difflib`. The
+        default ``cutoff=0.4`` is intentionally permissive; lower it if you
+        see noise, raise it if you'd rather the helper stay silent on sloppy
+        typos.
+
+        Returns an empty list when nothing is close enough — callers can simply
+        elide the "did you mean?" suffix in that case.
+        """
+        pool = list(self.catalogues_config) + list(self.aliases_config)
+        return difflib.get_close_matches(name.lower(), pool, n=n, cutoff=cutoff)
+
     # ----------------------------------------------------------------- sources
     def resolve_source(self, value: FrameInput, overrides: Dict[str, Any]) -> CatalogueSource:
         """Build a CatalogueSource from a path/name/frame plus per-side overrides."""
@@ -165,12 +181,12 @@ class CrossMatch:
         if path.is_file():
             return self._local_source(path.stem, path=path, overrides=overrides)
 
-        import difflib
-
-        names = list(self.catalogues_config) + list(self.aliases_config)
-        suggestion = difflib.get_close_matches(text.lower(), names, n=3, cutoff=0.5)
-        hint = f" Did you mean: {', '.join(suggestion)}?" if suggestion else ""
-        raise InputError(f"'{text}' is not a file, HATS dir, or known catalogue.{hint}")
+        # Defer the "did you mean?" rendering to the CLI: the exception
+        # carries `.source` so callers can decide how loudly to hint.
+        raise InputError(
+            f"'{text}' is not a file, HATS dir, or known catalogue.",
+            source=text,
+        )
 
     def _resolve_coords(self, columns, overrides):
         ra = overrides.get("ra_column") or find_coord_columns(columns)[0]
@@ -256,6 +272,7 @@ class CrossMatch:
             max_error=float(params.get("max_error", 3.0)),
             join_type=params.get("join_type", "1and2"),
             find=params.get("find", "best"),
+            prior_columns=list(params.get("prior_columns") or []),
         )
         result_lf = self._dispatch(src1, src2, spec, params)
 

@@ -60,7 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep the best match or all matches within the radius.",
     )
     parser.add_argument(
-        "--engine", choices=["auto", "stilts", "astropy"], default="auto", help="Sky-match engine."
+        "--engine",
+        choices=["auto", "stilts", "astropy", "fast", "zone"],
+        default="auto",
+        help="Sky-match engine (fast=scipy.cKDTree, zone=HEALPix pixellated).",
     )
 
     # ID join.
@@ -83,6 +86,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--columns-2", dest="columns_2", help="Comma-separated columns from catalogue 2."
+    )
+    parser.add_argument(
+        "--probabilistic",
+        dest="probabilistic",
+        action="store_true",
+        help="Compute Budavari-style hierarchical Bayes factor (+ p_match column).",
+    )
+    parser.add_argument(
+        "--priors",
+        dest="priors",
+        default="",
+        help="Comma-separated photometric columns used as Bayesian priors (e.g. g,r).",
     )
 
     # Region for remote downloads.
@@ -132,7 +147,7 @@ def list_catalogues(cm: CrossMatch) -> None:
 def describe(cm: CrossMatch, name: str) -> bool:
     resolved = cm.resolve_name(name)
     if resolved not in cm.catalogues_config:
-        print(f"Catalogue '{name}' not found.", file=sys.stderr)
+        print(f"Catalogue '{name}' not found. {_suggest(cm, name)}", file=sys.stderr)
         return False
     cat = cm.catalogues_config[resolved]
     print(f"Catalogue: {resolved}")
@@ -152,6 +167,17 @@ def describe(cm: CrossMatch, name: str) -> bool:
     return True
 
 
+def _suggest(cm: CrossMatch, name: str, *, n: int = 3) -> str:
+    """Format the closest known catalogue names to ``name`` for hinting.
+
+    Returns a leading-space " Did you mean: X, Y, Z?" string ready to be
+    appended to an existing error message, or an empty string when nothing is
+    close enough. Callers can append it unconditionally.
+    """
+    matches = cm.suggest(name, n=n)
+    return f"Did you mean: {', '.join(matches)}?" if matches else ""
+
+
 def _params(args: argparse.Namespace) -> dict:
     params = {
         "radius_arcsec": args.radius_arcsec,
@@ -160,6 +186,11 @@ def _params(args: argparse.Namespace) -> dict:
         "engine": args.engine,
         "max_error": args.max_error,
     }
+    if args.probabilistic:
+        params["probabilistic"] = True
+    prior_columns = [c.strip() for c in (args.priors or "").split(",") if c.strip()]
+    if prior_columns:
+        params["prior_columns"] = prior_columns
     if args.matcher:
         params["matcher"] = args.matcher
     if args.id_join:
@@ -215,7 +246,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     except CrossMatchError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        # When the exception carries an `InputError.source` (or any future
+        # exception that exposes `.source`), append a "did you mean?" hint
+        # generated from the catalogue name space.
+        hint = ""
+        source = getattr(exc, "source", None)
+        if source:
+            hint = _suggest(cm, source)
+        print(f"Error: {exc} {hint}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("Interrupted.", file=sys.stderr)
