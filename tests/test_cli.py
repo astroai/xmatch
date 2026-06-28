@@ -60,3 +60,23 @@ def test_cli_describe(capsys):
     assert main(["--describe", "gaia_cds"]) == 0
     out = capsys.readouterr().out
     assert "Catalogue: gaia_cds" in out
+
+
+# ---------------------------------------------------------------- did you mean?
+def test_cli_describe_suggests_close_match_for_typo(capsys):
+    """`xmatch --describe typo` must append a "Did you mean?" hint."""
+    assert main(["--describe", "gaiaesa"]) == 1
+    err = capsys.readouterr().err
+    assert "Catalogue 'gaiaesa' not found." in err
+    assert "Did you mean" in err
+    assert "gaia_esa" in err
+
+
+def test_cli_suggests_for_unknown_catalogue_argument(capsys):
+    """Top-level `xmatch typo1 typo2` must surface the suggestion on stderr."""
+    assert main(["gaia_esa_typo", "totally_xyz_qq"]) == 1
+    err = capsys.readouterr().err
+    assert "Error" in err
+    # First arg is close enough to "gaia_esa" that the CLI must suggest it.
+    assert "Did you mean" in err
+    assert "gaia_esa" in err

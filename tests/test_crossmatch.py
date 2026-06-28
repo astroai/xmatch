@@ -127,3 +127,30 @@ def test_sky_match_still_errors_when_ra_dec_missing(cm):
     b = pl.DataFrame({"object_id": [1], "mag_g": [1.0]})
     with pytest.raises((_Cme,)):
         cm.crossmatch(a, b)
+
+
+# ----------------------------------------------------------------- did-you-mean
+def test_suggest_returns_close_match(cm):
+    """cm.suggest returns similar catalogue/alias names for a typo."""
+    matches = cm.suggest("gaiaesa")
+    assert "gaia_esa" in matches
+
+
+def test_suggest_empty_for_unrelated_input(cm):
+    """cm.suggest is empty when nothing is close enough (cutoff not met)."""
+    assert cm.suggest("zzzqxqxqxqx") == []
+
+
+def test_suggest_lowercases_argument(cm):
+    """Catalogues are stored lowercase; the helper should too."""
+    assert "gaia_esa" in cm.suggest("GAIAESA")
+    assert "gaia_esa" in cm.suggest("GaiaEsa")
+
+
+def test_input_error_carries_source(cm):
+    """InputError raised from resolve_source carries the user input as `.source`."""
+    from xmatch.exceptions import InputError
+
+    with pytest.raises(InputError) as info:
+        cm.resolve_source("gaia_typo_xyz", {})
+    assert info.value.source == "gaia_typo_xyz"

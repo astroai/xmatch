@@ -1,10 +1,18 @@
 """Custom exceptions raised by the xmatch package.
 
-Every public exception is documented in ``__init__`` and inherit from
-:class:`CrossMatchError` so callers can catch the full family with a single
-``except CrossMatchError``. Exceptions that are never raised by the current
-implementation have been pruned to keep the surface honest.
+Every public exception is documented in :mod:`xmatch.__init__` and inherits
+from :class:`CrossMatchError` so callers can catch the full family with a
+single ``except CrossMatchError``. Exceptions that are never raised by the
+current implementation have been pruned to keep the surface honest.
+
+:class:`InputError` carries an optional ``source`` attribute — the user-supplied
+identifier that triggered the failure — so the CLI's error handler can offer
+"did you mean?" suggestions without regex-parsing the rendered message.
 """
+
+from __future__ import annotations
+
+from typing import Optional
 
 
 class CrossMatchError(Exception):
@@ -16,7 +24,17 @@ class ConfigError(CrossMatchError):
 
 
 class InputError(CrossMatchError):
-    """Raised when an input file/frame is unreadable or unusable."""
+    """Raised when an input file/frame is unreadable or unusable.
+
+    The optional ``source`` attribute (keyword-only) holds the user-supplied
+    identifier that triggered the failure, when one is available. The CLI's
+    error-handler uses it to render a "did you mean?" suggestion against the
+    known catalogue name space without having to regex-parse the message.
+    """
+
+    def __init__(self, message: str, *, source: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.source = source
 
 
 class TapError(CrossMatchError):
