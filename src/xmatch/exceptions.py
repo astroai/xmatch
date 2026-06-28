@@ -1,44 +1,27 @@
-"""Custom exceptions for the xmatch package."""
+"""Custom exceptions raised by the xmatch package.
+
+Every public exception is documented in ``__init__`` and inherit from
+:class:`CrossMatchError` so callers can catch the full family with a single
+``except CrossMatchError``. Exceptions that are never raised by the current
+implementation have been pruned to keep the surface honest.
+"""
 
 
 class CrossMatchError(Exception):
-    """Base exception for general cross-matching errors."""
-
-    pass
+    """Base class for every public xmatch exception."""
 
 
 class ConfigError(CrossMatchError):
-    """Exception related to configuration file loading or validation."""
-
-    pass
+    """Raised when the YAML config is missing, malformed, or invalid."""
 
 
 class InputError(CrossMatchError):
-    """Exception related to invalid input data or file formats."""
-
-    pass
+    """Raised when an input file/frame is unreadable or unusable."""
 
 
 class TapError(CrossMatchError):
-    """Exception related to TAP service communication or query errors."""
-
-    pass
-
-
-class TapUploadUnsupportedError(TapError):
-    """Exception raised when TAP upload is requested but not supported."""
-
-    pass
+    """Raised when a TAP query (ADQL) or sync/async job fails."""
 
 
 class StiltsError(CrossMatchError):
-    """Exception related to errors during STILTS execution."""
-
-    pass
-
-
-# Ensure AuthError is defined
-class AuthError(CrossMatchError):
-    """Exception related to authentication errors (e.g., missing credentials)."""
-
-    pass
+    """Raised when the STILTS subprocess fails or is not available."""

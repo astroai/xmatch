@@ -1,11 +1,10 @@
-import functools
 import logging
 import os
 import sys
 from typing import Any, Dict, Optional
 
 import keyring
-import requests  # Assuming requests sessions might be used
+import requests  # HTTP sessions are used for authenticated TAP endpoints.
 
 logger = logging.getLogger(__name__)
 
@@ -26,21 +25,6 @@ KNOWN_SERVICES = {
     },
     # Add other potential services here
 }
-
-
-# Add a cache decorator to avoid repeated keyring access
-def cache_result(func):
-    """Cache the result of a function."""
-    cache = {}
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        cache_key = str(args) + str(sorted(kwargs.items()))
-        if cache_key not in cache:
-            cache[cache_key] = func(*args, **kwargs)
-        return cache[cache_key]
-
-    return wrapper
 
 
 # Placeholder for the AuthConfig class

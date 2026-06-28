@@ -51,9 +51,16 @@ class MatchSpec:
 # polars helpers
 # --------------------------------------------------------------------------- #
 def _gather(df: pl.DataFrame, idx: np.ndarray) -> pl.DataFrame:
+    """Return ``df`` rows indexed by *idx* via polars' Arrow-backed path.
+
+    Both ``.gather`` (positional selection) and the legacy ``df[pl.Series(...)]``
+    dispatch through ``__getitem__``; we use the explicit ``.gather`` form so the
+    hot path reads as Arrow buffer indexing without an intermediate Python Series.
+    Order of rows in the result matches the order of *idx* exactly.
+    """
     if len(idx) == 0:
         return df.clear()
-    return df[pl.Series(values=np.asarray(idx, dtype=np.int64))]
+    return df.gather(np.asarray(idx, dtype=np.int64))
 
 
 def _rename_right(right: pl.DataFrame, left_cols, suffix: str = _RIGHT_SUFFIX) -> pl.DataFrame:

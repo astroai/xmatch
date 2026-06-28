@@ -4,7 +4,10 @@ These functions operate on column-name lists and numpy arrays so they are
 agnostic to whether the data lives in a polars or pandas frame.
 """
 
+from __future__ import annotations
+
 import logging
+import math
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -154,6 +157,67 @@ def coord_arrays(frame, ra_col: str, dec_col: str) -> Tuple[np.ndarray, np.ndarr
     sel = frame.select([ra_col, dec_col])
     df = sel.collect() if isinstance(sel, pl.LazyFrame) else sel
     return df[ra_col].to_numpy(), df[dec_col].to_numpy()
+
+
+def sky_extent_from_frame(
+    frame,
+    ra_col: str,
+    dec_col: str,
+) -> Optional[Dict[str, float]]:
+    """Compute the bounding cone of a polars frame without materialising RA/Dec.
+
+    Expresses the great-circle mean and max-separation entirely as polars
+    aggregations so a TB-scale local LazyFrame stays lazy; only the resulting
+    scalars (mean-x/y/z, max-cos-sep) are collected. Returns ``None`` for an
+    empty frame and the same dict shape as :func:`sky_extent`.
+    """
+    import polars as pl
+
+    lf = frame.lazy() if isinstance(frame, pl.DataFrame) else frame
+    schema = lf.collect_schema()
+    if ra_col not in schema or dec_col not in schema:
+        raise ValueError(f"Frame missing {ra_col} or {dec_col} (has: {schema.names()}).")
+
+    if lf.select(pl.len()).collect().item() == 0:
+        return None
+
+    # Phase 1: mean-x/y/z unit-vector (handles RA=0/360 wrap and the poles).
+    means = lf.select(
+        (pl.col(dec_col).radians().cos() * pl.col(ra_col).radians().cos()).mean().alias("x"),
+        (pl.col(dec_col).radians().cos() * pl.col(ra_col).radians().sin()).mean().alias("y"),
+        pl.col(dec_col).radians().sin().mean().alias("z"),
+    ).collect()
+
+    mx, my, mz = float(means["x"][0]), float(means["y"][0]), float(means["z"][0])
+    norm = math.sqrt(mx * mx + my * my + mz * mz)
+    if norm < 1e-12:  # antipodal spread; fall back to whole-sky equator mean
+        ra_mean = lf.select(pl.col(ra_col).mean()).collect().item()
+        dec_mean = lf.select(pl.col(dec_col).mean()).collect().item()
+        return {
+            "ra_center_deg": float(ra_mean),
+            "dec_center_deg": float(dec_mean),
+            "radius_deg": 180.0,
+        }
+    mx, my, mz = mx / norm, my / norm, mz / norm
+
+    center_dec = math.degrees(math.asin(max(-1.0, min(1.0, mz))))
+    center_ra = math.degrees(math.atan2(my, mx)) % 360.0
+
+    # Phase 2: max great-circle separation from the centre, again all in polars.
+    sin_d = math.sin(math.radians(center_dec))
+    cos_d = math.cos(math.radians(center_dec))
+    ra0 = math.radians(center_ra)
+    cos_sep_expr = (
+        sin_d * pl.col(dec_col).radians().sin()
+        + cos_d * pl.col(dec_col).radians().cos() * (pl.col(ra_col).radians() - ra0).cos()
+    )
+    cos_sep_max = lf.select(cos_sep_expr.max()).collect().item()
+    radius_deg = math.degrees(math.acos(max(-1.0, min(1.0, float(cos_sep_max)))))
+    return {
+        "ra_center_deg": float(center_ra),
+        "dec_center_deg": float(center_dec),
+        "radius_deg": max(radius_deg, 1e-6),
+    }
 
 
 def list_or_none(value) -> Optional[List[str]]:

@@ -55,12 +55,13 @@ def test_resolve_source_unknown_raises(cm):
 
 
 def test_resolve_source_needs_coords_when_undetectable(cm):
-    df = pl.DataFrame({"x": [1.0], "y": [2.0]})
-    with pytest.raises(InputError):
-        cm.resolve_source(df, {})
-    # explicit override works
-    src = cm.resolve_source(df, {"ra_column": "x", "dec_column": "y"})
-    assert src.ra_column == "x"
+    df = pl.DataFrame({"object_id": [1, 2, 3], "mag_g": [1.0, 2.0, 3.0]})
+    src = cm.resolve_source(df, {})
+    assert src.is_local
+    assert src.ra_column is None
+    assert src.dec_column is None
+    src2 = cm.resolve_source(df, {"ra_column": "object_id", "dec_column": "mag_g"})
+    assert src2.ra_column == "object_id"
 
 
 # --------------------------------------------------------------- crossmatch
@@ -107,3 +108,22 @@ def test_crossmatch_id_join_missing_columns_errors(cm):
     b = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     with pytest.raises(CrossMatchError, match="id columns"):
         cm.crossmatch(a, b, id_join=True)
+
+
+def test_id_join_without_ra_dec_columns(cm):
+    """id_join must succeed on tables whose columns are NOT RA/Dec-named."""
+    a = pl.DataFrame({"object_id": [1, 2, 3], "mag_g": [1.0, 2.0, 3.0]})
+    b = pl.DataFrame({"object_id": [2, 3, 4], "mag_r": [9.0, 8.0, 7.0]})
+    out = cm.crossmatch(a, b, id_join=True, id_column_1="object_id", id_column_2="object_id")
+    assert out.height == 2
+    assert {"mag_g", "mag_r"}.issubset(out.columns)
+
+
+def test_sky_match_still_errors_when_ra_dec_missing(cm):
+    """A sky match on a table without RA/Dec-named columns must fail loudly."""
+    from xmatch.exceptions import CrossMatchError as _Cme
+
+    a = pl.DataFrame({"object_id": [1], "mag_g": [1.0]})
+    b = pl.DataFrame({"object_id": [1], "mag_g": [1.0]})
+    with pytest.raises((_Cme,)):
+        cm.crossmatch(a, b)

@@ -14,7 +14,7 @@ import polars as pl
 import yaml
 
 from . import auth, io_utils
-from .astro_utils import coord_arrays, find_coord_columns, sky_extent
+from .astro_utils import coord_arrays, find_coord_columns, sky_extent, sky_extent_from_frame
 from .exceptions import ConfigError, CrossMatchError, InputError
 from .matchers import MatchSpec, id_join, sky_match
 from .sources import CatalogueSource
@@ -182,14 +182,22 @@ class CrossMatch:
         if lf is not None:
             src = src.with_frame(lf)
             src.name = name
-        columns = src.columns()
-        src.ra_column, src.dec_column = self._resolve_coords(columns, overrides)
         src.id_column = overrides.get("id_column")
-        if not src.ra_column or not src.dec_column:
-            raise InputError(
-                f"Could not determine RA/Dec columns for '{name}'. "
-                f"Provide them explicitly (e.g. --ra1/--dec1)."
-            )
+        # Apply explicit overrides first; fall back to auto-detection. Note that
+        # we no longer raise on missing RA/Dec here so ``id_join`` flows can
+        # operate on tables without spatial columns; the hard error is now
+        # emitted from :func:`xmatch.matchers.sky_match`.
+        src.ra_column = overrides.get("ra_column")
+        src.dec_column = overrides.get("dec_column")
+        if src.ra_column is None or src.dec_column is None:
+            try:
+                detected_ra, detected_dec = self._resolve_coords(src.columns(), overrides)
+            except Exception:
+                detected_ra, detected_dec = None, None
+            if src.ra_column is None:
+                src.ra_column = detected_ra
+            if src.dec_column is None:
+                src.dec_column = detected_dec
         return src
 
     def _remote_source(self, cfg: Dict[str, Any], overrides) -> CatalogueSource:
@@ -347,8 +355,17 @@ class CrossMatch:
         dec = params.get("dec")
         radius_deg = params.get("radius_deg")
         if region_from is not None and (ra is None or dec is None):
-            ra_arr, dec_arr = coord_arrays(region_from, local.ra_column, local.dec_column)
-            extent = sky_extent(ra_arr, dec_arr)
+            # Use the polars-native aggregate version when given a LazyFrame so
+            # the local table's RA/Dec columns never need to materialise.
+            import polars as pl
+
+            if isinstance(region_from, pl.LazyFrame) and local.ra_column and local.dec_column:
+                extent = sky_extent_from_frame(region_from, local.ra_column, local.dec_column)
+            elif local.ra_column and local.dec_column:
+                ra_arr, dec_arr = coord_arrays(region_from, local.ra_column, local.dec_column)
+                extent = sky_extent(ra_arr, dec_arr)
+            else:
+                extent = None
             if extent:
                 ra, dec = extent["ra_center_deg"], extent["dec_center_deg"]
                 radius_deg = extent["radius_deg"] + float(params.get("radius_arcsec", 1.0)) / 3600.0

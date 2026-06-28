@@ -14,12 +14,17 @@ from .tap import execute_tap_query, get_tap_service
 logger = logging.getLogger(__name__)
 
 
+def _quote_id(name: str) -> str:
+    """Quote an ADQL identifier (double-quoted per VO spec)."""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _select_columns(src: CatalogueSource, requested: Optional[List[str]]) -> str:
     cols = set(requested or src.default_columns or [])
     for essential in (src.ra_column, src.dec_column, src.id_column):
         if essential:
             cols.add(essential)
-    return ", ".join(sorted(cols)) if cols else "*"
+    return ", ".join(sorted(_quote_id(c) for c in cols)) if cols else "*"
 
 
 def download_from_tap(
@@ -36,11 +41,17 @@ def download_from_tap(
     if not src.tap_url or not src.access_identifier:
         raise CrossMatchError(f"Missing tap_url/table for '{src.name}'.")
 
+    # All catalog-derived identifiers are double-quoted so columns whose names
+    # collide with ADQL/SQL reserved words (or contain spaces) don't break the
+    # query. Numeric values are floats; safe to interpolate.
+    ra_q = _quote_id(src.ra_column)
+    dec_q = _quote_id(src.dec_column)
+    table_q = _quote_id(src.access_identifier)
     select = _select_columns(src, columns)
-    query = f"SELECT {select} FROM {src.access_identifier} AS t"
+    query = f"SELECT {select} FROM {table_q} AS t"
     if ra is not None and dec is not None and radius_deg is not None:
         query += (
-            f" WHERE 1=CONTAINS(POINT('ICRS', t.{src.ra_column}, t.{src.dec_column}),"
+            f" WHERE 1=CONTAINS(POINT('ICRS', t.{ra_q}, t.{dec_q}),"
             f" CIRCLE('ICRS', {ra}, {dec}, {radius_deg}))"
         )
     service = get_tap_service(src.tap_url, auth_session=auth_session)
@@ -64,16 +75,22 @@ def tap_self_join(
     radius_deg = spec.radius_arcsec / 3600.0
     list1 = src1.default_columns or [c for c in (src1.ra_column, src1.dec_column) if c]
     list2 = src2.default_columns or [c for c in (src2.ra_column, src2.dec_column) if c]
-    cols1 = ", ".join(f"a.{c} AS a_{c}" for c in list1)
-    cols2 = ", ".join(f"b.{c} AS b_{c}" for c in list2)
+    a_ra_q = _quote_id(src1.ra_column)
+    a_dec_q = _quote_id(src1.dec_column)
+    b_ra_q = _quote_id(src2.ra_column)
+    b_dec_q = _quote_id(src2.dec_column)
+    a_table_q = _quote_id(src1.access_identifier)
+    b_table_q = _quote_id(src2.access_identifier)
+    cols1 = ", ".join(f"a.{_quote_id(c)} AS a_{c}" for c in list1)
+    cols2 = ", ".join(f"b.{_quote_id(c)} AS b_{c}" for c in list2)
     query = (
         f"SELECT {cols1}, {cols2}, "
-        f"DISTANCE(POINT('ICRS', a.{src1.ra_column}, a.{src1.dec_column}),"
-        f" POINT('ICRS', b.{src2.ra_column}, b.{src2.dec_column}))*3600 AS {spec.find}_sep_arcsec "
-        f"FROM {src1.access_identifier} AS a "
-        f"JOIN {src2.access_identifier} AS b "
-        f"ON 1=CONTAINS(POINT('ICRS', a.{src1.ra_column}, a.{src1.dec_column}),"
-        f" CIRCLE('ICRS', b.{src2.ra_column}, b.{src2.dec_column}, {radius_deg}))"
+        f"DISTANCE(POINT('ICRS', a.{a_ra_q}, a.{a_dec_q}),"
+        f" POINT('ICRS', b.{b_ra_q}, b.{b_dec_q}))*3600 AS {spec.find}_sep_arcsec "
+        f"FROM {a_table_q} AS a "
+        f"JOIN {b_table_q} AS b "
+        f"ON 1=CONTAINS(POINT('ICRS', a.{a_ra_q}, a.{a_dec_q}),"
+        f" CIRCLE('ICRS', b.{b_ra_q}, b.{b_dec_q}, {radius_deg}))"
     )
     service = get_tap_service(src1.tap_url, auth_session=auth_session)
     table = execute_tap_query(service, query, maxrec=maxrec)
