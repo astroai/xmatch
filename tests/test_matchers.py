@@ -718,6 +718,191 @@ def test_batch_size_find_all():
     assert out_full.height == out_batch.height
 
 
+# ------------------------------------------------------------------- ray engine
+
+def test_ray_engine_parity_with_zone():
+    """Ray-parallelised zone engine must produce identical match results
+    to the single-machine zone engine on synthetic data.
+
+    Spawns a local Ray cluster, matches a random catalogue with both
+    ``engine='zone'`` and ``engine='ray'``, and asserts:
+    * same number of matched pairs
+    * identical left/right indices (sorted)
+    * separations agree within floating-point tolerance
+    """
+    ray = pytest.importorskip("ray")
+
+    # Generate random stars in a ~0.1×0.1 degree patch.
+    rng = np.random.default_rng(42)
+    n_left, n_right = 500, 800
+    left = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.1, n_left),
+        "dec": rng.uniform(5.0, 5.1, n_left),
+    })
+    right = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.1, n_right),
+        "dec": rng.uniform(5.0, 5.1, n_right),
+    })
+
+    spec = MatchSpec(radius_arcsec=15.0, find="best")
+
+    # Single-machine zone baseline.
+    out_zone = sky_match(
+        _src("a"), _src("b"), left.lazy(), right.lazy(),
+        spec, engine="zone",
+    ).collect()
+
+    # Start a local Ray cluster and run the distributed engine.
+    # ray.init handles re-init gracefully; shut down when done.
+    ray.init(ignore_reinit_error=True, logging_level=40)
+    try:
+        out_ray = sky_match(
+            _src("a"), _src("b"), left.lazy(), right.lazy(),
+            spec, engine="ray",
+        ).collect()
+    finally:
+        ray.shutdown()
+
+    # Same number of matches.
+    assert out_zone.height == out_ray.height, (
+        f"zone={out_zone.height} vs ray={out_ray.height} matches"
+    )
+    if out_zone.height == 0:
+        return  # both empty — parity holds vacuously
+
+    # Match pair identity: sort by (left_ra, right_ra_2, sep_arcsec) so we
+    # compare the same logical pairs regardless of internal ordering.
+    def _sort_key(df):
+        return sorted(
+            zip(df["ra"].to_list(), df["ra_2"].to_list(),
+                df["sep_arcsec"].to_list()),
+        )
+
+    assert _sort_key(out_zone) == _sort_key(out_ray), (
+        "zone and ray produced different matched pairs"
+    )
+
+    # Separations agree.
+    sep_zone = np.sort(out_zone["sep_arcsec"].to_numpy())
+    sep_ray = np.sort(out_ray["sep_arcsec"].to_numpy())
+    assert np.allclose(sep_zone, sep_ray, atol=1e-6), (
+        f"Separation mismatch; max diff={np.max(np.abs(sep_zone - sep_ray))}"
+    )
+
+
+def test_ray_engine_find_all_parity_with_zone():
+    """Ray engine must also agree with zone when find='all'."""
+    ray = pytest.importorskip("ray")
+
+    rng = np.random.default_rng(99)
+    left = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.05, 300),
+        "dec": rng.uniform(5.0, 5.05, 300),
+    })
+    right = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.05, 500),
+        "dec": rng.uniform(5.0, 5.05, 500),
+    })
+
+    spec = MatchSpec(radius_arcsec=10.0, find="all")
+
+    out_zone = sky_match(
+        _src("a"), _src("b"), left.lazy(), right.lazy(),
+        spec, engine="zone",
+    ).collect()
+
+    ray.init(ignore_reinit_error=True, logging_level=40)
+    try:
+        out_ray = sky_match(
+            _src("a"), _src("b"), left.lazy(), right.lazy(),
+            spec, engine="ray",
+        ).collect()
+    finally:
+        ray.shutdown()
+
+    assert out_zone.height == out_ray.height, (
+        f"find=all: zone={out_zone.height} vs ray={out_ray.height}"
+    )
+    if out_zone.height == 0:
+        return
+
+    # Match pair identity (same as the find='best' test).
+    def _sort_key(df):
+        return sorted(
+            zip(df["ra"].to_list(), df["ra_2"].to_list(),
+                df["sep_arcsec"].to_list()),
+        )
+    assert _sort_key(out_zone) == _sort_key(out_ray), (
+        "find=all: zone and ray produced different matched pairs"
+    )
+
+    sep_zone = np.sort(out_zone["sep_arcsec"].to_numpy())
+    sep_ray = np.sort(out_ray["sep_arcsec"].to_numpy())
+    assert np.allclose(sep_zone, sep_ray, atol=1e-6)
+
+
+def test_ray_engine_graceful_fallback_when_unavailable(monkeypatch):
+    """When Ray is not installed, the ray engine must fall back to zone
+    (or fast) transparently and still produce correct results."""
+    # Directly patch the availability check so the fallback path is
+    # exercised regardless of whether Ray is actually installed.
+    monkeypatch.setattr("xmatch.ray_engine.ray_available", lambda: False)
+    # Clear the lazy-initialised remote function cache.
+    monkeypatch.setattr("xmatch.ray_engine._RAY_PIXEL_BATCH", None)
+
+    left = pl.DataFrame({"ra": [10.0, 20.0], "dec": [5.0, 6.0]})
+    right = pl.DataFrame({
+        "ra": [10.00005, 20.5, 30.00002],
+        "dec": [5.00005, 6.5, 7.00001],
+    })
+    spec = MatchSpec(radius_arcsec=1.0)
+
+    # Should not raise; falls back internally.
+    out = sky_match(
+        _src("a"), _src("b"), left.lazy(), right.lazy(),
+        spec, engine="ray",
+    ).collect()
+    assert out.height >= 1  # at least one pair should match within 1 arcsec
+
+
+def test_ray_engine_graceful_fallback_zone_to_fast(monkeypatch):
+    """When cdshealpix is unavailable, ray→zone→fast chain must still
+    produce correct results via the final fast fallback."""
+    # Simulate no cdshealpix so zone_match falls back to _scipy_match.
+    # Ray is also unavailable for this test (chain: ray → zone → fast).
+    monkeypatch.setattr("xmatch.ray_engine.ray_available", lambda: False)
+    monkeypatch.setattr("xmatch.ray_engine._RAY_PIXEL_BATCH", None)
+
+    import sys
+
+    # Remove cdshealpix from sys.modules so the import inside _zone_match
+    # actually triggers the __import__ patch below (avoids cache hit).
+    monkeypatch.delitem(sys.modules, "cdshealpix", raising=False)
+
+    # Save original __import__ so _fake_import doesn't call itself.
+    import builtins
+    _orig_import = builtins.__import__
+
+    def _fake_import(name, *args, **kwargs):
+        if name == "cdshealpix":
+            raise ImportError("cdshealpix not available")
+        return _orig_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    left = pl.DataFrame({"ra": [10.0, 20.0], "dec": [5.0, 6.0]})
+    right = pl.DataFrame({"ra": [10.00005, 50.0], "dec": [5.00005, 5.0]})
+    spec = MatchSpec(radius_arcsec=1.0)
+
+    # Should fall through ray→zone→fast and still produce correct matches.
+    out = sky_match(
+        _src("a"), _src("b"), left.lazy(), right.lazy(),
+        spec, engine="ray",
+    ).collect()
+    assert out.height == 1
+    assert out["sep_arcsec"][0] < 1.0
+
+
 def test_margin_caching_correctness_vs_fast():
     """The margin-cached zone engine must produce the same matches as the
     fast (scipy cKDTree) engine."""
