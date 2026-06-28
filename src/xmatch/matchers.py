@@ -465,15 +465,19 @@ def _scipy_match_nd(
     chord_max: float,
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """N-dimensional cKDTree match for find="best" (vectorised).
+    """N-dimensional cKDTree match for find="best" (vectorised + chunked).
 
     1. Query spatial cKDTree for up to *k_candidates* neighbours within
        ``chord_max``.
     2. Build N-d features (3-D spatial + z-score normalised extra columns).
-    3. Compute all pairwise N-d distances via broadcasting, then
-       ``argmin`` per left point — no Python loop over left rows.
+    3. Compute N-d distances via broadcasting in slices of *CHUNK_SIZE*
+       left rows, accumulating results incrementally — keeps the
+       ``(n_left, k, ndim)`` intermediate array bounded to ≈ *CHUNK_SIZE*
+       × k × ndim regardless of total catalogue size.
     """
     from scipy.spatial import cKDTree
+
+    CHUNK_SIZE = 50_000
 
     empty = (np.array([], int), np.array([], int), np.array([], float))
     n_left = l_xyz.shape[0]
@@ -494,32 +498,49 @@ def _scipy_match_nd(
     # Step 2: build N-d features once per side.
     l_feat, stats = _build_nd_features(l_ra, l_dec, left, spec.extra_distance_cols)
     r_feat, _ = _build_nd_features(r_ra, r_dec, right, spec.extra_distance_cols, union_mean=stats)
-    ndim = l_feat.shape[1]
 
-    # Step 3: vectorised N-d distance computation via broadcasting.
-    #          Replace sentinel indices (>n_right) with 0 to avoid out-of-
-    #          bounds in advanced indexing, then mask those entries with inf.
-    valid = np.isfinite(dist_sp) & (idx_sp < n_right)
-    if not np.any(valid):
+    # Step 3: chunked vectorised N-d distance computation.
+    #          Process n_left in slices to bound memory at
+    #          O(CHUNK_SIZE × k × ndim).
+    left_idx_parts, right_idx_parts, sep_parts = [], [], []
+    for sl_start in range(0, n_left, CHUNK_SIZE):
+        sl_end = min(sl_start + CHUNK_SIZE, n_left)
+        sl = slice(sl_start, sl_end)
+        chunk_size = sl_end - sl_start
+
+        valid_chunk = np.isfinite(dist_sp[sl]) & (idx_sp[sl] < n_right)
+        if not np.any(valid_chunk):
+            continue
+
+        idx_safe = np.where(valid_chunk, idx_sp[sl], 0).astype(np.int64)
+        r_candidates = r_feat[idx_safe]                 # (chunk, k, ndim)
+        l_expanded = l_feat[sl, None, :]                 # (chunk, 1, ndim)
+        nd_dists = np.linalg.norm(
+            r_candidates - l_expanded, axis=-1
+        )                                                # (chunk, k)
+        nd_dists[~valid_chunk] = np.inf
+
+        best_k = np.argmin(nd_dists, axis=-1)            # (chunk,)
+        has_match = np.isfinite(nd_dists[np.arange(chunk_size), best_k])
+        if not np.any(has_match):
+            continue
+
+        chunk_left = np.nonzero(has_match)[0].astype(np.int64) + sl_start
+        chunk_right = idx_sp[chunk_left, best_k[has_match]].astype(np.int64)
+        chunk_seps = _chord_to_arcsec(
+            np.linalg.norm(l_xyz[chunk_left] - r_xyz[chunk_right], axis=-1)
+        )
+        left_idx_parts.append(chunk_left)
+        right_idx_parts.append(chunk_right)
+        sep_parts.append(np.asarray(chunk_seps, dtype=float))
+
+    if not left_idx_parts:
         return empty
-
-    idx_safe = np.where(valid, idx_sp, 0).astype(np.int64)
-    r_candidates = r_feat[idx_safe]                    # (n_left, k, ndim)
-    l_expanded = l_feat[:, None, :]                    # (n_left, 1, ndim)
-    nd_dists = np.linalg.norm(r_candidates - l_expanded, axis=-1)  # (n_left, k)
-    nd_dists[~valid] = np.inf                         # mask invalid entries
-
-    best_k = np.argmin(nd_dists, axis=-1)              # (n_left,)
-    has_match = np.isfinite(nd_dists[np.arange(n_left), best_k])
-    if not np.any(has_match):
-        return empty
-
-    left_idx = np.nonzero(has_match)[0].astype(np.int64)
-    right_idx = idx_sp[left_idx, best_k[left_idx]].astype(np.int64)
-    seps = _chord_to_arcsec(
-        np.linalg.norm(l_xyz[left_idx] - r_xyz[right_idx], axis=-1)
+    return (
+        np.concatenate(left_idx_parts),
+        np.concatenate(right_idx_parts),
+        np.concatenate(sep_parts),
     )
-    return left_idx, right_idx, np.asarray(seps, dtype=float)
 
 
 # --------------------------------------------------------------------------- #
