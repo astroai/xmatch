@@ -19,10 +19,20 @@ results stream straight to disk so large matches never need to fit in memory.
 - One simple command: `xmatch cat1 cat2`.
 - Inputs: local Parquet/CSV/FITS files, polars/pandas frames (Python API), remote
   TAP catalogues, the CDS XMatch service, and HATS catalogues (optional).
-- Spatial matching engines:
+- Spatial matching engines (`--engine NAME`, default `auto`):
   - **STILTS** `tmatch2` (`sky`/`skyerr`/`skyellipse`) when a `stilts` command is
-    available (default).
-  - **astropy** KD-tree matcher as a pure-Python fallback (no Java required).
+    available (`engine=stilts`).
+  - **astropy** KD-tree matcher as a pure-Python fallback (`engine=astropy`).
+  - **fast** – Tier 1: in-process `scipy.spatial.cKDTree` on 3-D Cartesian
+    unit-sphere embeddings; drop-in replacement for astropy (~3–5× faster,
+    no Java dependency).
+  - **zone** – Tier 2: HEALPix-sharded cone match via `cdshealpix`. When
+    `cdshealpix` is not importable the engine transparently falls back to
+    Tier 1 with a logged warning, so the API contract is unchanged.
+- Probabilistic qualification (engine-agnostic): `--probabilistic --priors g,r`
+  appends a Budavári-style hierarchical Bayes factor `p_match` column in
+  [0, 1] to every matched pair. Priors are fitted on the unconditional union
+  of both catalogues and combined with the joint positional kernel.
 - ID joins (relational joins on identifier columns) via polars.
 - All standard join modes: inner, outer, left/right-outer, and anti joins.
 - Returns an eager polars `DataFrame` by default, or a `LazyFrame` on request.
@@ -53,6 +63,12 @@ xmatch my_sources.csv gaia -o my_gaia.parquet -r 2.0
 
 # Error-ellipse match (needs error columns in the catalogue config)
 xmatch gaia desils_noao --matcher skyerr --max-error 3.0 -o out.parquet
+
+# Pick the in-process cKDTree engine (no Java) and stream matches to disk
+xmatch a.parquet b.parquet --engine fast -r 1.0 -o matches.parquet
+
+# Compute a probabilistic p_match column from a photometric prior
+xmatch a.parquet b.parquet --engine fast --probabilistic --priors g_mag,r_mag -o matches.parquet
 
 # Keep all matches within the radius, and use an outer join
 xmatch a.csv b.csv --find all --join 1or2
@@ -97,6 +113,23 @@ cm.crossmatch(a, b, id_join=True, id_column_1="id", id_column_2="id",
 `crossmatch()` returns a polars `DataFrame` by default, a `LazyFrame` when
 `lazy=True`, and `None` when `output_file=` is given (the result is streamed to
 that file). Use `.to_pandas()` if you need a pandas frame.
+
+## Matcher tiers
+
+Spatial sky matching has three tiers, each a drop-in replacement. They all share
+the same result schema (left columns + right columns with collisions suffixed
+`_2` + `sep_arcsec`); only the engine flag differs.
+
+| Tier | Flag | Implementation | Notes |
+|------|------|----------------|-------|
+| 1    | `--engine fast` | in-process `scipy.spatial.cKDTree` on 3-D Cartesian unit-sphere embeddings | Drop-in replacement for astropy, ~3–5× faster, no Java. |
+| 2    | `--engine zone` | HEALPix-sharded cone match via `cdshealpix` | Falls back to Tier 1 with a logged warning if `cdshealpix` is not importable. |
+| (default) | `--engine auto` → `stilts` → `astropy` | unchanged from prior releases | Default when no `--engine` is passed. STILTS needs Java. |
+| 3    | `--probabilistic --priors c1,c2,…` | Budavári hierarchical Bayes factor over the matched pairs | Engine-agnostic: layers a `p_match ∈ [0, 1]` column on top of whichever engine produced the pairs. |
+
+The three engines behind `--engine` are mutually exclusive (sky-match engines).
+Tier 3 is orthogonal: pass `--probabilistic --priors g,r` on top of any engine
+to add a probabilistic qualification column.
 
 ## Strategy selection
 
