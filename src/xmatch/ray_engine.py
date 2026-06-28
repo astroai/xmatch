@@ -152,6 +152,45 @@ def _get_ray_pixel_batch():
     return _RAY_PIXEL_BATCH
 
 
+def _ray_gather_with_progress(futures, total: int):
+    """Gather Ray task results with a polling progress indicator.
+
+    Uses ``ray.wait()`` to collect results one at a time and logs progress
+    at INFO level with batch count, percentage, and throughput.
+    """
+    import time
+
+    import ray
+
+    remaining = list(futures)
+    results: list = []
+    start_time = time.time()
+    last_log = start_time
+
+    while remaining:
+        ready, remaining = ray.wait(remaining, num_returns=1, timeout=None)
+        results.extend(ray.get(ready))
+        done = len(results)
+        now = time.time()
+        # Log at most once per second so the progress bar doesn't spam.
+        if done == total or now - last_log >= 1.0:
+            elapsed = max(now - start_time, 1e-6)
+            rate = done / elapsed
+            eta = (total - done) / rate if rate > 0 else 0
+            logger.info(
+                "Ray progress: %d/%d batches (%.0f%%, %.1f/s, ETA %.0fs)",
+                done, total, 100.0 * done / total, rate, eta,
+            )
+            last_log = now
+
+    elapsed = time.time() - start_time
+    logger.info(
+        "Ray gather complete: %d batches in %.1fs (%.1f/s).",
+        total, elapsed, total / max(elapsed, 1e-6),
+    )
+    return results
+
+
 def ray_zone_match(
     left,
     right,
@@ -254,6 +293,7 @@ def ray_zone_match(
     pixel_batch_fn = _get_ray_pixel_batch()
     futures: list = []
     pixel_items = list(l_by_pix.items())
+    total_batches = len(pixel_items)
     for l_pix_int, left_indices in pixel_items:
         indices_arr = np.asarray(left_indices, dtype=np.int64)
         future = pixel_batch_fn.remote(
@@ -268,8 +308,10 @@ def ray_zone_match(
         )
         futures.append(future)
 
-    # Gather results.
-    results = ray.get(futures)
+    logger.info("Submitted %d pixel batches to Ray workers.", total_batches)
+
+    # Gather results with progress reporting.
+    results = _ray_gather_with_progress(futures, total_batches)
 
     # Concatenate per-pixel batch results.
     l_parts, r_parts, sep_parts = [], [], []

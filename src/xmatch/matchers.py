@@ -465,17 +465,18 @@ def _scipy_match_nd(
     chord_max: float,
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """N-dimensional cKDTree match for find="best".
+    """N-dimensional cKDTree match for find="best" (vectorised).
 
     1. Query spatial cKDTree for up to *k_candidates* neighbours within
        ``chord_max``.
     2. Build N-d features (3-D spatial + z-score normalised extra columns).
-    3. Among the spatial candidates, pick the one with smallest N-d
-       Euclidean distance.
+    3. Compute all pairwise N-d distances via broadcasting, then
+       ``argmin`` per left point — no Python loop over left rows.
     """
     from scipy.spatial import cKDTree
 
     empty = (np.array([], int), np.array([], int), np.array([], float))
+    n_left = l_xyz.shape[0]
     n_right = r_xyz.shape[0]
 
     # Step 1: spatial candidate retrieval.
@@ -488,34 +489,37 @@ def _scipy_match_nd(
     if k_candidates == 1:
         dist_sp = dist_sp[:, None]
         idx_sp = idx_sp[:, None]
+    k = idx_sp.shape[1]  # actual k used
 
     # Step 2: build N-d features once per side.
     l_feat, stats = _build_nd_features(l_ra, l_dec, left, spec.extra_distance_cols)
     r_feat, _ = _build_nd_features(r_ra, r_dec, right, spec.extra_distance_cols, union_mean=stats)
+    ndim = l_feat.shape[1]
 
-    # Step 3: evaluate N-d distance for every candidate, pick best.
-    left_idx_parts, right_idx_parts, sep_parts = [], [], []
-    for i in range(l_xyz.shape[0]):
-        candidates = idx_sp[i]
-        valid = np.isfinite(dist_sp[i]) & (candidates < n_right)
-        candidates = candidates[valid]
-        if candidates.size == 0:
-            continue
-        nd_dists = np.linalg.norm(r_feat[candidates] - l_feat[i], axis=-1)
-        best_j = int(np.argmin(nd_dists))
-        best_r = int(candidates[best_j])
-        sep = _chord_to_arcsec(float(np.linalg.norm(l_xyz[i] - r_xyz[best_r])))
-        left_idx_parts.append(np.array([i], dtype=np.int64))
-        right_idx_parts.append(np.array([best_r], dtype=np.int64))
-        sep_parts.append(np.array([float(sep)], dtype=float))
-
-    if not left_idx_parts:
+    # Step 3: vectorised N-d distance computation via broadcasting.
+    #          Replace sentinel indices (>n_right) with 0 to avoid out-of-
+    #          bounds in advanced indexing, then mask those entries with inf.
+    valid = np.isfinite(dist_sp) & (idx_sp < n_right)
+    if not np.any(valid):
         return empty
-    return (
-        np.concatenate(left_idx_parts),
-        np.concatenate(right_idx_parts),
-        np.concatenate(sep_parts),
+
+    idx_safe = np.where(valid, idx_sp, 0).astype(np.int64)
+    r_candidates = r_feat[idx_safe]                    # (n_left, k, ndim)
+    l_expanded = l_feat[:, None, :]                    # (n_left, 1, ndim)
+    nd_dists = np.linalg.norm(r_candidates - l_expanded, axis=-1)  # (n_left, k)
+    nd_dists[~valid] = np.inf                         # mask invalid entries
+
+    best_k = np.argmin(nd_dists, axis=-1)              # (n_left,)
+    has_match = np.isfinite(nd_dists[np.arange(n_left), best_k])
+    if not np.any(has_match):
+        return empty
+
+    left_idx = np.nonzero(has_match)[0].astype(np.int64)
+    right_idx = idx_sp[left_idx, best_k[left_idx]].astype(np.int64)
+    seps = _chord_to_arcsec(
+        np.linalg.norm(l_xyz[left_idx] - r_xyz[right_idx], axis=-1)
     )
+    return left_idx, right_idx, np.asarray(seps, dtype=float)
 
 
 # --------------------------------------------------------------------------- #
