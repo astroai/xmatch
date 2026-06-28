@@ -530,6 +530,50 @@ def test_nd_match_picks_photometrically_closer_star():
     assert all(abs(out_nd["mag_2"].to_numpy() - 10.05) < 0.01)
 
 
+def test_nd_chunk_size_parity():
+    """Chunked _scipy_match_nd must produce identical results regardless of
+    _ND_CHUNK_SIZE.  Test with extreme chunk_size=1 (one row per chunk) vs
+    the default 50_000 on a small catalogue to verify index-offset
+    correctness."""
+    from xmatch import matchers
+
+    left = pl.DataFrame({
+        "ra": [10.0, 10.0, 20.0, 20.0],
+        "dec": [5.0, 5.0, 6.0, 6.0],
+        "mag": [10.0, 10.0, 12.0, 12.0],
+    })
+    right = pl.DataFrame({
+        "ra": [10.00005, 10.00008, 20.00005, 20.00008],
+        "dec": [5.00005, 5.0, 6.00005, 6.0],
+        "mag": [10.0, 15.0, 12.0, 16.0],
+    })
+    spec = MatchSpec(radius_arcsec=1.0, find="best",
+                     extra_distance_cols={"mag": 1.0})
+
+    orig_chunk = matchers._ND_CHUNK_SIZE
+    try:
+        matchers._ND_CHUNK_SIZE = 1  # extreme: one row per chunk
+        out_1 = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                          spec, engine="fast").collect()
+
+        matchers._ND_CHUNK_SIZE = 50_000
+        out_50k = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                            spec, engine="fast").collect()
+    finally:
+        matchers._ND_CHUNK_SIZE = orig_chunk
+
+    assert out_1.height == out_50k.height == 4
+    assert np.allclose(
+        sorted(out_1["sep_arcsec"].to_list()),
+        sorted(out_50k["sep_arcsec"].to_list()),
+        atol=1e-6,
+    )
+    # Verify N-d ranking: all 4 left stars should pick the photometrically
+    # similar right star (mag_2 = left mag, not 15 or 16)
+    for i in range(4):
+        assert abs(out_1["mag_2"][i] - out_1["mag"][i]) < 0.01
+
+
 def test_nd_match_missing_column_warns_but_matches():
     """When extra_distance_cols references a column not in the data,
     the engine should warn and fall back to spatial-only."""
