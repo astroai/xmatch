@@ -17,7 +17,8 @@ import yaml
 from . import auth, io_utils
 from .astro_utils import coord_arrays, find_coord_columns, sky_extent, sky_extent_from_frame
 from .exceptions import ConfigError, CrossMatchError, InputError
-from .matchers import MatchSpec, id_join, sky_match
+from .matchers import _RIGHT_SUFFIX, id_join, sky_match
+from .request import MatchRequest
 from .sources import CatalogueSource
 
 logger = logging.getLogger(__name__)
@@ -261,116 +262,268 @@ class CrossMatch:
         lazy: bool = False,
         **params,
     ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
-        ov1 = _side_overrides(params, "1")
-        ov2 = _side_overrides(params, "2")
-        src1 = self.resolve_source(catalogue_1_input, ov1)
-        src2 = self.resolve_source(catalogue_2_input, ov2)
+        """Run a crossmatch (backward-compatible spread-args entry point).
 
-        spec = MatchSpec(
-            radius_arcsec=float(params.get("radius_arcsec", 1.0)),
-            matcher=params.get("matcher") or "sky",
-            max_error=float(params.get("max_error", 3.0)),
-            join_type=params.get("join_type", "1and2"),
-            find=params.get("find", "best"),
-            prior_columns=list(params.get("prior_columns") or []),
+        For new code prefer :meth:`crossmatch_request` with a typed
+        :class:`~xmatch.request.MatchRequest`.
+        """
+        req = MatchRequest.from_legacy(
+            catalogue_1_input,
+            catalogue_2_input,
+            output_file=output_file,
+            lazy=lazy,
+            **params,
         )
-        result_lf = self._dispatch(src1, src2, spec, params)
+        return self.crossmatch_request(req)
+
+    def crossmatch_multi(
+        self,
+        catalogues: List[FrameInput],
+        output_file: Optional[Union[str, Path]] = None,
+        *,
+        lazy: bool = False,
+        **params: Any,
+    ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
+        """Run an N-catalogue crossmatch using sequential pairwise matching.
+
+        Catalogue 1 and 2 are matched first; the result is then matched against
+        catalogue 3, then catalogue 4, and so on.  All pairwise steps share the
+        same ``MatchSpec`` derived from ``**params``.
+
+        The first catalogue's RA/Dec columns are used as the spatial reference
+        throughout the chain.  Column-name collisions on each successive right
+        side are disambiguated with ``_2``, ``_3``, … suffixes.
+
+        Only local files/frames are fully supported for catalogues beyond the
+        first two; remote catalogues in positions 3+ require ``ra``, ``dec``,
+        and ``radius_deg`` in ``params`` so they can be downloaded.
+        """
+        if len(catalogues) < 2:
+            raise CrossMatchError("At least two catalogues are required for crossmatching.")
+
+        # Build a shared request for every pairwise step.
+        req = MatchRequest.from_legacy(
+            catalogues[0],
+            catalogues[1],
+            output_file=None,
+            lazy=True,
+            **params,
+        )
+
+        # ------------------------------------------------------------------ #
+        # Resolve ALL sources up front.
+        # ------------------------------------------------------------------ #
+        sources: List[CatalogueSource] = []
+        sources.append(self.resolve_source(req.cat1, req.side1.as_dict()))
+        sources.append(self.resolve_source(req.cat2, req.side2.as_dict()))
+        for cat_input in catalogues[2:]:
+            sources.append(self.resolve_source(cat_input, {}))
+
+        first_src = sources[0]
+
+        # Ensure first source is local so we can use its frame for region
+        # inference and as the spatial reference throughout the chain.
+        if not first_src.is_local and first_src.access_method in ("tap", "cds_xmatch"):
+            downloaded = self._download_remote(first_src, req, prefix="1")
+            first_src = first_src.with_frame(downloaded.lazy())
+            sources[0] = first_src
+
+        # Download remote (tap/cds_xmatch) sources beyond the first two when
+        # possible.  HATS sources at any position are handled by _dispatch /
+        # hats_crossmatch below — skip them here.
+        #
+        # NOTE: when *first_src* is a HATS catalogue, region inference via
+        # ``first_src.lazy()`` below is impossible for TAP/CDS downloads at
+        # positions 3+.  Work around this by passing explicit ``ra``, ``dec``,
+        # and ``radius_deg`` in the params.  The clearer error surfaces from
+        # ``_download_remote`` rather than a bare ``ValueError``.
+        for i, src in enumerate(sources):
+            if src.is_local or src.access_method == "hats":
+                continue
+            if i <= 1:
+                continue  # handled by _dispatch below
+            # For catalogues 3+, download the region inferred from the first
+            # source (or explicit ra/dec/radius_deg from params).
+            downloaded = self._download_remote(
+                src,
+                req,
+                prefix=str(i + 1),
+                region_from=first_src.lazy(),
+                local=first_src,
+            )
+            sources[i] = src.with_frame(downloaded.lazy())
+
+        # ------------------------------------------------------------------ #
+        # First pair: use _dispatch so local/remote/hats all work.
+        # ------------------------------------------------------------------ #
+        accum_lf = self._dispatch(sources[0], sources[1], req)
+
+        # ------------------------------------------------------------------ #
+        # Remaining catalogues: local match against the accumulator.
+        # Each successive right side gets its own suffix: _2, _3, _4, …
+        # An eager checkpoint prevents O(N²) query-graph re-evaluation.
+        # ------------------------------------------------------------------ #
+        for i in range(2, len(sources)):
+            right_src = sources[i]
+            suffix = f"_{i + 1}"  # catalogue 3 → _3, catalogue 4 → _4, …
+
+            if right_src.access_method == "hats":
+                # HATS at position 3+: route via hats_crossmatch with the
+                # accumulated frame as the local left side.
+                from . import hats_source
+
+                accum_lf = hats_source.hats_crossmatch(
+                    first_src, right_src, req.spec,
+                    local_lf1=accum_lf,
+                    right_suffix=suffix,
+                ).lazy()
+            else:
+                right_lf = right_src.lazy()
+                accum_lf = (
+                    self._local_match(
+                        first_src,  # spatial reference: always cat-1 RA/Dec
+                        right_src,
+                        accum_lf,
+                        right_lf,
+                        req,
+                        right_suffix=suffix,
+                    )
+                    .collect()
+                    .lazy()  # checkpoint: materialise before next iteration
+                )
 
         if output_file:
-            io_utils.write_frame(result_lf, output_file)
+            io_utils.write_frame(accum_lf, output_file)
             return None
-        return result_lf if lazy else result_lf.collect()
+        return accum_lf if lazy else accum_lf.collect()
 
-    def _dispatch(self, src1, src2, spec, params) -> pl.LazyFrame:
+    def crossmatch_request(
+        self,
+        req: MatchRequest,
+    ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
+        """Run a crossmatch from a typed :class:`~xmatch.request.MatchRequest`.
+
+        This is the preferred entry point for new code. It gives mypy and IDEs
+        full visibility into every parameter.
+        """
+        src1 = self.resolve_source(req.cat1, req.side1.as_dict())
+        src2 = self.resolve_source(req.cat2, req.side2.as_dict())
+
+        result_lf = self._dispatch(src1, src2, req)
+
+        if req.output_file:
+            io_utils.write_frame(result_lf, req.output_file)
+            return None
+        return result_lf if req.lazy else result_lf.collect()
+
+    # ----------------------------------------------------------------- dispatch
+    def _dispatch(
+        self,
+        src1: CatalogueSource,
+        src2: CatalogueSource,
+        req: MatchRequest,
+        *,
+        right_suffix: str = _RIGHT_SUFFIX,
+    ) -> pl.LazyFrame:
         if src1.access_method == "hats" or src2.access_method == "hats":
             from . import hats_source
 
             lf1 = src1.lazy() if src1.is_local else None
             lf2 = src2.lazy() if src2.is_local else None
             return hats_source.hats_crossmatch(
-                src1, src2, spec, local_lf1=lf1, local_lf2=lf2
+                src1, src2, req.spec,
+                local_lf1=lf1, local_lf2=lf2,
+                right_suffix=right_suffix,
             ).lazy()
 
         if src1.is_local and src2.is_local:
-            return self._local_match(src1, src2, src1.lazy(), src2.lazy(), spec, params)
+            return self._local_match(src1, src2, src1.lazy(), src2.lazy(), req)
 
         if src1.is_local != src2.is_local:
-            return self._local_vs_remote(src1, src2, spec, params)
+            return self._local_vs_remote(src1, src2, req)
 
-        return self._remote_vs_remote(src1, src2, spec, params)
+        return self._remote_vs_remote(src1, src2, req)
 
-    def _id_columns(self, src1, src2, params):
-        join_on_ids = params.get("join_on_ids")
-        if not join_on_ids and not params.get("id_join"):
+    def _id_columns(self, src1: CatalogueSource, src2: CatalogueSource, req: MatchRequest):
+        if not req.id_join:
             return None
-        spec = join_on_ids if isinstance(join_on_ids, dict) else {}
-        id1 = params.get("id_column_1") or spec.get("cat1") or src1.id_column
-        id2 = params.get("id_column_2") or spec.get("cat2") or src2.id_column
+        id1 = req.id_column_1 or src1.id_column
+        id2 = req.id_column_2 or src2.id_column
         if not id1 or not id2:
             raise CrossMatchError(
                 "ID join requested but id columns are unknown. Provide --id1 and --id2."
             )
         return id1, id2
 
-    def _local_match(self, src1, src2, lf1, lf2, spec, params) -> pl.LazyFrame:
-        ids = self._id_columns(src1, src2, params)
+    def _local_match(
+        self,
+        src1: CatalogueSource,
+        src2: CatalogueSource,
+        lf1: pl.LazyFrame,
+        lf2: pl.LazyFrame,
+        req: MatchRequest,
+        *,
+        right_suffix: str = _RIGHT_SUFFIX,
+    ) -> pl.LazyFrame:
+        ids = self._id_columns(src1, src2, req)
         if ids:
-            return id_join(lf1, lf2, ids[0], ids[1], spec.join_type)
+            return id_join(lf1, lf2, ids[0], ids[1], req.spec.join_type, suffix=right_suffix)
         return sky_match(
             src1,
             src2,
             lf1,
             lf2,
-            spec,
-            engine=params.get("engine", "auto"),
+            req.spec,
+            engine=req.engine,
             stilts_cmd_base=self.stilts_cmd_base,
             java_opts=self.stilts_java_opts,
             tmpdir=self.stilts_tmpdir,
+            right_suffix=right_suffix,
         )
 
-    def _local_vs_remote(self, src1, src2, spec, params) -> pl.LazyFrame:
+    def _local_vs_remote(self, src1: CatalogueSource, src2: CatalogueSource, req: MatchRequest) -> pl.LazyFrame:
         local, remote = (src1, src2) if src1.is_local else (src2, src1)
         local_lf = local.lazy()
+        remote_prefix = "2" if src1.is_local else "1"
 
-        if remote.access_method == "cds_xmatch" and not self._id_columns(src1, src2, params):
+        if remote.access_method == "cds_xmatch" and not req.id_join:
             from .remote_cds import cds_xmatch_local_remote
 
-            result = cds_xmatch_local_remote(local, remote, local_lf, spec)
+            result = cds_xmatch_local_remote(local, remote, local_lf, req.spec)
             return result.lazy()
 
-        remote_prefix = "2" if src1.is_local else "1"
         remote_lf = self._download_remote(
-            remote, params, prefix=remote_prefix, region_from=local_lf, local=local
+            remote, req, prefix=remote_prefix, region_from=local_lf, local=local
         ).lazy()
         downloaded = remote.with_frame(remote_lf)
         new1 = src1 if src1.is_local else downloaded
         new2 = downloaded if src1.is_local else src2
-        return self._local_match(new1, new2, new1.lazy(), new2.lazy(), spec, params)
+        return self._local_match(new1, new2, new1.lazy(), new2.lazy(), req)
 
-    def _remote_vs_remote(self, src1, src2, spec, params) -> pl.LazyFrame:
+    def _remote_vs_remote(self, src1: CatalogueSource, src2: CatalogueSource, req: MatchRequest) -> pl.LazyFrame:
         if (
             src1.access_method == "tap"
             and src2.access_method == "tap"
             and src1.tap_url == src2.tap_url
-            and not self._id_columns(src1, src2, params)
+            and not req.id_join
         ):
             from .remote_tap import tap_self_join
 
             auth_session = self.auth_config.get_auth_session(src1.archive)
-            return tap_self_join(src1, src2, spec, auth_session=auth_session).lazy()
+            return tap_self_join(src1, src2, req.spec, auth_session=auth_session).lazy()
 
-        lf1 = self._download_remote(src1, params, prefix="1").lazy()
-        lf2 = self._download_remote(src2, params, prefix="2").lazy()
+        lf1 = self._download_remote(src1, req, prefix="1").lazy()
+        lf2 = self._download_remote(src2, req, prefix="2").lazy()
         new1 = src1.with_frame(lf1)
         new2 = src2.with_frame(lf2)
-        return self._local_match(new1, new2, lf1, lf2, spec, params)
+        return self._local_match(new1, new2, lf1, lf2, req)
 
     def _download_remote(
-        self, src, params, *, prefix, region_from=None, local=None
+        self, src: CatalogueSource, req: MatchRequest, *, prefix: str, region_from=None, local=None
     ) -> pl.DataFrame:
-        ra = params.get("ra")
-        dec = params.get("dec")
-        radius_deg = params.get("radius_deg")
+        ra = req.ra
+        dec = req.dec
+        radius_deg = req.radius_deg
         if region_from is not None and (ra is None or dec is None):
             # Use the polars-native aggregate version when given a LazyFrame so
             # the local table's RA/Dec columns never need to materialise.
@@ -385,14 +538,20 @@ class CrossMatch:
                 extent = None
             if extent:
                 ra, dec = extent["ra_center_deg"], extent["dec_center_deg"]
-                radius_deg = extent["radius_deg"] + float(params.get("radius_arcsec", 1.0)) / 3600.0
+                radius_deg = extent["radius_deg"] + req.spec.radius_arcsec / 3600.0
         if ra is None or dec is None or radius_deg is None:
             raise CrossMatchError(
                 f"Downloading remote catalogue '{src.name}' needs a region "
                 f"(provide ra/dec and radius_deg)."
             )
 
-        columns = params.get(f"columns_{prefix}")
+        columns = (
+            req.side1.columns
+            if prefix == "1"
+            else req.side2.columns
+            if prefix == "2"
+            else None
+        )
         auth_session = self.auth_config.get_auth_session(src.archive)
         if src.access_method == "tap":
             from .remote_tap import download_from_tap
@@ -416,15 +575,3 @@ class CrossMatch:
                 columns=columns,
             )
         raise CrossMatchError(f"Cannot download from access method '{src.access_method}'.")
-
-
-def _side_overrides(params: Dict[str, Any], prefix: str) -> Dict[str, Any]:
-    out = {}
-    for field in ("ra_column", "dec_column", "id_column"):
-        value = params.get(f"{field}_{prefix}")
-        if value is not None:
-            out[field] = value
-    cols = params.get(f"columns_{prefix}")
-    if cols is not None:
-        out["columns"] = cols
-    return out

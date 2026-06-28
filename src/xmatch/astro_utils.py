@@ -191,8 +191,10 @@ def sky_extent_from_frame(
     mx, my, mz = float(means["x"][0]), float(means["y"][0]), float(means["z"][0])
     norm = math.sqrt(mx * mx + my * my + mz * mz)
     if norm < 1e-12:  # antipodal spread; fall back to whole-sky equator mean
-        ra_mean = lf.select(pl.col(ra_col).mean()).collect().item()
-        dec_mean = lf.select(pl.col(dec_col).mean()).collect().item()
+        ra_mean = lf.select(pl.col(ra_col).drop_nulls().mean()).collect().item()
+        dec_mean = lf.select(pl.col(dec_col).drop_nulls().mean()).collect().item()
+        if ra_mean is None or dec_mean is None:
+            return None
         return {
             "ra_center_deg": float(ra_mean),
             "dec_center_deg": float(dec_mean),

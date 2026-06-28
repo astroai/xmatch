@@ -94,12 +94,19 @@ def _build_result(
     seps: np.ndarray,
     spec: MatchSpec,
     p_match: Optional[np.ndarray] = None,
+    right_suffix: str = _RIGHT_SUFFIX,
 ) -> pl.DataFrame:
-    right_renamed = _rename_right(right, left.columns)
+    right_renamed = _rename_right(right, left.columns, suffix=right_suffix)
 
     matched = _gather(left, left_idx).hstack(_gather(right_renamed, right_idx))
+    # Drop any previous sep_arcsec carried from the left side (accumulator in
+    # multi-way crossmatching) so the latest match separation is unambiguous.
+    if SEP_COLUMN in matched.columns:
+        matched = matched.drop(SEP_COLUMN)
     matched = matched.hstack(pl.DataFrame({SEP_COLUMN: np.asarray(seps, dtype=float)}))
     if p_match is not None and p_match.size == matched.height:
+        if PMATCH_COLUMN in matched.columns:
+            matched = matched.drop(PMATCH_COLUMN)
         matched = matched.hstack(pl.DataFrame({PMATCH_COLUMN: np.asarray(p_match, dtype=float)}))
 
     jt = spec.join_type
@@ -298,6 +305,7 @@ def _zone_match_healpix(
 
     if spec.matcher == "sky":
         radius_deg = spec.radius_arcsec / 3600.0
+        chord_max = _arcsec_to_chord(spec.radius_arcsec)
     else:
         lsig = _pos_sigma_arcsec(left, left_src)
         rsig = _pos_sigma_arcsec(right, right_src)
@@ -309,6 +317,7 @@ def _zone_match_healpix(
             return empty
         search_radius = spec.max_error * (float(np.nanmax(lsig)) + float(np.nanmax(rsig)))
         radius_deg = max(search_radius, 0.0) / 3600.0
+        chord_max = _arcsec_to_chord(max(search_radius, 0.0))
     if radius_deg <= 0:
         return empty
 
@@ -327,23 +336,32 @@ def _zone_match_healpix(
         xyz_cache[int(pix)] = _radec_to_xyz(r_ra[idx], r_dec[idx])
         tree_cache[int(pix)] = cKDTree(xyz_cache[int(pix)])
 
-    chord_max = _arcsec_to_chord(spec.radius_arcsec)
     l_xyz = _radec_to_xyz(l_ra, l_dec)
 
+    # Group left points by HEALPix pixel so we can batch-query each right
+    # pixel's tree once (instead of spawning worker threads per point).
+    l_by_pix: dict[int, list] = {}
+    for i, pix in enumerate(l_pix):
+        l_by_pix.setdefault(int(pix), []).append(i)
+
     l_parts, r_parts, sep_parts = [], [], []
-    for i, _pix in enumerate(l_pix):
-        # Overlapping right pixels = self + cone-neighbours.
+    for l_pix_int, left_indices in l_by_pix.items():
+        indices_arr = np.asarray(left_indices, dtype=np.int64)
+        # Cone search once per pixel (same for all points in pixel).
+        mid = len(left_indices) // 2
+        rep_i = left_indices[mid]
         npix = hp.cone_search_lonlat(
-            lon=float(np.radians(l_ra[i])),
-            lat=float(np.radians(l_dec[i])),
+            lon=float(np.radians(l_ra[rep_i])),
+            lat=float(np.radians(l_dec[rep_i])),
             radius=float(np.radians(radius_deg)),
             depth=DEPTH,
         )
-        # Collect candidates from every overlapping right pixel, dedup by
-        # global right index (so a left point straddling pixel boundaries
-        # never emits duplicate pairs), then argmin (find="best") or
-        # keep-all (find="all").
-        candidates = []  # (chord, rpix_int, local_idx)
+        batch_xyz = l_xyz[indices_arr]  # (n_pix, 3)
+
+        # Collect candidates per left point, dedup by global right index.
+        # For find="best" we batch-query the tree once per right pixel,
+        # then pick the minimum per left point.
+        per_left: list = [{} for _ in range(len(left_indices))]
         for rpix in npix:
             rpix_int = int(rpix)
             tree = tree_cache.get(rpix_int)
@@ -351,40 +369,51 @@ def _zone_match_healpix(
                 continue
             if spec.find == "best":
                 dist, idx = tree.query(
-                    l_xyz[i : i + 1], k=1, distance_upper_bound=chord_max, workers=-1
+                    batch_xyz, k=1, distance_upper_bound=chord_max, workers=-1
                 )
-                if np.isfinite(dist[0]) and idx[0] < tree.n:
-                    candidates.append((float(dist[0]), rpix_int, int(idx[0])))
+                valid = np.isfinite(dist) & (idx < tree.n)
+                for k in np.nonzero(valid)[0]:
+                    key = (rpix_int, int(idx[k]))
+                    d = float(dist[k])
+                    if key not in per_left[k] or d < per_left[k][key]:
+                        per_left[k][key] = d
             else:
-                neighbors = tree.query_ball_point(l_xyz[i : i + 1], r=chord_max, workers=-1)[0]
-                for n in neighbors:
-                    dx = xyz_cache[rpix_int][int(n)] - l_xyz[i]
-                    candidates.append((float(np.linalg.norm(dx)), rpix_int, int(n)))
+                idx_lists = tree.query_ball_point(batch_xyz, r=chord_max, workers=-1)
+                for k, neighbors in enumerate(idx_lists):
+                    for n in neighbors:
+                        key = (rpix_int, int(n))
+                        dx = xyz_cache[rpix_int][int(n)] - batch_xyz[k]
+                        d = float(np.linalg.norm(dx))
+                        if key not in per_left[k] or d < per_left[k][key]:
+                            per_left[k][key] = d
 
-        if not candidates:
-            continue
-        seen_r: set = set()
-        dedup_chord = []
-        dedup_global_r = []
-        for chord, rpix_int, loc in candidates:
-            global_r = int(r_groups[rpix_int][loc])
-            if global_r in seen_r:
+        for k, k_idx in enumerate(left_indices):
+            candidates = per_left[k]
+            if not candidates:
                 continue
-            seen_r.add(global_r)
-            dedup_chord.append(chord)
-            dedup_global_r.append(global_r)
-
-        if spec.find == "best":
-            j = int(np.argmin(dedup_chord))
-            l_parts.append(np.asarray([i], dtype=np.int64))
-            r_parts.append(np.asarray([dedup_global_r[j]], dtype=np.int64))
-            sep_parts.append(np.asarray([float(_chord_to_arcsec(dedup_chord[j]))], dtype=float))
-        else:
-            chords_arr = np.asarray(dedup_chord, dtype=float)
-            seps_arr = _chord_to_arcsec(chords_arr)
-            l_parts.append(np.full(len(dedup_global_r), i, dtype=np.int64))
-            r_parts.append(np.asarray(dedup_global_r, dtype=np.int64))
-            sep_parts.append(seps_arr)
+            if spec.find == "best":
+                best_key = min(candidates, key=candidates.get)
+                best_chord = candidates[best_key]
+                global_r = int(r_groups[best_key[0]][best_key[1]])
+                l_parts.append(np.asarray([k_idx], dtype=np.int64))
+                r_parts.append(np.asarray([global_r], dtype=np.int64))
+                sep_parts.append(
+                    np.asarray([float(_chord_to_arcsec(best_chord))], dtype=float)
+                )
+            else:
+                # sort by global_r for stability
+                items = sorted(candidates.items(), key=lambda kv: kv[1])
+                keys = [k for k, _ in items]
+                chords = [v for _, v in items]
+                l_parts.append(np.full(len(items), k_idx, dtype=np.int64))
+                r_parts.append(
+                    np.asarray(
+                        [int(r_groups[rp][loc]) for rp, loc in keys], dtype=np.int64
+                    )
+                )
+                sep_parts.append(
+                    _chord_to_arcsec(np.asarray(chords, dtype=float))
+                )
 
     if not l_parts:
         return empty
@@ -504,29 +533,38 @@ def _bayesian_qualify(
     sig_l = sigma_left[left_idx]
     sig_r = sigma_right[right_idx]
 
-    prior_logs: list = []
+    prior_log_match: list = []
+    prior_log_bg: list = []
     for col in spec.prior_columns:
         if col not in left.columns or col not in right.columns:
             logger.warning("Prior column '%s' missing on a side; skipping.", col)
             continue
         # Budavári et al. fit the prior on the unconditional union of
         # the full catalogues (the background density), not on the
-        # matched-only subset. Evaluate at the per-pair average
-        # ``0.5 * (left[idx] + right[idx])`` for the data term.
+        # matched-only subset.
         kde = bayes.fit_empirical_kde(
             left[col].to_numpy(),
             right[col].to_numpy(),
             sample_cap=50_000,
         )
+        # --- match hypothesis: both sides are the same object --------------
+        # Photometric scatter around the pair midpoint is drawn from the
+        # population KDE.
         centre = 0.5 * (left[col].to_numpy()[left_idx] + right[col].to_numpy()[right_idx])
-        prior_logs.append(bayes.kde_log_at(kde, centre))
+        prior_log_match.append(bayes.kde_log_at(kde, centre))
+        # --- background hypothesis: two independent population draws --------
+        # KDE(mag_left) × KDE(mag_right) in log space.
+        log_left = bayes.kde_log_at(kde, left[col].to_numpy()[left_idx])
+        log_right = bayes.kde_log_at(kde, right[col].to_numpy()[right_idx])
+        prior_log_bg.append(log_left + log_right)
 
     p_match = bayes.compute_p_match(
         seps,
         sig_l,
         sig_r,
         spec.radius_arcsec,
-        prior_logs,
+        prior_log_match=sum(prior_log_match) if prior_log_match else None,
+        prior_log_bg=sum(prior_log_bg) if prior_log_bg else None,
     )
     return p_match
 
@@ -545,6 +583,7 @@ def sky_match(
     stilts_cmd_base: Optional[str] = None,
     java_opts: Optional[str] = None,
     tmpdir: Optional[str] = None,
+    right_suffix: str = _RIGHT_SUFFIX,
 ) -> pl.LazyFrame:
     """Run a positional crossmatch and return a lazy result frame."""
     if not left_src.ra_column or not left_src.dec_column:
@@ -566,6 +605,20 @@ def sky_match(
         chosen = "stilts" if stilts.stilts_available(stilts_cmd_base) else "astropy"
 
     if chosen == "stilts":
+        if right_suffix != _RIGHT_SUFFIX:
+            logger.warning(
+                "STILTS engine selected — right_suffix='%s' is ignored; "
+                "STILTS always uses '_2'. Multi-way crossmatching with STILTS "
+                "will produce duplicate column names for catalogues 3+.",
+                right_suffix,
+            )
+        if spec.prior_columns:
+            logger.warning(
+                "STILTS engine selected — Bayesian probabilistic qualification "
+                "(prior_columns=%s) is skipped. Use engine='fast' or 'astropy' "
+                "for Tier-3 p_match output.",
+                spec.prior_columns,
+            )
         try:
             return stilts.stilts_sky_match(
                 left_src,
@@ -599,7 +652,7 @@ def sky_match(
         raise CrossMatchError(f"Unknown engine '{chosen}'.")
 
     p_match = _bayesian_qualify(left, right, l_idx, r_idx, seps, left_src, right_src, spec)
-    return _build_result(left, right, l_idx, r_idx, seps, spec, p_match=p_match).lazy()
+    return _build_result(left, right, l_idx, r_idx, seps, spec, p_match=p_match, right_suffix=right_suffix).lazy()
 
 
 _JOIN_HOW = {
@@ -619,11 +672,12 @@ def id_join(
     id_left: str,
     id_right: str,
     join_type: str = "1and2",
+    suffix: str = _RIGHT_SUFFIX,
 ) -> pl.LazyFrame:
     """Relational id join between two catalogues using polars."""
     how = _JOIN_HOW.get(join_type, "inner")
     if join_type == "2not1":
         return right_lf.join(
-            left_lf, left_on=id_right, right_on=id_left, how="anti", suffix=_RIGHT_SUFFIX
+            left_lf, left_on=id_right, right_on=id_left, how="anti", suffix=suffix
         )
-    return left_lf.join(right_lf, left_on=id_left, right_on=id_right, how=how, suffix=_RIGHT_SUFFIX)
+    return left_lf.join(right_lf, left_on=id_left, right_on=id_right, how=how, suffix=suffix)

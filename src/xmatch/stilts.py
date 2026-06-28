@@ -194,6 +194,11 @@ def stilts_sky_match(
 
         lsig = _pos_sigma_arcsec(left, left_src)
         rsig = _pos_sigma_arcsec(right, right_src)
+        if lsig is None or rsig is None:
+            raise StiltsError(
+                "skyerr matcher requires positional error columns on both "
+                "catalogues, or a default_pos_error_arcsec in the config."
+            )
         scale = spec.max_error * (float(np.nanmax(lsig)) + float(np.nanmax(rsig)))
         stilts_matcher = "skyerr"
         params_value = str(max(scale, 1e-6))

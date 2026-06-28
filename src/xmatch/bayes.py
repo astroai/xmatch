@@ -34,17 +34,21 @@ def positional_log_likelihood(
     sigma_left: np.ndarray,
     sigma_right: np.ndarray,
 ) -> np.ndarray:
-    """Log ``p(sep | match)`` under independent Gaussian errors.
+    """Log ``p(sep | match)`` under a 2-D isotropic Gaussian.
 
-    Both sigmas are in arcsec. The combined ``Rayleigh``-style sigma is
-    ``sqrt(sigma_left^2 + sigma_right^2)``. ``sep`` is in arcsec.
+    Both sigmas are in arcsec.  The combined variance is
+    ``sigma² = sigma_left² + sigma_right²`` (errors add in quadrature for
+    independent 2-D Gaussians — Budavári & Szalay 2008, eq. 25).
+
+    The log-density of a 2-D isotropic Gaussian with variance σ² is
+    ``-ψ²/(2σ²) - log(2π) - 2·log(σ)``.
     """
     sep = np.asarray(sep_arcsec, dtype=float)
     sig_l = np.asarray(sigma_left, dtype=float)
     sig_r = np.asarray(sigma_right, dtype=float)
-    sigma = np.sqrt(sig_l**2 + sig_r**2)
-    sigma_safe = np.where(sigma > 0, sigma, 1e-3)
-    return -0.5 * (sep / sigma_safe) ** 2 - np.log(sigma_safe) - 0.5 * math.log(2 * math.pi)
+    sigma_sq = sig_l**2 + sig_r**2
+    sigma_safe = np.where(sigma_sq > 0, np.sqrt(sigma_sq), 1e-3)
+    return -0.5 * (sep / sigma_safe) ** 2 - np.log(2.0 * math.pi) - 2.0 * np.log(sigma_safe)
 
 
 def background_log_likelihood(
@@ -68,21 +72,35 @@ def compute_p_match(
     sigma_left: np.ndarray,
     sigma_right: np.ndarray,
     radius_arcsec: float,
-    prior_log_arrays: List[np.ndarray],
+    prior_log_match: Optional[np.ndarray] = None,
+    prior_log_bg: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Compute ``p_match`` in [0, 1] per matched pair.
 
-    Each entry in ``prior_log_arrays`` is the per-pair log-prior evaluated
-    by :func:`kde_log_at` on a :func:`fit_empirical_kde` model for one
-    photometric / colour column. An empty list means uniform priors.
+    Budavári & Szalay (2008) hierarchical model:
+
+    * ``prior_log_match`` — per-pair log-density of photometric column(s)
+      under the *match* hypothesis.  Typically ``log KDE(midpoint)`` where
+      ``midpoint = 0.5*(mag_left + mag_right)``.
+    * ``prior_log_bg`` — per-pair log-density under the *background*
+      hypothesis.  Typically ``log KDE(mag_left) + log KDE(mag_right)``
+      (two independent draws from the population KDE).
+
+    Both are summed across columns by the caller; an empty or ``None`` array
+    means a uniform photometric prior for the corresponding hypothesis.
     """
     if sep_arcsec.size == 0:
         return np.zeros(0, dtype=float)
 
     post = positional_log_likelihood(sep_arcsec, sigma_left, sigma_right)
     bg = background_log_likelihood(sep_arcsec, radius_arcsec)
-    log_match = post + sum(prior_log_arrays)
-    log_bg = bg + sum(prior_log_arrays)  # same prior on both sides cancels in ratio
+
+    log_match = post
+    log_bg = bg
+    if prior_log_match is not None and prior_log_match.size:
+        log_match = log_match + prior_log_match
+    if prior_log_bg is not None and prior_log_bg.size:
+        log_bg = log_bg + prior_log_bg
 
     stacked = np.stack([log_match, log_bg], axis=-1)
     stacked -= stacked.max(axis=-1, keepdims=True)

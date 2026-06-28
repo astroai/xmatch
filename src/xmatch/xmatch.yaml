@@ -68,9 +68,28 @@ catalogue_aliases:
 
   # NOAO Data
   delve: "delve_noao"
+  nsc: "nsc_noao"
+  nsc_dr2: "nsc_noao"
+  des: "des_noao"
+  des_dr2: "des_noao"
+  decals: "desils_noao"
+  decals_dr10: "desils_noao"
+  decals_objects: "decals_noao"
+  ls_dr10_objects: "decals_noao"
   desils: "desils_noao"
+  desils_dr10: "desils_noao"
+  ls_dr10: "desils_noao"
+  smash: "smash_noao"
+  smash_dr2: "smash_noao"
+  unwise: "unwise_noao"
+  unwise_dr1: "unwise_noao"
+  allwise_dl: "allwise_noao"
   ukidss: "ukidsslas_noao"
   ukidsslas: "ukidsslas_noao"
+  nsc_x_gaia: "nsc_x_gaia_noao"
+  des_x_gaia: "des_x_gaia_noao"
+  decals_x_gaia: "decals_x_gaia_noao"
+  allwise_x_gaia: "allwise_x_gaia_noao"
 
 # --- Catalogue Definitions ---
 # Defines specific astronomical catalogues, their location, and properties.
@@ -137,6 +156,108 @@ catalogues:
     default_pos_error_arcsec: 0.3
 
   # --- NOAO Data Lab Catalogues ---
+  nsc_noao:
+    description: "NOIRLab Source Catalog (NSC) DR2 via Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "dr2"
+    access_identifier: "nsc_dr2.object"
+    table_name: "nsc_dr2.object"
+    epoch: 2015.5
+    estimated_size: 'huge'  # ~3.9 billion
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "objid"
+    default_columns: ["objid", "ra", "dec", "umag", "gmag", "rmag", "imag", "zmag", "ymag", "nepochs", "flags"]
+    ra_err_column: "raerr"
+    dec_err_column: "decerr"
+    pos_err_units: "arcsec"
+    default_pos_error_arcsec: 0.05
+
+  des_noao:
+    description: "Dark Energy Survey (DES) DR2 via Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "dr2"
+    access_identifier: "des_dr2.main"
+    table_name: "des_dr2.main"
+    epoch: 2000.0
+    estimated_size: 'huge'  # ~690 million
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "coadd_object_id"
+    default_columns: ["coadd_object_id", "ra", "dec", "mag_auto_g", "mag_auto_r", "mag_auto_i", "mag_auto_z", "magerr_auto_g", "magerr_auto_r", "magerr_auto_i", "magerr_auto_z"]
+    ra_err_column: "ra_err"
+    dec_err_column: "dec_err"
+    pos_err_units: "arcsec"
+    default_pos_error_arcsec: 0.1
+
+  decals_noao:
+    description: "DECaLS DR10 (object/detection table — no photometry; use 'ls_dr10' for tractor magnitudes) via Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "dr10"
+    access_identifier: "ls_dr10.object"
+    table_name: "ls_dr10.object"
+    epoch: 2015.0
+    estimated_size: 'huge'
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "brick_objid"
+    default_columns: ["brick_objid", "ra", "dec", "brickid", "brick_primary", "objid"]
+    pos_err_units: "arcsec"
+    default_pos_error_arcsec: 0.1
+
+  smash_noao:
+    description: "Survey of the MAgellanic Stellar History (SMASH) DR2 via Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "dr2"
+    access_identifier: "smash_dr2.object"
+    table_name: "smash_dr2.object"
+    epoch: 2015.0
+    estimated_size: 'large'  # ~360 million
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "objid"
+    default_columns: ["objid", "ra", "dec", "umag", "gmag", "rmag", "imag", "zmag"]
+    pos_err_units: "arcsec"
+    default_pos_error_arcsec: 0.05
+
+  unwise_noao:
+    description: "unWISE DR1 (NEO coadds) via Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "dr1"
+    access_identifier: "unwise_dr1.object"
+    table_name: "unwise_dr1.object"
+    epoch: 2015.0
+    estimated_size: 'huge'
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "sourceid"
+    default_columns: ["sourceid", "ra", "dec", "flux_w1", "flux_w2", "snr_w1", "snr_w2"]  # flux units, not mags
+    pos_err_units: "arcsec"
+    default_pos_error_arcsec: 0.5
+
+  allwise_noao:
+    description: "AllWISE Source Catalog via Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "allwise"
+    access_identifier: "allwise.source"
+    table_name: "allwise.source"
+    epoch: 2010.0
+    estimated_size: 'huge'  # ~747 million
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "source_id"
+    default_columns: ["source_id", "ra", "dec", "w1mag", "w2mag", "w3mag", "w4mag", "w1sigm", "w2sigm", "w3sigm", "w4sigm"]
+    ra_err_column: "raerr"
+    dec_err_column: "decerr"
+    pos_err_units: "arcsec"
+    default_pos_error_arcsec: 0.2
+
   delve_noao:
     description: "DECam Local Volume Exploration Survey (DELVE) via NOIRLab Data Lab"
     archive: noao_datalab
@@ -237,6 +358,61 @@ catalogues:
     default_pos_error_arcsec: 0.01
 
   # --- NOAO Pre-Computed Crossmatch Catalogues ---
+  # All are 1.5 arcsec nearest-neighbour pre-computed tables. Columns follow
+  # Data Lab convention: ra1/dec1 (survey), ra2/dec2 (Gaia), id1 (survey
+  # ID), id2 (Gaia source_id), distance (separation in arcsec).
+  nsc_x_gaia_noao:
+    description: "NSC DR2 × Gaia DR3 pre-computed crossmatch (1.5\")"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "x1p5"
+    access_identifier: "nsc_dr2.x1p5__object__gaia_dr3__gaia_source"
+    table_name: "nsc_dr2.x1p5__object__gaia_dr3__gaia_source"
+    ra_column: "ra1"
+    dec_column: "dec1"
+    id_column: "id1"
+    default_columns: ["ra1", "dec1", "ra2", "dec2", "id1", "id2", "distance"]
+    estimated_size: 'large'
+
+  des_x_gaia_noao:
+    description: "DES DR2 × Gaia DR3 pre-computed crossmatch (1.5\")"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "x1p5"
+    access_identifier: "des_dr2.x1p5__main__gaia_dr3__gaia_source"
+    table_name: "des_dr2.x1p5__main__gaia_dr3__gaia_source"
+    ra_column: "ra1"
+    dec_column: "dec1"
+    id_column: "id1"
+    default_columns: ["ra1", "dec1", "ra2", "dec2", "id1", "id2", "distance"]
+    estimated_size: 'large'
+
+  decals_x_gaia_noao:
+    description: "DECaLS DR10 × Gaia DR3 pre-computed crossmatch (1.5\")"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "x1p5"
+    access_identifier: "ls_dr10.x1p5__tractor__gaia_dr3__gaia_source"
+    table_name: "ls_dr10.x1p5__tractor__gaia_dr3__gaia_source"
+    ra_column: "ra1"
+    dec_column: "dec1"
+    id_column: "id1"
+    default_columns: ["ra1", "dec1", "ra2", "dec2", "id1", "id2", "distance"]
+    estimated_size: 'large'
+
+  allwise_x_gaia_noao:
+    description: "AllWISE × Gaia DR3 pre-computed crossmatch (1.5\")"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "x1p5"
+    access_identifier: "allwise.x1p5__source__gaia_dr3__gaia_source"
+    table_name: "allwise.x1p5__source__gaia_dr3__gaia_source"
+    ra_column: "ra1"
+    dec_column: "dec1"
+    id_column: "id1"
+    default_columns: ["ra1", "dec1", "ra2", "dec2", "id1", "id2", "distance"]
+    estimated_size: 'large'
+
   ukidss_gaia_xmatch_noao:
     description: "UKIDSS DR11 LAS x Gaia DR3 Pre-computed Crossmatch (NOAO)"
     archive: noao_datalab
