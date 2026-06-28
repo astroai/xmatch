@@ -64,9 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--engine",
-        choices=["auto", "stilts", "astropy", "fast", "zone"],
+        choices=["auto", "stilts", "astropy", "fast", "zone", "ray"],
         default="auto",
-        help="Sky-match engine (fast=scipy.cKDTree, zone=HEALPix pixellated).",
+        help="Sky-match engine (fast=scipy.cKDTree, zone=HEALPix pixellated, ray=distributed).",
     )
 
     # ID join.
@@ -101,6 +101,30 @@ def build_parser() -> argparse.ArgumentParser:
         dest="priors",
         default="",
         help="Comma-separated photometric columns used as Bayesian priors (e.g. g,r).",
+    )
+
+    # --- advanced match features (v0.5+) ---
+    parser.add_argument(
+        "--target-epoch",
+        dest="target_epoch",
+        type=float,
+        help="Julian-year epoch to propagate coordinates to via proper motion.",
+    )
+    parser.add_argument(
+        "--filter-expr",
+        dest="filter_expr",
+        help="Polars SQL WHERE clause to post-filter matched pairs (e.g. 'abs(mag - mag_2) < 0.5').",
+    )
+    parser.add_argument(
+        "--extra-distance-cols",
+        dest="extra_distance_cols",
+        help="Column:weight pairs for N-dimensional cKDTree ranking (e.g. 'g:0.5,bp_rp:0.3').",
+    )
+    parser.add_argument(
+        "--batch-size",
+        dest="batch_size",
+        type=int,
+        help="HEALPix pixel groups per batch for out-of-core processing (zone engine).",
     )
 
     # Region for remote downloads.
@@ -351,9 +375,32 @@ def handle_discover(cm: CrossMatch, endpoint: str, schema_table: Optional[str] =
     return 0
 
 
+def _parse_extra_distance_cols(raw):
+    """Parse 'col:weight,col2:weight2' into dict[str, float]."""
+    if not raw:
+        return {}
+    result = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if ":" in pair:
+            col, _, w = pair.partition(":")
+            try:
+                result[col.strip()] = float(w.strip())
+            except ValueError:
+                logger.warning(
+                    "Invalid weight in --extra-distance-cols '%s'; skipping.", pair
+                )
+        else:
+            result[pair] = 1.0
+    return result
+
+
 def _build_params(args: argparse.Namespace) -> dict:
     """Extract the shared match parameters from CLI args as a kwargs dict."""
     prior_columns = [c.strip() for c in (args.priors or "").split(",") if c.strip()]
+    extra_distance = _parse_extra_distance_cols(args.extra_distance_cols)
     return dict(
         radius_arcsec=args.radius_arcsec,
         matcher=args.matcher or "sky",
@@ -371,6 +418,10 @@ def _build_params(args: argparse.Namespace) -> dict:
         columns_1=args.columns_1,
         columns_2=args.columns_2,
         prior_columns=prior_columns,
+        target_epoch=args.target_epoch,
+        filter_expr=args.filter_expr,
+        extra_distance_cols=extra_distance,
+        batch_size=args.batch_size,
         ra=args.ra,
         dec=args.dec,
         radius_deg=args.radius_deg,
