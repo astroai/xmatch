@@ -14,7 +14,7 @@ from .matchers import MatchSpec
 from .request import MatchRequest, SideOverrides  # noqa: F401
 from .sources import CatalogueSource
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     # Main entry points

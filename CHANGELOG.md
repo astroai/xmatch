@@ -3,7 +3,95 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — v0.4 Lean API + Catalogue Discovery
+## [Unreleased] — v0.5 Audit + HATS + Data Lab
+
+### Fixed — Math & Correctness
+
+* **Bayes 2D Gaussian log-density** (`bayes.py`): `positional_log_likelihood` was
+  using a 1D Gaussian (`-log(σ)`, `-0.5·log(2π)`) instead of the correct 2D
+  isotropic Gaussian (`-2·log(σ)`, `-log(2π)` per Budavári & Szalay 2008 eq. 25).
+  All Bayesian `p_match` values are now mathematically correct.
+* **Photometric prior separation** (`bayes.py` + `matchers.py`):
+  `compute_p_match` now receives separate match-hypothesis prior (KDE at
+  magnitude midpoint) and background-hypothesis prior (KDE(left) + KDE(right)
+  independently) instead of adding the same term to both and having them cancel.
+* **HEALPix `chord_max` for skyerr** (`matchers.py`): `_zone_match_healpix` now
+  uses the error-based `search_radius` for the chord distance bound instead of
+  `spec.radius_arcsec`, matching `_scipy_match` behaviour.
+
+### Fixed — Robustness
+
+* **STILTS skyerr TypeError guard** (`stilts.py`): when no positional error
+  columns exist, raises `StiltsError` instead of crashing on `np.nanmax(None)`.
+* **Null-handling in sky extent** (`astro_utils.py`): antipodal fallback in
+  `sky_extent_from_frame` now uses `drop_nulls().mean()` and guards against
+  `None` before `float()` cast.
+* **STILTS feature-suppression warnings** (`matchers.py`): now emits
+  `WARNING`-level messages when `right_suffix` or `prior_columns` are silently
+  ignored by the STILTS engine.
+
+### Changed — Performance
+
+* **Multi-way eager checkpoint** (`crossmatch.py`): `crossmatch_multi` now
+  inserts `.collect().lazy()` inside the pairwise loop, preventing Polars from
+  rebuilding the entire query graph on every iteration (eliminates O(N²)
+  LazyFrame re-evaluation for N-catalogue chains).
+* **HEALPix batched cKDTree queries** (`matchers.py`): `_zone_match_healpix`
+  groups left points by HEALPix pixel and calls `tree.query(batch_xyz,
+  workers=-1)` once per pixel-pair instead of spawning threads per single point
+  in a Python loop.
+
+### Added — HATS / LSDB Integration
+
+* **`hats_crossmatch` enhancements** (`hats_source.py`): accepts `right_suffix`,
+  maps `find`→`n_neighbors`, passes `suffixes` to LSDB, renames
+  `_dist_arcsec`→`sep_arcsec`, validates `join_type` (only `1and2` supported),
+  and warns when `prior_columns` are requested.
+* **HATS in multi-way chains** (`crossmatch.py`): `_dispatch` passes
+  `right_suffix`; `crossmatch_multi` handles HATS catalogues at any position
+  (including 3+); download loop guards against HATS sources.
+* **`_dist_arcsec` missing warning**: logs a warning when LSDB result lacks the
+  expected column (e.g., future API change).
+* **16 HATS tests** (`tests/test_hats.py`): fully mocked (no LSDB required),
+  covering alias resolution, crossmatch parameter passthrough, multi-row
+  `find="all"` results, join type validation, local-frame conversion, column
+  renaming, and `crossmatch_multi` routing.
+
+### Added — NOAO Data Lab Catalogues
+
+* **6 new catalogues** in `xmatch.yaml`: `nsc_noao` (NSC DR2), `des_noao`
+  (DES DR2), `decals_noao` (DECaLS DR10 objects), `smash_noao` (SMASH DR2),
+  `unwise_noao` (unWISE DR1), `allwise_noao` (AllWISE).
+* **4 pre-computed xmatch tables**: `nsc_x_gaia_noao`, `des_x_gaia_noao`,
+  `decals_x_gaia_noao`, `allwise_x_gaia_noao` — 1.5″ nearest-neighbour
+  pre-computed crossmatches (× Gaia DR3). Provides `ra1`/`dec1`/`ra2`/`dec2`/
+  `id1`/`id2`/`distance` columns for instant matching without downloads.
+* **14 new aliases**: `nsc`, `des`, `decals`→tractor, `decals_objects`→object
+  table, `smash`, `unwise`, `allwise_dl`, `nsc_x_gaia`, `des_x_gaia`,
+  `decals_x_gaia`, `allwise_x_gaia`, and qualifiers.
+* **2 Data Lab source resolution tests** (`tests/test_crossmatch.py`): verify
+  aliases resolve to TAP-backed `CatalogueSource` with correct table names,
+  archive, and column metadata. Tractor vs object table routing verified.
+* **28 aliases total**, **19 configured catalogues**.
+
+### Changed — Documentation
+
+* `API.md`: added **`crossmatch_multi()`** section (parameter table, 3-way /
+  remote-first / 4-way examples, column naming guide); **HATS catalogues**
+  section (detection, Python/CLI usage, multi-way chains, limitations table);
+  **Remote catalogues** section (ESA Gaia, CDS VizieR, NOIRLab Data Lab
+  archives with Python + CLI examples); updated CLI section with N-catalogue,
+  HATS, Data Lab, and discovery examples.
+
+### Notes
+
+* 92 non-slow tests pass; 9 slow (real-catalogue) tests pass; 16 HATS tests;
+  2 Data Lab tests. Zero regressions across Gaia DR3, AllWISE, USNO-B1.0.
+* No breaking changes — all existing APIs unchanged.
+
+---
+
+## [0.4.0] — v0.4 Lean API + Catalogue Discovery
 
 ### Added
 
