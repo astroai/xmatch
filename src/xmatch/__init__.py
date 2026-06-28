@@ -11,15 +11,18 @@ from .io_utils import (
     write_frame,
 )
 from .matchers import MatchSpec
+from .request import MatchRequest, SideOverrides  # noqa: F401
 from .sources import CatalogueSource
 
-__version__ = "0.2.0"
+__version__ = "0.4.0"
 
 __all__ = [
     # Main entry points
     "CrossMatch",
     "CatalogueSource",
     "MatchSpec",
+    "MatchRequest",
+    "SideOverrides",
     # Exceptions
     "CrossMatchError",
     "ConfigError",

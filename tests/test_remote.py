@@ -8,6 +8,7 @@ import pytest
 
 from xmatch import CrossMatch
 from xmatch.matchers import MatchSpec
+from xmatch.request import MatchRequest
 from xmatch.sources import CatalogueSource
 
 
@@ -52,8 +53,9 @@ def test_download_remote_requires_region_when_no_local(cm):
     from xmatch.exceptions import CrossMatchError
 
     src = cm.resolve_source("gaia", {})
+    req = MatchRequest("gaia", "gaia")  # no ra/dec/radius set
     with pytest.raises(CrossMatchError):
-        cm._download_remote(src, {}, prefix="1")  # no ra/dec/radius and no local extent
+        cm._download_remote(src, req, prefix="1")  # no ra/dec/radius and no local extent
 
 
 def test_tap_self_join_builds_query_and_parses(monkeypatch):

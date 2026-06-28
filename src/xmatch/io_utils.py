@@ -180,8 +180,8 @@ def to_lazy(frame: FrameLike) -> pl.LazyFrame:
 def write_frame(frame: FrameLike, output_file: Union[str, Path]) -> None:
     """Write a frame to ``.parquet`` / ``.csv`` / ``.fits`` based on the suffix.
 
-    Parquet and CSV are streamed via ``sink_*`` so large results never need to
-    be fully materialised in memory.
+    Parquet and CSV are streamed via ``sink_*`` with the polars streaming engine
+    so large results never need to be fully materialised in memory.
     """
     out = Path(output_file)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -189,9 +189,9 @@ def write_frame(frame: FrameLike, output_file: Union[str, Path]) -> None:
     lf = to_lazy(frame)
 
     if suffix == ".parquet":
-        lf.sink_parquet(out)
+        lf.sink_parquet(out, engine="streaming")
     elif suffix == ".csv":
-        lf.sink_csv(out)
+        lf.sink_csv(out, engine="streaming")
     elif suffix in (".fits", ".fit"):
         polars_to_astropy(lf).write(out, overwrite=True)
     else:

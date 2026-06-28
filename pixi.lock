@@ -1,7 +1,16 @@
 version: 7
 platforms:
 - name: linux-64
+  virtual-packages:
+  - __unix=0=0
+  - __linux=4.18
+  - __glibc=2.28
+  - __archspec=0=x86_64
 - name: osx-arm64
+  virtual-packages:
+  - __unix=0=0
+  - __osx=13.0
+  - __archspec=0=m1
 environments:
   default:
     channels:
@@ -267,7 +276,11 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/widgetsnbextension-4.0.15-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/yarl-1.23.0-pyh7db6752_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
-      - pypi: .
+      - pypi: ./
+      - pypi: https://files.pythonhosted.org/packages/4c/93/8823fc4edfd692f53c4e1690276521ba6ee8f477a4b52c8143b4df95fac2/nway-4.7.1-py2.py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/7b/91/984aca2ec129e2757d1e4e3c81c3fcda9d0f85b74670a094cc443d9ee949/joblib-1.5.3-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/c5/ca/f583967e1395e41608225d0a6d29e582236f615d83023d730e63bac89baa/healpy-1.19.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/d8/8e/bb97bb0c71802080bfc8952937d174e49cfc50de5c951dd47b2496f0dcdb/tqdm-4.68.3-py3-none-any.whl
       osx-arm64:
       - conda: https://conda.anaconda.org/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/aiobotocore-3.3.0-pyhcf101f3_0.conda
@@ -512,7 +525,11 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-1.3.2-h8088a28_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-ng-2.3.3-hed4e4f5_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zstd-1.5.7-hbf9d68e_6.conda
-      - pypi: .
+      - pypi: ./
+      - pypi: https://files.pythonhosted.org/packages/4c/93/8823fc4edfd692f53c4e1690276521ba6ee8f477a4b52c8143b4df95fac2/nway-4.7.1-py2.py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/7b/91/984aca2ec129e2757d1e4e3c81c3fcda9d0f85b74670a094cc443d9ee949/joblib-1.5.3-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/d8/8e/bb97bb0c71802080bfc8952937d174e49cfc50de5c951dd47b2496f0dcdb/tqdm-4.68.3-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/e3/4e/6f5328f375f88c8c38314f24f82b7e1486ec0358c557779500382db1503c/healpy-1.19.0.tar.gz
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
   build_number: 20
@@ -6047,7 +6064,7 @@ packages:
   purls: []
   size: 433413
   timestamp: 1764777166076
-- pypi: .
+- pypi: ./
   name: xmatch
   requires_dist:
   - polars>=1.0
@@ -6065,4 +6082,86 @@ packages:
   - pytest ; extra == 'dev'
   - ruff ; extra == 'dev'
   - mypy ; extra == 'dev'
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/4c/93/8823fc4edfd692f53c4e1690276521ba6ee8f477a4b52c8143b4df95fac2/nway-4.7.1-py2.py3-none-any.whl
+  name: nway
+  version: 4.7.1
+  sha256: fc740aca5a1fdc7b789ee3f45cf640530fba58bcac129ec0a721a01ef3a454f4
+  requires_dist:
+  - astropy
+  - healpy
+  - joblib
+  - matplotlib
+  - numpy
+  - pandas
+  - scipy
+  - tqdm
+  - sphinx-bootstrap-theme ; extra == 'doc'
+  - sphinxcontrib-bibtex ; extra == 'doc'
+  - pytest ; extra == 'test'
+  requires_python: '>=3.8'
+- pypi: https://files.pythonhosted.org/packages/7b/91/984aca2ec129e2757d1e4e3c81c3fcda9d0f85b74670a094cc443d9ee949/joblib-1.5.3-py3-none-any.whl
+  name: joblib
+  version: 1.5.3
+  sha256: 5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713
+  requires_python: '>=3.9'
+- pypi: https://files.pythonhosted.org/packages/c5/ca/f583967e1395e41608225d0a6d29e582236f615d83023d730e63bac89baa/healpy-1.19.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+  name: healpy
+  version: 1.19.0
+  sha256: b3cf9c627af77a3fc670d6240d8a83485f373c274945ca8ad156fc2a25d6eb61
+  requires_dist:
+  - numpy>=1.19
+  - astropy
+  - matplotlib ; extra == 'all'
+  - scipy ; extra == 'all'
+  - pytest ; extra == 'test'
+  - pytest-astropy-header ; extra == 'test'
+  - pytest-cython ; extra == 'test'
+  - pytest-doctestplus ; extra == 'test'
+  - requests ; extra == 'test'
+  - matplotlib ; extra == 'test'
+  - scipy ; extra == 'test'
+  - ipykernel ; extra == 'doc'
+  - matplotlib ; extra == 'doc'
+  - nbsphinx ; extra == 'doc'
+  - numpydoc ; extra == 'doc'
+  - sphinx>=6,<9 ; extra == 'doc'
+  - scipy ; extra == 'doc'
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/d8/8e/bb97bb0c71802080bfc8952937d174e49cfc50de5c951dd47b2496f0dcdb/tqdm-4.68.3-py3-none-any.whl
+  name: tqdm
+  version: 4.68.3
+  sha256: 39832cc2def2789a6f29df83f172db7416cea70052c0907a57801c5f2fdccb03
+  requires_dist:
+  - colorama ; sys_platform == 'win32'
+  - requests ; extra == 'discord'
+  - envwrap ; extra == 'discord'
+  - slack-sdk ; extra == 'slack'
+  - envwrap ; extra == 'slack'
+  - requests ; extra == 'telegram'
+  - envwrap ; extra == 'telegram'
+  - ipywidgets>=6 ; extra == 'notebook'
+  requires_python: '>=3.8'
+- pypi: https://files.pythonhosted.org/packages/e3/4e/6f5328f375f88c8c38314f24f82b7e1486ec0358c557779500382db1503c/healpy-1.19.0.tar.gz
+  name: healpy
+  version: 1.19.0
+  sha256: 28e839cb885a23d36c77fc3423a3cb9271a07fda94085bd12fc329f941130ec5
+  requires_dist:
+  - numpy>=1.19
+  - astropy
+  - matplotlib ; extra == 'all'
+  - scipy ; extra == 'all'
+  - pytest ; extra == 'test'
+  - pytest-astropy-header ; extra == 'test'
+  - pytest-cython ; extra == 'test'
+  - pytest-doctestplus ; extra == 'test'
+  - requests ; extra == 'test'
+  - matplotlib ; extra == 'test'
+  - scipy ; extra == 'test'
+  - ipykernel ; extra == 'doc'
+  - matplotlib ; extra == 'doc'
+  - nbsphinx ; extra == 'doc'
+  - numpydoc ; extra == 'doc'
+  - sphinx>=6,<9 ; extra == 'doc'
+  - scipy ; extra == 'doc'
   requires_python: '>=3.10'

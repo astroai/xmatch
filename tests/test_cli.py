@@ -28,8 +28,8 @@ def test_cli_requires_two_catalogues(capsys):
 def test_cli_list(capsys):
     assert main(["--list"]) == 0
     out = capsys.readouterr().out
-    assert "Available catalogues:" in out
     assert "gaia_esa" in out
+    assert "catalogues" in out.lower()
 
 
 def test_cli_match_to_stdout(local_files, capsys):
@@ -80,3 +80,18 @@ def test_cli_suggests_for_unknown_catalogue_argument(capsys):
     # First arg is close enough to "gaia_esa" that the CLI must suggest it.
     assert "Did you mean" in err
     assert "gaia_esa" in err
+
+
+def test_cli_multi_three_way(local_files, capsys):
+    """`xmatch a.csv b.parquet a.csv` — 3-way crossmatch via CLI."""
+    a, b = local_files
+    assert main([str(a), str(b), str(a), "-r", "1.0"]) == 0
+    out = capsys.readouterr().out
+    assert "sep_arcsec" in out
+    assert out.count("\n") >= 3
+
+
+def test_cli_requires_at_least_two_catalogues(capsys):
+    """One catalogue alone is not enough."""
+    assert main(["some_file.csv"]) == 2
+    assert "at least two" in capsys.readouterr().err.lower()

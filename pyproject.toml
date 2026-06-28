@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xmatch"
-version = "0.2.0"
+version = "0.4.0"
 description = "A tool for cross-matching astronomical catalogues using various methods."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -93,4 +93,5 @@ target-version = ["py310"]
 # Register custom markers so pytest doesn't emit "unknown marker" warnings.
 markers = [
     "slow: large/slow tests; skip with pytest -m 'not slow'",
+    "bench: benchmark tests comparing matcher engines; skip with pytest -m 'not bench'",
 ]

@@ -24,3 +24,4 @@ mypy = "*"
 
 [pypi-dependencies]
 xmatch = { path = ".", editable = true }
+nway = ">=4.7.1, <5"
