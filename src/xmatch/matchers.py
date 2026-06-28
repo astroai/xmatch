@@ -39,8 +39,9 @@ The output is a ``p_match`` column in [0, 1]. Numeric evaluation lives in
 
 import dataclasses
 import logging
+import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import polars as pl
@@ -67,6 +68,28 @@ class MatchSpec:
     # Bayesian-prior columns. When non-empty AND the catalogues carry those
     # columns, a ``p_match`` column is appended to the matched result.
     prior_columns: List[str] = field(default_factory=list)
+    # Epoch to propagate coordinates to before spatial matching (Julian year).
+    # Requires pm_ra_column / pm_dec_column + epoch metadata on the catalogue.
+    # NaN proper motions are treated as zero (no propagation).
+    target_epoch: Optional[float] = None
+    # Optional polars expression string applied as a boolean post-filter on
+    # the matched pairs BEFORE reducing find="all" → find="best".  Column
+    # names from the left side are used as-is; right-side columns gain a
+    # ``_2`` suffix (e.g. ``abs(mag_g - mag_g_2) < 0.5``).
+    filter_expr: Optional[str] = None
+    # Extra columns for N-dimensional cKDTree matching, mapping column name
+    # to a dimensionless weight.  Columns are z-score normalized across the
+    # union of both catalogues and appended to the 3-D Cartesian unit-sphere
+    # embedding.  The spatial ``radius_arcsec`` is still enforced as a hard
+    # bound; among candidates within that bound the nearest in N-d feature
+    # space is chosen.
+    extra_distance_cols: Dict[str, float] = field(default_factory=dict)
+    # Maximum number of left HEALPix pixel groups to process in one batch.
+    # When set, the zone engine processes pixel groups in chunks, freeing
+    # intermediate results between batches (out-of-core friendly).  Defaults
+    # to ``None`` (process all pixels in one pass).  Only effective with
+    # ``engine="zone"`` and ``cdshealpix`` installed.
+    batch_size: Optional[int] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -186,6 +209,176 @@ def _arcsec_to_chord(arcsec: float) -> float:
 
 
 # --------------------------------------------------------------------------- #
+# proper motion correction
+# --------------------------------------------------------------------------- #
+def _apply_proper_motion(
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+    left_src: CatalogueSource,
+    right_src: CatalogueSource,
+    target_epoch: float,
+) -> Tuple[pl.DataFrame, pl.DataFrame]:
+    """Propagate coordinates to ``target_epoch`` using per-row PM + epoch.
+
+    Mutates *left* and/or *right* in-place when both PM columns and epoch
+    information are available on a side.  Returns the (possibly modified)
+    pair.
+    """
+    from .astro_utils import propagate_proper_motion
+
+    has_left_pm = bool(
+        left_src.pm_ra_column and left_src.pm_dec_column
+        and (left_src.epoch_column or left_src.epoch is not None)
+    )
+    has_right_pm = bool(
+        right_src.pm_ra_column and right_src.pm_dec_column
+        and (right_src.epoch_column or right_src.epoch is not None)
+    )
+    if not has_left_pm and not has_right_pm:
+        logger.debug("No PM+epoch info on either side; skipping PM propagation.")
+        return left, right
+
+    def _propagate_side(
+        df: pl.DataFrame, src: CatalogueSource, label: str
+    ) -> pl.DataFrame:
+        if not (src.pm_ra_column and src.pm_dec_column):
+            logger.debug("No PM columns on %s side; skipping.", label)
+            return df
+        if src.pm_ra_column not in df.columns or src.pm_dec_column not in df.columns:
+            logger.debug("PM columns missing from %s data; skipping.", label)
+            return df
+
+        if src.epoch_column and src.epoch_column in df.columns:
+            epoch_arr = df[src.epoch_column].to_numpy().astype(float)
+        elif src.epoch is not None:
+            epoch_arr = np.full(df.height, float(src.epoch), dtype=float)
+        else:
+            logger.debug("No epoch info on %s side; skipping.", label)
+            return df
+
+        ra_arr = df[src.ra_column].to_numpy().astype(float)
+        dec_arr = df[src.dec_column].to_numpy().astype(float)
+        pmra = df[src.pm_ra_column].to_numpy().astype(float)
+        pmde = df[src.pm_dec_column].to_numpy().astype(float)
+
+        new_ra, new_dec = propagate_proper_motion(
+            ra_arr, dec_arr, pmra, pmde, epoch_arr, target_epoch,
+        )
+        logger.info(
+            "PM propagation %s: max ΔRA=%.4f arcsec, max ΔDec=%.4f arcsec",
+            label,
+            float(np.nanmax(np.abs(new_ra - ra_arr))) * 3600.0,
+            float(np.nanmax(np.abs(new_dec - dec_arr))) * 3600.0,
+        )
+        return df.with_columns(
+            pl.Series(src.ra_column, new_ra),
+            pl.Series(src.dec_column, new_dec),
+        )
+
+    left = _propagate_side(left, left_src, "left")
+    right = _propagate_side(right, right_src, "right")
+    return left, right
+
+
+# --------------------------------------------------------------------------- #
+# N-dimensional feature helpers
+# --------------------------------------------------------------------------- #
+def _build_nd_features(
+    ra_deg: np.ndarray,
+    dec_deg: np.ndarray,
+    df: pl.DataFrame,
+    extra_cols: Dict[str, float],
+    union_mean: Optional[Dict[str, Tuple[float, float]]] = None,
+) -> Tuple[np.ndarray, Optional[Dict[str, Tuple[float, float]]]]:
+    """Build N-d feature array: [x, y, z] + z-score normalised columns.
+
+    Returns ``(features, stats)`` where *stats* maps column name to
+    ``(mean, std)`` for reuse across left/right sides.  When *union_mean* is
+    provided (from a previous call on the other side), the same normalisation
+    constants are reused instead of being recomputed.
+    """
+    xyz = _radec_to_xyz(ra_deg, dec_deg)
+    if not extra_cols:
+        return xyz, None
+
+    extra_parts: list = []
+    stats: Dict[str, Tuple[float, float]] = {}
+    for col, weight in extra_cols.items():
+        if col not in df.columns:
+            logger.warning("Extra distance column '%s' missing; skipping.", col)
+            continue
+        vals = df[col].to_numpy().astype(float)
+        if union_mean is not None and col in union_mean:
+            mean, std = union_mean[col]
+        else:
+            mean = float(np.nanmean(vals))
+            std = float(np.nanstd(vals))
+            if std == 0 or not np.isfinite(std):
+                std = 1.0
+        stats[col] = (mean, std)
+        norm = np.nan_to_num((vals - mean) / std, nan=0.0) * weight
+        extra_parts.append(norm.reshape(-1, 1))
+
+    if not extra_parts:
+        return xyz, None
+    features = np.hstack([xyz] + extra_parts)
+    return features, stats
+
+
+def _apply_match_filter(
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+    left_idx: np.ndarray,
+    right_idx: np.ndarray,
+    seps: np.ndarray,
+    filter_expr: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Post-filter matched pairs with a polars SQL WHERE clause.
+
+    The *filter_expr* string is evaluated as ``SELECT * FROM tmp WHERE
+    <filter_expr>`` using polars' ``SQLContext``.  Column names from the left
+    side are used as-is; right-side collision columns gain a ``_2`` suffix.
+    Returns the filtered index and separation arrays.
+    """
+    if left_idx.size == 0:
+        return left_idx, right_idx, seps
+
+    matched_left = _gather(left, left_idx)
+    right_renamed = _rename_right(right, left.columns, suffix=_RIGHT_SUFFIX)
+    matched_right = _gather(right_renamed, right_idx)
+
+    # Build a temporary frame with a row-index column so we can recover which
+    # original pairs survive the WHERE clause.
+    tmp = matched_left.hstack(matched_right)
+    tmp = tmp.with_row_index(name="_row_id")
+
+    try:
+        ctx = pl.SQLContext(tmp=tmp)
+        filtered = ctx.execute(
+            f"SELECT _row_id FROM tmp WHERE {filter_expr}"
+        )
+        keep_rows = set(int(r) for r in filtered["_row_id"].to_list())
+        keep = np.array([i in keep_rows for i in range(tmp.height)], dtype=bool)
+    except Exception as exc:
+        logger.warning(
+            "Filter expression '%s' failed (%s); keeping all pairs.",
+            filter_expr, exc,
+        )
+        return left_idx, right_idx, seps
+
+    n_kept = int(np.sum(keep))
+    if n_kept == 0:
+        return (
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int64),
+            np.array([], dtype=float),
+        )
+    if n_kept < left_idx.size:
+        logger.info("Filter expression kept %d/%d matched pairs.", n_kept, left_idx.size)
+    return left_idx[keep], right_idx[keep], seps[keep]
+
+
+# --------------------------------------------------------------------------- #
 # Tier 1 — fast engine (scipy.spatial.cKDTree, no Java, no FITS I/O)
 # --------------------------------------------------------------------------- #
 def _scipy_match(
@@ -201,14 +394,13 @@ def _scipy_match(
     if left.height == 0 or right.height == 0:
         return empty
 
-    l_xyz = _radec_to_xyz(
-        left[left_src.ra_column].to_numpy(),
-        left[left_src.dec_column].to_numpy(),
-    )
-    r_xyz = _radec_to_xyz(
-        right[right_src.ra_column].to_numpy(),
-        right[right_src.dec_column].to_numpy(),
-    )
+    l_ra = left[left_src.ra_column].to_numpy()
+    l_dec = left[left_src.dec_column].to_numpy()
+    r_ra = right[right_src.ra_column].to_numpy()
+    r_dec = right[right_src.dec_column].to_numpy()
+
+    l_xyz = _radec_to_xyz(l_ra, l_dec)
+    r_xyz = _radec_to_xyz(r_ra, r_dec)
 
     if spec.matcher == "sky":
         chord_max = _arcsec_to_chord(spec.radius_arcsec)
@@ -225,6 +417,13 @@ def _scipy_match(
         chord_max = _arcsec_to_chord(max(search_radius, 0.0))
     if chord_max <= 0:
         return empty
+
+    # --- N-dimensional ranking (only affects find="best") ------------------
+    if spec.extra_distance_cols and spec.find == "best":
+        return _scipy_match_nd(
+            l_xyz, r_xyz, l_ra, l_dec, r_ra, r_dec,
+            left, right, chord_max, spec,
+        )
 
     tree = cKDTree(r_xyz)
     if spec.find == "best":
@@ -254,6 +453,71 @@ def _scipy_match(
     return left_idx, right_idx, sep
 
 
+def _scipy_match_nd(
+    l_xyz: np.ndarray,
+    r_xyz: np.ndarray,
+    l_ra: np.ndarray,
+    l_dec: np.ndarray,
+    r_ra: np.ndarray,
+    r_dec: np.ndarray,
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+    chord_max: float,
+    spec: MatchSpec,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """N-dimensional cKDTree match for find="best".
+
+    1. Query spatial cKDTree for up to *k_candidates* neighbours within
+       ``chord_max``.
+    2. Build N-d features (3-D spatial + z-score normalised extra columns).
+    3. Among the spatial candidates, pick the one with smallest N-d
+       Euclidean distance.
+    """
+    from scipy.spatial import cKDTree
+
+    empty = (np.array([], int), np.array([], int), np.array([], float))
+    n_right = r_xyz.shape[0]
+
+    # Step 1: spatial candidate retrieval.
+    k_candidates = min(max(10, int(spec.radius_arcsec * 2)), n_right)
+    spatial_tree = cKDTree(r_xyz)
+    dist_sp, idx_sp = spatial_tree.query(
+        l_xyz, k=min(k_candidates, n_right),
+        distance_upper_bound=chord_max, workers=-1,
+    )
+    if k_candidates == 1:
+        dist_sp = dist_sp[:, None]
+        idx_sp = idx_sp[:, None]
+
+    # Step 2: build N-d features once per side.
+    l_feat, stats = _build_nd_features(l_ra, l_dec, left, spec.extra_distance_cols)
+    r_feat, _ = _build_nd_features(r_ra, r_dec, right, spec.extra_distance_cols, union_mean=stats)
+
+    # Step 3: evaluate N-d distance for every candidate, pick best.
+    left_idx_parts, right_idx_parts, sep_parts = [], [], []
+    for i in range(l_xyz.shape[0]):
+        candidates = idx_sp[i]
+        valid = np.isfinite(dist_sp[i]) & (candidates < n_right)
+        candidates = candidates[valid]
+        if candidates.size == 0:
+            continue
+        nd_dists = np.linalg.norm(r_feat[candidates] - l_feat[i], axis=-1)
+        best_j = int(np.argmin(nd_dists))
+        best_r = int(candidates[best_j])
+        sep = _chord_to_arcsec(float(np.linalg.norm(l_xyz[i] - r_xyz[best_r])))
+        left_idx_parts.append(np.array([i], dtype=np.int64))
+        right_idx_parts.append(np.array([best_r], dtype=np.int64))
+        sep_parts.append(np.array([float(sep)], dtype=float))
+
+    if not left_idx_parts:
+        return empty
+    return (
+        np.concatenate(left_idx_parts),
+        np.concatenate(right_idx_parts),
+        np.concatenate(sep_parts),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Tier 2 — HEALPix zone engine
 # --------------------------------------------------------------------------- #
@@ -271,7 +535,15 @@ def _zone_match(
     query neighbour pixels within the cone radius — classic HATS-style
     partitioning. When ``cdshealpix`` is not importable we transparently
     downgrade to :func:`_scipy_match` and log a warning.
+
+    N-dimensional extra_distance_cols are delegated to :func:`_scipy_match`
+    since the N-d ranking loop is simpler without pixel sharding.
     """
+    if spec.extra_distance_cols:
+        logger.info(
+            "extra_distance_cols set; using Tier 1 cKDTree for N-d matching."
+        )
+        return _scipy_match(left, right, left_src, right_src, spec)
     try:
         import cdshealpix as hp  # noqa: F401
     except ImportError:
@@ -344,76 +616,98 @@ def _zone_match_healpix(
     for i, pix in enumerate(l_pix):
         l_by_pix.setdefault(int(pix), []).append(i)
 
+    # Pre-compute per-right-pixel global-index arrays for fast margin merging.
+    r_global_by_pix: dict[int, np.ndarray] = {
+        int(pix): r_groups[int(pix)] for pix in unique_pix
+    }
+
+    # Sort left pixel groups largest-first so batches are balanced.
+    pixel_items = sorted(
+        l_by_pix.items(), key=lambda kv: len(kv[1]), reverse=True,
+    )
+    batch_size = spec.batch_size or len(pixel_items)
+
     l_parts, r_parts, sep_parts = [], [], []
-    for l_pix_int, left_indices in l_by_pix.items():
-        indices_arr = np.asarray(left_indices, dtype=np.int64)
-        # Cone search once per pixel (same for all points in pixel).
-        mid = len(left_indices) // 2
-        rep_i = left_indices[mid]
-        npix = hp.cone_search_lonlat(
-            lon=float(np.radians(l_ra[rep_i])),
-            lat=float(np.radians(l_dec[rep_i])),
-            radius=float(np.radians(radius_deg)),
-            depth=DEPTH,
-        )
-        batch_xyz = l_xyz[indices_arr]  # (n_pix, 3)
+    for batch_start in range(0, len(pixel_items), max(1, batch_size)):
+        batch_pixels = pixel_items[batch_start : batch_start + max(1, batch_size)]
+        batch_l = []
+        batch_r = []
+        batch_s = []
 
-        # Collect candidates per left point, dedup by global right index.
-        # For find="best" we batch-query the tree once per right pixel,
-        # then pick the minimum per left point.
-        per_left: list = [{} for _ in range(len(left_indices))]
-        for rpix in npix:
-            rpix_int = int(rpix)
-            tree = tree_cache.get(rpix_int)
-            if tree is None:
+        for l_pix_int, left_indices in batch_pixels:
+            indices_arr = np.asarray(left_indices, dtype=np.int64)
+            # Cone search once per pixel (same for all points in pixel).
+            mid = len(left_indices) // 2
+            rep_i = left_indices[mid]
+            npix = hp.cone_search_lonlat(
+                lon=float(np.radians(l_ra[rep_i])),
+                lat=float(np.radians(l_dec[rep_i])),
+                radius=float(np.radians(radius_deg)),
+                depth=DEPTH,
+            )
+            batch_xyz = l_xyz[indices_arr]  # (n_pix, 3)
+
+            # --- margin caching: merge all neighbouring right pixels into one
+            #     tree and query it once instead of querying each right pixel
+            #     individually.
+            margin_xyz_parts: list = []
+            margin_global_parts: list = []
+            for rpix in npix:
+                rpix_int = int(rpix)
+                if rpix_int not in r_global_by_pix:
+                    continue
+                margin_xyz_parts.append(xyz_cache[rpix_int])
+                margin_global_parts.append(r_global_by_pix[rpix_int])
+
+            if not margin_xyz_parts:
                 continue
+
+            margin_xyz = np.vstack(margin_xyz_parts)
+            margin_global = np.concatenate(margin_global_parts)
+            margin_tree = cKDTree(margin_xyz)
+
             if spec.find == "best":
-                dist, idx = tree.query(
-                    batch_xyz, k=1, distance_upper_bound=chord_max, workers=-1
+                dist, local_idx = margin_tree.query(
+                    batch_xyz, k=1, distance_upper_bound=chord_max, workers=-1,
                 )
-                valid = np.isfinite(dist) & (idx < tree.n)
+                valid = np.isfinite(dist) & (local_idx < margin_tree.n)
                 for k in np.nonzero(valid)[0]:
-                    key = (rpix_int, int(idx[k]))
-                    d = float(dist[k])
-                    if key not in per_left[k] or d < per_left[k][key]:
-                        per_left[k][key] = d
+                    k_idx = left_indices[k]
+                    global_r = int(margin_global[local_idx[k]])
+                    sep_arcsec = float(_chord_to_arcsec(float(dist[k])))
+                    batch_l.append(np.array([k_idx], dtype=np.int64))
+                    batch_r.append(np.array([global_r], dtype=np.int64))
+                    batch_s.append(np.array([sep_arcsec], dtype=float))
             else:
-                idx_lists = tree.query_ball_point(batch_xyz, r=chord_max, workers=-1)
+                idx_lists = margin_tree.query_ball_point(
+                    batch_xyz, r=chord_max, workers=-1,
+                )
                 for k, neighbors in enumerate(idx_lists):
-                    for n in neighbors:
-                        key = (rpix_int, int(n))
-                        dx = xyz_cache[rpix_int][int(n)] - batch_xyz[k]
-                        d = float(np.linalg.norm(dx))
-                        if key not in per_left[k] or d < per_left[k][key]:
-                            per_left[k][key] = d
-
-        for k, k_idx in enumerate(left_indices):
-            candidates = per_left[k]
-            if not candidates:
-                continue
-            if spec.find == "best":
-                best_key = min(candidates, key=candidates.get)
-                best_chord = candidates[best_key]
-                global_r = int(r_groups[best_key[0]][best_key[1]])
-                l_parts.append(np.asarray([k_idx], dtype=np.int64))
-                r_parts.append(np.asarray([global_r], dtype=np.int64))
-                sep_parts.append(
-                    np.asarray([float(_chord_to_arcsec(best_chord))], dtype=float)
-                )
-            else:
-                # sort by global_r for stability
-                items = sorted(candidates.items(), key=lambda kv: kv[1])
-                keys = [k for k, _ in items]
-                chords = [v for _, v in items]
-                l_parts.append(np.full(len(items), k_idx, dtype=np.int64))
-                r_parts.append(
-                    np.asarray(
-                        [int(r_groups[rp][loc]) for rp, loc in keys], dtype=np.int64
+                    if not neighbors:
+                        continue
+                    k_idx = left_indices[k]
+                    nb = np.asarray(neighbors, dtype=np.int64)
+                    global_r = margin_global[nb].astype(np.int64)
+                    chords = np.linalg.norm(
+                        margin_xyz[nb] - batch_xyz[k], axis=-1,
                     )
-                )
-                sep_parts.append(
-                    _chord_to_arcsec(np.asarray(chords, dtype=float))
-                )
+                    seps = _chord_to_arcsec(chords)
+                    batch_l.append(np.full(len(neighbors), k_idx, dtype=np.int64))
+                    batch_r.append(global_r)
+                    batch_s.append(np.asarray(seps, dtype=float))
+
+        # Flush batch to accumulator (out-of-core friendly — per-batch
+        # margin trees and numpy arrays can be GC'd after this point).
+        l_parts.extend(batch_l)
+        r_parts.extend(batch_r)
+        sep_parts.extend(batch_s)
+        if spec.batch_size and batch_start + max(1, batch_size) < len(pixel_items):
+            logger.debug(
+                "Batch %d/%d complete (%d matched pairs so far).",
+                batch_start // max(1, batch_size) + 1,
+                (len(pixel_items) + max(1, batch_size) - 1) // max(1, batch_size),
+                sum(p.size for p in l_parts),
+            )
 
     if not l_parts:
         return empty
@@ -604,6 +898,16 @@ def sky_match(
     if chosen == "auto":
         chosen = "stilts" if stilts.stilts_available(stilts_cmd_base) else "astropy"
 
+    # --- proper motion propagation (common to all engines) -----------------
+    if spec.target_epoch is not None:
+        left_eager = left_lf.collect()
+        right_eager = right_lf.collect()
+        left_eager, right_eager = _apply_proper_motion(
+            left_eager, right_eager, left_src, right_src, float(spec.target_epoch),
+        )
+        left_lf = left_eager.lazy()
+        right_lf = right_eager.lazy()
+
     if chosen == "stilts":
         if right_suffix != _RIGHT_SUFFIX:
             logger.warning(
@@ -618,6 +922,12 @@ def sky_match(
                 "(prior_columns=%s) is skipped. Use engine='fast' or 'astropy' "
                 "for Tier-3 p_match output.",
                 spec.prior_columns,
+            )
+        if spec.filter_expr:
+            logger.warning(
+                "STILTS engine selected — filter_expr='%s' is skipped. "
+                "Use engine='fast', 'astropy', or 'zone' for post-match filtering.",
+                spec.filter_expr,
             )
         try:
             return stilts.stilts_sky_match(
@@ -648,8 +958,21 @@ def sky_match(
         right = right_lf.collect()
         l_idx, r_idx, seps = _zone_match(left, right, left_src, right_src, spec)
         logger.info("zone (HEALPix pixellated) sky match: %d matched pairs.", len(l_idx))
+    elif chosen == "ray":
+        from .ray_engine import ray_zone_match
+
+        left = left_lf.collect()
+        right = right_lf.collect()
+        l_idx, r_idx, seps = ray_zone_match(left, right, left_src, right_src, spec)
+        logger.info("ray (distributed) sky match: %d matched pairs.", len(l_idx))
     else:
         raise CrossMatchError(f"Unknown engine '{chosen}'.")
+
+    # --- post-match boolean filter ----------------------------------------
+    if spec.filter_expr and l_idx.size > 0:
+        l_idx, r_idx, seps = _apply_match_filter(
+            left, right, l_idx, r_idx, seps, spec.filter_expr,
+        )
 
     p_match = _bayesian_qualify(left, right, l_idx, r_idx, seps, left_src, right_src, spec)
     return _build_result(left, right, l_idx, r_idx, seps, spec, p_match=p_match, right_suffix=right_suffix).lazy()

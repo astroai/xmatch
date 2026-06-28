@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xmatch"
-version = "0.4.0"
+version = "0.5.0"
 description = "A tool for cross-matching astronomical catalogues using various methods."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -38,6 +38,8 @@ dependencies = [
 [project.optional-dependencies]
 # HATS / HiPSCat catalogue support.
 hats = ["lsdb"]
+# Ray distributed engine (parallel HEALPix pixel-batch matching).
+ray = ["ray"]
 # Optional keyring backends.
 keyring_backends = [
     "keyrings.cryptfile",

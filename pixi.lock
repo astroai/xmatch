@@ -6076,6 +6076,7 @@ packages:
   - keyring>=23.0
   - astroquery>=0.4.6
   - lsdb ; extra == 'hats'
+  - ray ; extra == 'ray'
   - keyrings-cryptfile ; extra == 'keyring-backends'
   - keyrings-osx ; extra == 'keyring-backends'
   - keyrings-alt ; extra == 'keyring-backends'

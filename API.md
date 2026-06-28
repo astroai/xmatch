@@ -136,6 +136,100 @@ SideOverrides(
 | `join_type` | `str` | `"1and2"` | `"1and2"`, `"1or2"`, `"all1"`, `"all2"`, `"1not2"`, `"2not1"`, `"all"`. |
 | `find` | `str` | `"best"` | `"best"` (closest) or `"all"` (all within radius). |
 | `prior_columns` | `list[str]` | `[]` | Photometric columns for Tier-3 Bayesian KDE prior. |
+| `target_epoch` | `float` | `None` | Julian-year epoch for proper-motion propagation. |
+| `filter_expr` | `str` | `None` | Polars SQL WHERE clause for post-match filtering. |
+| `extra_distance_cols` | `dict[str,float]` | `{}` | Column→weight map for N-dimensional cKDTree ranking. |
+| `batch_size` | `int` | `None` | HEALPix pixel groups per batch (out-of-core friendly). |
+
+---
+
+## Advanced match features
+
+### Proper-motion correction
+
+Propagates RA/Dec to a common Julian-year epoch using per-row proper motions
+and epoch columns (or catalogue-level defaults). NaN proper motions are treated
+as zero.
+
+```python
+from xmatch import MatchSpec
+
+spec = MatchSpec(
+    radius_arcsec=1.0,
+    target_epoch=2016.0,  # Gaia DR3 reference epoch
+)
+result = cm.crossmatch("wise.csv", "gaia_esa",
+    ra=180, dec=-30, radius_deg=0.01,
+    spec=spec,
+)
+```
+
+Requires `pm_ra_column` / `pm_dec_column` in the catalogue config (e.g., Gaia
+has `pmra`/`pmdec` registered). Uses astropy for the spatial kinematics.
+
+### Multi-condition post-match filtering
+
+Filter matched pairs with a Polars SQL WHERE clause before picking the best
+match. Column names from the left side are used as-is; right-side collision
+columns get a ``_2`` suffix.
+
+```python
+spec = MatchSpec(
+    radius_arcsec=2.0,
+    filter_expr="abs(pmra - pmra_2) < 2.0 AND abs(phot_g_mean_mag - phot_g_mean_mag_2) < 0.5",
+    find="best",
+)
+result = cm.crossmatch("gaia_bright.parquet", "gaia_faint.parquet", spec=spec)
+```
+
+Works with `engine="fast"`, `"astropy"`, or `"zone"` (logged warning for STILTS).
+
+### N-dimensional cKDTree ranking
+
+When `extra_distance_cols` is set and `find="best"`, the engine retrieves
+spatial candidates within `radius_arcsec` and picks the one nearest in N-d
+feature space (3-D spatial + z-score normalised extra columns). Useful for
+breaking degeneracies in dense fields by incorporating photometry or proper
+motion into the distance metric.
+
+```python
+spec = MatchSpec(
+    radius_arcsec=2.0,
+    extra_distance_cols={"phot_g_mean_mag": 0.5, "bp_rp": 0.3},
+    find="best",
+)
+result = cm.crossmatch("cat_a.parquet", "cat_b.parquet", spec=spec,
+                        engine="fast")
+```
+
+### Out-of-core batching
+
+When `batch_size` is set with `engine="zone"`, the HEALPix zone matcher
+processes pixel groups in configurable batches, flushing results incrementally
+and releasing per-batch margin trees. Pixel groups sorted largest-first for
+balanced memory use.
+
+```python
+spec = MatchSpec(radius_arcsec=1.0, batch_size=100)
+result = cm.crossmatch("large_a.parquet", "large_b.parquet", spec=spec,
+                        engine="zone")
+```
+
+### Ray distributed engine
+
+Fans out HEALPix pixel-batch matching across Ray workers for distributed
+crossmatching. Right-side pixel data placed in Ray's object store for zero-copy
+sharing. Falls back to single-machine zone match when Ray is unavailable.
+
+```bash
+pip install 'xmatch[ray]'
+```
+
+```python
+result = cm.crossmatch("huge_a.parquet", "huge_b.parquet",
+    radius_arcsec=1.0, engine="ray",
+)
+```
 
 ---
 
@@ -272,6 +366,40 @@ result = cm.crossmatch_multi(
 )
 ```
 
+### Pre-computed crossmatch tables
+
+Data Lab hosts pre-computed 1.5″ nearest-neighbour crossmatch tables that let
+you **skip downloading** the full catalogues. Each table contains matched
+pairs with ``ra1``/``dec1``/``id1`` (survey), ``ra2``/``dec2``/``id2`` (Gaia),
+and ``distance`` (separation in arcsec).
+
+```python
+# Instead of downloading NSC and Gaia as two separate catalogues, use the
+# pre-computed xmatch table — it already contains NSC×Gaia matched pairs.
+# You download one table instead of two, and still sky-match against a local
+# file.  The xmatch table's "distance" column is the NSC–Gaia separation;
+# the output "sep_arcsec" is the separation from the local file.
+result = cm.crossmatch(
+    "nsc_x_gaia", "local_stars.csv",
+    ra=279.23, dec=38.78, radius_deg=0.005,
+    radius_arcsec=2.0,  # your desired local-match radius (the xmatch table's
+                        # 1.5″ NSC–Gaia pairing radius is baked in)
+)
+# Columns: ra1, dec1, id1 (NSC), ra2, dec2, id2 (Gaia), distance (NSC–Gaia),
+#          plus local columns and sep_arcsec (local-match separation)
+```
+
+Available pre-computed xmatch tables: ``nsc_x_gaia``, ``des_x_gaia``,
+``decals_x_gaia``, ``allwise_x_gaia`` (aliases for
+``nsc_x_gaia_noao`` / ``des_x_gaia_noao`` / …).
+
+CLI equivalent:
+
+```bash
+# Instant NSC×Gaia match — no full catalogue download
+xmatch nsc_x_gaia my_stars.csv --ra 279.2 --dec 38.8 --radius-deg 0.005 -r 1.5
+```
+
 **Discovery:** Explore remote TAP tables interactively:
 
 ```bash
@@ -361,6 +489,13 @@ xmatch a.csv b.csv -o out.parquet -r 1.5
 xmatch --matcher skyerr --max-error 3.0 a.csv b.csv
 xmatch --id-join --id1 objid --id2 objid a.csv b.csv
 xmatch a.parquet b.parquet --engine fast --probabilistic --priors g,r -o out.parquet
+
+# Advanced features
+xmatch --target-epoch 2016.0 a.csv b.csv -r 1.5                        # PM correction
+xmatch --engine fast --filter-expr "abs(mag - mag_2) < 0.5" a.csv b.csv  # post-filter
+xmatch --engine fast --extra-distance-cols g:0.5,bp_rp:0.3 a.csv b.csv  # N-d ranking
+xmatch --engine zone --batch-size 100 large_a.csv large_b.csv            # out-of-core batching
+xmatch --engine ray huge_a.parquet huge_b.parquet -r 1.0                 # Ray distributed
 
 # N-catalogue (3+) crossmatching
 xmatch a.csv b.csv c.csv -r 1.0                          # 3-way intersection

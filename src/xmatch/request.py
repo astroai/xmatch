@@ -141,6 +141,12 @@ class MatchRequest:
         API keeps working while the internals migrate to typed dataclasses.
         """
         prior: List[str] = list(params.get("prior_columns") or [])
+        extra_distance: Dict[str, float] = dict(params.get("extra_distance_cols") or {})
+        # Normalise extra_distance_cols values to float (may arrive as str/int).
+        if extra_distance:
+            extra_distance = {
+                str(k): float(v) for k, v in extra_distance.items()
+            }
         spec = MatchSpec(
             radius_arcsec=float(params.get("radius_arcsec", 1.0)),
             matcher=params.get("matcher") or "sky",
@@ -148,6 +154,10 @@ class MatchRequest:
             join_type=params.get("join_type", "1and2"),
             find=params.get("find", "best"),
             prior_columns=prior,
+            target_epoch=params.get("target_epoch"),
+            filter_expr=params.get("filter_expr"),
+            extra_distance_cols=extra_distance,
+            batch_size=params.get("batch_size"),
         )
         return cls(
             cat1=cat1,

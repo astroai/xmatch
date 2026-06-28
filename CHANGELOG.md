@@ -3,7 +3,51 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — v0.5 Audit + HATS + Data Lab
+## [Unreleased] — v0.5 Audit + HATS + Data Lab + New Engines
+
+### Added — New Match Features
+
+* **Proper motion correction**: `MatchSpec.target_epoch` propagates RA/Dec to a
+  common Julian-year epoch using per-row `pm_ra_column` / `pm_dec_column` +
+  `epoch_column` (or catalogue-level `epoch`). NaN proper motions treated as
+  zero. Applies before any engine dispatch. Requires astropy.
+* **Multi-condition filtering**: `MatchSpec.filter_expr` accepts a polars SQL
+  WHERE clause (e.g. `"abs(mag_g - mag_g_2) < 0.5"`) applied as a post-match
+  boolean filter. Works with `engine="fast"`, `"astropy"`, or `"zone"`.
+  Left-side column names used as-is; right-side collisions get `_2` suffix.
+* **N-dimensional cKDTree matching**: `MatchSpec.extra_distance_cols` maps
+  column names to dimensionless weights. Columns are z-score normalized across
+  the catalogue union and appended to the 3-D Cartesian unit-sphere embedding.
+  Among spatial candidates within `radius_arcsec`, the nearest in N-d feature
+  space is chosen. Only affects `find="best"`; `find="all"` unchanged.
+* **Out-of-core batching**: `MatchSpec.batch_size` controls how many HEALPix
+  pixel groups the zone engine processes per batch. Results flushed
+  incrementally; per-batch margin trees GC'd between batches. Pixel groups
+  sorted largest-first for balanced memory use.
+
+### Added — Ray Distributed Engine
+
+* **`ray_engine.py`**: new module with `ray_zone_match` entry point. Fans out
+  HEALPix pixel-batch matching across Ray workers. Right-side pixel data placed
+  in Ray's object store for zero-copy sharing. Gracefully falls back to
+  single-machine zone match when Ray is unavailable. Lazy `@ray.remote`
+  initialization avoids import-time failures without `ray` installed.
+* **`pyproject.toml`**: `ray` added to `[project.optional-dependencies]` —
+  install with `pip install 'xmatch[ray]'`.
+* **`sky_match`**: accepts `engine="ray"`.
+
+### Changed — Performance
+
+* **HEALPix margin caching**: `_zone_match_healpix` now merges all neighbouring
+  right-pixel data into a single cKDTree per left pixel group and queries it
+  once (instead of querying each right pixel's tree individually). Significantly
+  faster for dense fields with many overlapping neighbour pixels.
+
+### Fixed — Correctness
+
+* **PM propagation**: `_apply_proper_motion` now correctly processes both left
+  and right sides (previously returned after first side due to early-return
+  bug). Added debug log when neither side has PM+epoch info.
 
 ### Fixed — Math & Correctness
 
