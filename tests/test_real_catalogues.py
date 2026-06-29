@@ -115,7 +115,8 @@ def _fetch_gaia(path: pathlib.Path) -> None:
     dec_lo = CENTRE_DEC_DEG - CONE_RADIUS_DEG
     dec_hi = CENTRE_DEC_DEG + CONE_RADIUS_DEG
     adql = (
-        f"SELECT TOP {N_ROWS} source_id, ra, dec, ra_error, dec_error, phot_g_mean_mag "
+        f"SELECT TOP {N_ROWS} source_id, ra, dec, ra_error, dec_error, "
+        f"ra_dec_corr, phot_g_mean_mag "
         f"FROM gaiaedr3.gaia_source "
         f"WHERE ra BETWEEN {ra_lo} AND {ra_hi} "
         f"AND dec BETWEEN {dec_lo} AND {dec_hi} "
@@ -132,6 +133,7 @@ def _fetch_gaia(path: pathlib.Path) -> None:
                 pl.col("dec").cast(pl.Float64),
                 pl.col("ra_error").cast(pl.Float64),
                 pl.col("dec_error").cast(pl.Float64),
+                pl.col("ra_dec_corr").cast(pl.Float64),
                 pl.col("phot_g_mean_mag").cast(pl.Float64),
             ]
         )
@@ -232,7 +234,14 @@ def usno_csv() -> pathlib.Path:
 # CatalogueSource construction per test
 # --------------------------------------------------------------------------- #
 def _gaia_source(csv: pathlib.Path) -> CatalogueSource:
-    return CatalogueSource(
+    """Build a Gaia CatalogueSource for a cached CSV.
+
+    Includes ``corr_column`` only when the cached CSV actually contains the
+    ``ra_dec_corr`` column (added to the fetcher after the initial cache
+    population).  This keeps the helper backward-compatible with older cache
+    files that were fetched before the column was included.
+    """
+    src = CatalogueSource(
         name=csv.stem,
         is_local=True,
         path=csv,
@@ -243,6 +252,14 @@ def _gaia_source(csv: pathlib.Path) -> CatalogueSource:
         dec_err_column="dec_error",
         pos_err_units="mas",
     )
+    # Only wire corr_column if the CSV actually has it (backward compat).
+    if csv.exists():
+        import polars as pl
+
+        cols = pl.scan_csv(str(csv)).collect_schema().names()
+        if "ra_dec_corr" in cols:
+            src.corr_column = "ra_dec_corr"
+    return src
 
 
 def _allwise_source(csv: pathlib.Path) -> CatalogueSource:
@@ -448,3 +465,102 @@ def test_real_gaia_stilts_parity_with_fast(gaia_csv):
     sep_s = np.sort(stilts_out["sep_arcsec"].to_numpy())
     sep_f = np.sort(fast_out["sep_arcsec"].to_numpy())
     assert np.allclose(sep_s, sep_f, atol=1e-6)
+
+
+@pytest.mark.skipif(not _HAVE_ASTROQUERY, reason="astroquery not installed")
+def test_skyellipse_gaia_self_match_with_correlation(gaia_csv):
+    """Skyellipse (Mahalanobis distance with 2×2 covariance) on real Gaia
+    DR3 self-match.  Uses ``ra_error``/``dec_error`` (mas) and
+    ``ra_dec_corr`` (when available) for full error-ellipse matching.
+
+    Every row self-pairs at sep≈0, so the Mahalanobis distance is dominated
+    by the positional covariance.  The ``max_error=5`` threshold comfortably
+    accepts all self-pairs even with correlated errors.
+    """
+    src = _gaia_source(gaia_csv)
+    if src.corr_column is None:
+        pytest.skip(
+            "Cache missing ra_dec_corr column — delete gaia_dr3_top500.csv "
+            "and re-run to fetch with correlation."
+        )
+    lf = src.lazy()
+
+    # Run skyellipse with a generous max_error to accept all self-pairs.
+    spec = MatchSpec(
+        matcher="skyellipse",
+        max_error=5.0,
+        radius_arcsec=2.0,
+        find="best",
+    )
+    out = sky_match(src, src, lf, lf, spec, engine="fast").collect()
+    assert out.height == N_ROWS, (
+        f"skyellipse self-match expected {N_ROWS}, got {out.height}"
+    )
+    assert "sep_arcsec" in out.columns
+    assert float(out["sep_arcsec"].max()) < 1e-6
+
+    # All self-pairs should have well-defined separations.
+    assert np.all(np.isfinite(out["sep_arcsec"].to_numpy()))
+
+
+@pytest.mark.skipif(not _HAVE_ASTROQUERY, reason="astroquery not installed")
+def test_skyellipse_vs_sky_on_gaia_self_match(gaia_csv):
+    """Skyellipse and plain sky (radius-only) must agree on the same row
+    count and sep_arcsec for a Gaia self-match at tiny radius, since the
+    positional errors are negligible compared to the search radius."""
+    src = _gaia_source(gaia_csv)
+    lf = src.lazy()
+
+    spec_sky = MatchSpec(radius_arcsec=0.01, find="best")
+    spec_ell = MatchSpec(
+        matcher="skyellipse", max_error=5.0, radius_arcsec=0.01, find="best"
+    )
+
+    sky_out = sky_match(src, src, lf, lf, spec_sky, engine="fast").collect()
+    ell_out = sky_match(src, src, lf, lf, spec_ell, engine="fast").collect()
+
+    assert sky_out.height == ell_out.height == N_ROWS
+    sep_sky = np.sort(sky_out["sep_arcsec"].to_numpy())
+    sep_ell = np.sort(ell_out["sep_arcsec"].to_numpy())
+    assert np.allclose(sep_sky, sep_ell, atol=1e-6)
+
+
+@pytest.mark.skipif(not _HAVE_ASTROQUERY, reason="astroquery not installed")
+def test_nway_gaia_allwise_usno_photometric_priors(
+    gaia_csv, allwise_csv, usno_csv
+):
+    """3-way Bayesian N-way crossmatch (Gaia × AllWISE × USNO-B1.0) with a
+    photometric prior on ``phot_g_mean_mag``.
+
+    Uses :meth:`CrossMatch.nway_match` to score simultaneous 3-catalogue
+    tuples with the Budavári N-way posterior.  The test verifies that the
+    result contains at least one matched tuple, that ``p_match`` falls in
+    [0, 1], and that columns from all three catalogues are present.
+    """
+    from pathlib import Path
+
+    from xmatch.crossmatch import CrossMatch
+
+    config = Path(__file__).parent.parent / "src" / "xmatch" / "xmatch.yaml"
+    cm = CrossMatch(config_file=config)
+
+    result = cm.nway_match(
+        [str(gaia_csv), str(allwise_csv), str(usno_csv)],
+        radius_arcsec=2.0,
+        prior_columns=["phot_g_mean_mag"],
+        max_tuples_per_source=5_000,
+        chunk_size=10_000,
+    )
+
+    assert result.height >= 1, (
+        "nway_match found no 3-way tuples — check cache or cone selection"
+    )
+    assert "p_match" in result.columns
+    p = result["p_match"].to_numpy()
+    assert ((p >= 0.0) & (p <= 1.0)).all()
+    assert np.isfinite(p).all()
+
+    # Verify columns from all three catalogues are present.
+    assert "source_id" in result.columns  # Gaia
+    assert "AllWISE_2" in result.columns or "AllWISE" in result.columns
+    assert "USNO-B1.0_3" in result.columns or "USNO-B1.0" in result.columns

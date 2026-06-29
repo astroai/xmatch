@@ -938,13 +938,18 @@ def _process_chunk(
         p_match = compute_nway_p_match(ras, decs, sigmas, radius_arcsec)
 
     # Build chunk result frame.
+    # Track ALL seen column names (not just catalogue 1) so collisions
+    # between catalogues 2+3 (e.g. RAJ2000 in both AllWISE and USNO)
+    # are suffixed correctly.
     result_parts = []
+    seen_columns: set = set()
     for i, f in enumerate(frames):
         suffix = f"_{i + 1}" if i > 0 else ""
         part = f.gather(indices_per_cat[i])
         if suffix:
-            overlap = set(frames[0].columns) & set(part.columns)
+            overlap = seen_columns & set(part.columns)
             part = part.rename({c: f"{c}{suffix}" for c in overlap})
+        seen_columns.update(part.columns)
         result_parts.append(part)
 
     result = pl.concat(result_parts, how="horizontal")
