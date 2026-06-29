@@ -1010,6 +1010,48 @@ def test_skyellipse_correlation_affects_match():
                        out_corr["sep_arcsec"].to_numpy(), atol=1e-6)
 
 
+def test_skyellipse_k_candidates_picks_best_by_mahalanobis():
+    """When the spatial-nearest candidate fails Mahalanobis d² but a
+    slightly-farther candidate passes, the engine should pick the farther
+    one because it queries k>1 candidates and ranks by d²."""
+    # One left source, two right sources within spatial range.
+    # Star A: spatially closer, but its error ellipse has tiny Dec variance
+    #          and the offset is mostly in Dec → large Mahalanobis d².
+    # Star B: spatially farther, but error ellipse matches the offset → small d².
+    left = pl.DataFrame({
+        "ra": [10.0], "dec": [5.0],
+        "rae": [0.5], "dee": [0.01], "corr": [0.0],
+    })
+    right = pl.DataFrame({
+        "ra": [10.00002, 10.00004],  # B is twice as far in RA
+        "dec": [5.000005, 5.0],      # A has ~0.02 arcsec Dec offset
+        "rae": [0.5, 0.5],
+        "dee": [0.01, 0.5],
+        "corr": [0.0, 0.0],
+    })
+    a = _src("a", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    b = _src("b", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    # Use sky (spatial-only) to verify: star A is spatially closer.
+    spec_sky = MatchSpec(radius_arcsec=1.0)
+    out_sky = sky_match(a, b, left.lazy(), right.lazy(), spec_sky, engine="fast").collect()
+    assert out_sky.height == 1
+    # Spatial engine picks the closer star (star A, ra_2=10.00002).
+    assert abs(out_sky["ra_2"][0] - 10.00002) < 1e-6
+
+    # skyellipse: star B should be a better Mahalanobis match because its
+    # error is more isotropic (smaller d² relative to the offset direction).
+    spec_el = MatchSpec(radius_arcsec=1.0, matcher="skyellipse", max_error=5.0)
+    out_el = sky_match(a, b, left.lazy(), right.lazy(), spec_el, engine="fast").collect()
+    assert out_el.height == 1
+    # skyellipse should pick star B (ra_2=10.00004) if its d² is smaller.
+    # If it picked star A, the k>1 query isn't working — it's just filtering
+    # the spatial-nearest.
+    assert abs(out_el["ra_2"][0] - 10.00004) < 1e-6, (
+        f"Expected skyellipse to pick the farther star (B, ra=10.00004) "
+        f"by Mahalanobis d², but got ra_2={out_el['ra_2'][0]}"
+    )
+
+
 def test_skyellipse_engine_parity():
     """fast, astropy, and zone should agree on skyellipse match counts."""
     rng = np.random.default_rng(42)

@@ -545,28 +545,66 @@ def _scipy_match(
 
     tree = cKDTree(r_xyz)
     if spec.find == "best":
+        # --- skyellipse: query k>1 candidates, pick best by Mahalanobis d² --
+        if spec.matcher == "skyellipse":
+            k_candidates = min(max(10, int(spec.max_error * 2)), r_xyz.shape[0])
+            dist_sp, idx_sp = tree.query(
+                l_xyz, k=min(k_candidates, r_xyz.shape[0]),
+                distance_upper_bound=chord_max, workers=-1,
+            )
+            if k_candidates == 1:
+                dist_sp = dist_sp[:, None]
+                idx_sp = idx_sp[:, None]
+            k_actual = idx_sp.shape[1]
+
+            sra2_l, sde2_l, rho_l = cov_l
+            sra2_r, sde2_r, rho_r = cov_r
+
+            l_idx_parts, r_idx_parts, sep_parts = [], [], []
+            for i in range(l_xyz.shape[0]):
+                valid_k = np.isfinite(dist_sp[i]) & (idx_sp[i] < r_xyz.shape[0])
+                if not np.any(valid_k):
+                    continue
+                candidates = idx_sp[i][valid_k].astype(np.int64)
+                # Compute d² for each candidate.
+                mean_dec = 0.5 * (l_dec[i] + r_dec[candidates])
+                cos_dec = np.cos(np.radians(mean_dec))
+                delta_ra = (l_ra[i] - r_ra[candidates]) * 3600.0 * cos_dec
+                delta_dec = (l_dec[i] - r_dec[candidates]) * 3600.0
+                d2 = _mahalanobis_pairwise(
+                    delta_ra, delta_dec,
+                    np.full(candidates.size, sra2_l[i]),
+                    np.full(candidates.size, sde2_l[i]),
+                    np.full(candidates.size, rho_l[i]),
+                    sra2_r[candidates],
+                    sde2_r[candidates],
+                    rho_r[candidates],
+                )
+                # Pick best by smallest d².
+                best_j = int(np.argmin(d2))
+                if d2[best_j] <= spec.max_error**2:
+                    best_r = candidates[best_j]
+                    l_idx_parts.append(np.array([i], dtype=np.int64))
+                    r_idx_parts.append(np.array([best_r], dtype=np.int64))
+                    sep_parts.append(np.array(
+                        [_chord_to_arcsec(float(dist_sp[i][valid_k][best_j]))],
+                        dtype=float,
+                    ))
+
+            if not l_idx_parts:
+                return empty
+            return (
+                np.concatenate(l_idx_parts),
+                np.concatenate(r_idx_parts),
+                np.concatenate(sep_parts),
+            )
+
+        # --- plain sky / skyerr: spatial-nearest match ---------------------
         dist, idx = tree.query(l_xyz, k=1, distance_upper_bound=chord_max, workers=-1)
         valid = np.isfinite(dist) & (idx < r_xyz.shape[0])
         left_idx = np.nonzero(valid)[0]
         right_idx = idx[valid].astype(np.int64)
         sep = _chord_to_arcsec(dist[valid])
-
-        # --- skyellipse Mahalanobis post-filter -----------------------------
-        if spec.matcher == "skyellipse" and left_idx.size > 0:
-            sra2_l, sde2_l, rho_l = cov_l
-            sra2_r, sde2_r, rho_r = cov_r
-            mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
-            cos_dec = np.cos(np.radians(mean_dec))
-            delta_ra = (l_ra[left_idx] - r_ra[right_idx]) * 3600.0 * cos_dec
-            delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
-            d2 = _mahalanobis_pairwise(
-                delta_ra, delta_dec,
-                sra2_l[left_idx], sde2_l[left_idx], rho_l[left_idx],
-                sra2_r[right_idx], sde2_r[right_idx], rho_r[right_idx],
-            )
-            keep = d2 <= spec.max_error**2
-            left_idx, right_idx, sep = left_idx[keep], right_idx[keep], sep[keep]
-
         return left_idx, right_idx, sep
 
     # find == "all": per-left list of matched right indices.
