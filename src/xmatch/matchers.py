@@ -183,6 +183,113 @@ def _pos_sigma_arcsec(df: pl.DataFrame, src: CatalogueSource) -> Optional[np.nda
     return None
 
 
+def _pos_covariance(
+    df: pl.DataFrame, src: CatalogueSource,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Per-row positional covariance parameters for skyellipse.
+
+    Returns ``(sigma_sq_ra, sigma_sq_dec, rho)`` arrays:
+
+    * ``sigma_sq_ra`` — variance in RA direction (arcsec², cosDec-corrected).
+    * ``sigma_sq_dec`` — variance in Dec direction (arcsec²).
+    * ``rho`` — correlation coefficient in [-1, 1]; 0 when no ``corr_column``.
+
+    All arrays have length ``df.height``.  Returns ``None`` when no error
+    information is available on this side.
+    """
+    factor = _UNIT_TO_ARCSEC.get((src.pos_err_units or "arcsec").lower(), 1.0)
+    factor_sq = factor * factor
+    floor = (
+        float(src.default_pos_error_arcsec)
+        if src.default_pos_error_arcsec is not None
+        else None
+    )
+    if src.ra_err_column in df.columns and src.dec_err_column in df.columns:
+        ra_e = df[src.ra_err_column].to_numpy().astype(float) * factor
+        de_e = df[src.dec_err_column].to_numpy().astype(float) * factor
+        sigma_sq_ra = ra_e**2
+        sigma_sq_dec = de_e**2
+        if floor is not None:
+            floor_sq = floor * floor
+            sigma_sq_ra = np.maximum(np.nan_to_num(sigma_sq_ra, nan=floor_sq), floor_sq)
+            sigma_sq_dec = np.maximum(np.nan_to_num(sigma_sq_dec, nan=floor_sq), floor_sq)
+        if src.corr_column and src.corr_column in df.columns:
+            rho = np.clip(
+                np.nan_to_num(df[src.corr_column].to_numpy().astype(float), nan=0.0),
+                -1.0, 1.0,
+            )
+        else:
+            rho = np.zeros(df.height, dtype=float)
+        return sigma_sq_ra, sigma_sq_dec, rho
+    if floor is not None:
+        floor_sq = floor * floor
+        return (
+            np.full(df.height, floor_sq),
+            np.full(df.height, floor_sq),
+            np.zeros(df.height, dtype=float),
+        )
+    return None
+
+
+def _skyellipse_search_chord_max(
+    cov_l: Tuple[np.ndarray, np.ndarray, np.ndarray],
+    cov_r: Tuple[np.ndarray, np.ndarray, np.ndarray],
+    max_error: float,
+) -> float:
+    """Maximum chord distance for skyellipse spatial pre-filter.
+
+    The largest eigenvalue of any combined covariance bounds the search radius.
+    We use the maximum across all rows as a conservative cKDTree bound.
+    """
+    sra2_l, sde2_l, rho_l = cov_l
+    sra2_r, sde2_r, rho_r = cov_r
+    max_sra2 = float(np.nanmax(sra2_l)) + float(np.nanmax(sra2_r))
+    max_sde2 = float(np.nanmax(sde2_l)) + float(np.nanmax(sde2_r))
+    # Conservative bound: the trace a+c is an upper bound on the max eigenvalue
+    # of a 2×2 positive-semidefinite matrix (λ_max ≤ a+c).  Using max(a,c)
+    # alone would under-estimate when the off-diagonal (ρ·σ_ra·σ_dec) is large.
+    # We also add the worst-case off-diagonal term for extra safety.
+    max_cov = math.sqrt(max(max_sra2, 0.0) * max(max_sde2, 0.0))
+    max_eig = max_sra2 + max_sde2 + max_cov
+    search_radius_arcsec = max_error * math.sqrt(max(max_eig, 0.0))
+    return _arcsec_to_chord(search_radius_arcsec)
+
+
+def _mahalanobis_pairwise(
+    delta_ra: np.ndarray,
+    delta_dec: np.ndarray,
+    sra2_l: np.ndarray,
+    sde2_l: np.ndarray,
+    rho_l: np.ndarray,
+    sra2_r: np.ndarray,
+    sde2_r: np.ndarray,
+    rho_r: np.ndarray,
+) -> np.ndarray:
+    """Mahalanobis distance squared for skyellipse pairs.
+
+    For each pair with combined covariance C = C_left + C_right, computes
+    ``d² = Δᵀ·C⁻¹·Δ`` where Δ = (delta_ra, delta_dec) in arcsec.
+
+    Returns an array of d² values.  Pairs with singular covariance get inf.
+    """
+    # Combined covariance parameters.
+    sra2 = sra2_l + sra2_r
+    sde2 = sde2_l + sde2_r
+    cov_ra_dec = rho_l * np.sqrt(sra2_l * sde2_l) + rho_r * np.sqrt(sra2_r * sde2_r)
+
+    det = sra2 * sde2 - cov_ra_dec**2
+    safe = np.where(det > 1e-30, det, np.inf)
+
+    # C⁻¹ = [[sde2, -cov], [-cov, sra2]] / det
+    inv11 = sde2 / safe
+    inv22 = sra2 / safe
+    inv12 = -cov_ra_dec / safe
+
+    d2 = inv11 * delta_ra**2 + 2.0 * inv12 * delta_ra * delta_dec + inv22 * delta_dec**2
+    d2[np.isfinite(d2) & (d2 < 0)] = 0.0  # clamp tiny negatives from floating point
+    return np.where(np.isfinite(d2), d2, np.inf)
+
+
 # --------------------------------------------------------------------------- #
 # 3D Cartesian unit-sphere helpers (Tier 1 and Tier 2 share these)
 # --------------------------------------------------------------------------- #
@@ -404,6 +511,17 @@ def _scipy_match(
 
     if spec.matcher == "sky":
         chord_max = _arcsec_to_chord(spec.radius_arcsec)
+    elif spec.matcher == "skyellipse":
+        # Full 2-D Mahalanobis distance with error ellipses.
+        cov_l = _pos_covariance(left, left_src)
+        cov_r = _pos_covariance(right, right_src)
+        if cov_l is None or cov_r is None:
+            logger.warning(
+                "Matcher '%s' needs positional errors on both sides; none found, no matches.",
+                spec.matcher,
+            )
+            return empty
+        chord_max = _skyellipse_search_chord_max(cov_l, cov_r, spec.max_error)
     else:
         lsig = _pos_sigma_arcsec(left, left_src)
         rsig = _pos_sigma_arcsec(right, right_src)
@@ -428,12 +546,27 @@ def _scipy_match(
     tree = cKDTree(r_xyz)
     if spec.find == "best":
         dist, idx = tree.query(l_xyz, k=1, distance_upper_bound=chord_max, workers=-1)
-        # Out-of-bound indices are sentinel values (self.n == len(r_xyz)) and
-        # distances are ``inf``; drop those rows.
         valid = np.isfinite(dist) & (idx < r_xyz.shape[0])
         left_idx = np.nonzero(valid)[0]
         right_idx = idx[valid].astype(np.int64)
         sep = _chord_to_arcsec(dist[valid])
+
+        # --- skyellipse Mahalanobis post-filter -----------------------------
+        if spec.matcher == "skyellipse" and left_idx.size > 0:
+            sra2_l, sde2_l, rho_l = cov_l
+            sra2_r, sde2_r, rho_r = cov_r
+            mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
+            cos_dec = np.cos(np.radians(mean_dec))
+            delta_ra = (l_ra[left_idx] - r_ra[right_idx]) * 3600.0 * cos_dec
+            delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
+            d2 = _mahalanobis_pairwise(
+                delta_ra, delta_dec,
+                sra2_l[left_idx], sde2_l[left_idx], rho_l[left_idx],
+                sra2_r[right_idx], sde2_r[right_idx], rho_r[right_idx],
+            )
+            keep = d2 <= spec.max_error**2
+            left_idx, right_idx, sep = left_idx[keep], right_idx[keep], sep[keep]
+
         return left_idx, right_idx, sep
 
     # find == "all": per-left list of matched right indices.
@@ -450,6 +583,23 @@ def _scipy_match(
     left_idx = np.concatenate(l_parts)
     right_idx = np.concatenate(r_parts)
     sep = _chord_to_arcsec(np.linalg.norm(l_xyz[left_idx] - r_xyz[right_idx], axis=-1))
+
+    # --- skyellipse Mahalanobis post-filter (find="all") -------------------
+    if spec.matcher == "skyellipse" and left_idx.size > 0:
+        sra2_l, sde2_l, rho_l = cov_l
+        sra2_r, sde2_r, rho_r = cov_r
+        mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
+        cos_dec = np.cos(np.radians(mean_dec))
+        delta_ra = (l_ra[left_idx] - r_ra[right_idx]) * 3600.0 * cos_dec
+        delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
+        d2 = _mahalanobis_pairwise(
+            delta_ra, delta_dec,
+            sra2_l[left_idx], sde2_l[left_idx], rho_l[left_idx],
+            sra2_r[right_idx], sde2_r[right_idx], rho_r[right_idx],
+        )
+        keep = d2 <= spec.max_error**2
+        left_idx, right_idx, sep = left_idx[keep], right_idx[keep], sep[keep]
+
     return left_idx, right_idx, sep
 
 
@@ -607,6 +757,21 @@ def _zone_match_healpix(
     if spec.matcher == "sky":
         radius_deg = spec.radius_arcsec / 3600.0
         chord_max = _arcsec_to_chord(spec.radius_arcsec)
+    elif spec.matcher == "skyellipse":
+        cov_l = _pos_covariance(left, left_src)
+        cov_r = _pos_covariance(right, right_src)
+        if cov_l is None or cov_r is None:
+            logger.warning(
+                "Matcher '%s' needs positional errors; none found.",
+                spec.matcher,
+            )
+            return empty
+        chord_max = _skyellipse_search_chord_max(cov_l, cov_r, spec.max_error)
+        radius_deg = (
+            math.degrees(2.0 * math.asin(chord_max * 0.5))
+            if chord_max < 2.0
+            else 180.0
+        )
     else:
         lsig = _pos_sigma_arcsec(left, left_src)
         rsig = _pos_sigma_arcsec(right, right_src)
@@ -740,11 +905,27 @@ def _zone_match_healpix(
 
     if not l_parts:
         return empty
-    return (
-        np.concatenate(l_parts),
-        np.concatenate(r_parts),
-        np.concatenate(sep_parts),
-    )
+    left_idx = np.concatenate(l_parts)
+    right_idx = np.concatenate(r_parts)
+    seps = np.concatenate(sep_parts)
+
+    # --- skyellipse Mahalanobis post-filter ---------------------------------
+    if spec.matcher == "skyellipse" and left_idx.size > 0:
+        sra2_l, sde2_l, rho_l = cov_l
+        sra2_r, sde2_r, rho_r = cov_r
+        mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
+        cos_dec = np.cos(np.radians(mean_dec))
+        delta_ra = (l_ra[left_idx] - r_ra[right_idx]) * 3600.0 * cos_dec
+        delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
+        d2 = _mahalanobis_pairwise(
+            delta_ra, delta_dec,
+            sra2_l[left_idx], sde2_l[left_idx], rho_l[left_idx],
+            sra2_r[right_idx], sde2_r[right_idx], rho_r[right_idx],
+        )
+        keep = d2 <= spec.max_error**2
+        left_idx, right_idx, seps = left_idx[keep], right_idx[keep], seps[keep]
+
+    return left_idx, right_idx, seps
 
 
 # --------------------------------------------------------------------------- #
@@ -784,7 +965,77 @@ def _astropy_match(
         )
         return left_idx, right_idx, sep2d.arcsec
 
-    # Error-based match: a pair matches iff sep <= max_error * (e_left + e_right).
+    # Error-based match: a pair matches iff within sigma criterion.
+    if spec.matcher == "skyellipse":
+        cov_l = _pos_covariance(left, left_src)
+        cov_r = _pos_covariance(right, right_src)
+        if cov_l is None or cov_r is None:
+            logger.warning(
+                "Matcher '%s' needs positional errors on both sides; none found.",
+                spec.matcher,
+            )
+            return empty
+        search_radius_arcsec = spec.max_error * math.sqrt(
+            max(float(np.nanmax(cov_l[0])), float(np.nanmax(cov_l[1])))
+            + max(float(np.nanmax(cov_r[0])), float(np.nanmax(cov_r[1])))
+        )
+        if search_radius_arcsec <= 0:
+            return empty
+        left_idx, right_idx, sep2d, _ = search_around_sky(
+            lcoord, rcoord, search_radius_arcsec * u.arcsec,
+        )
+        seps = sep2d.arcsec
+        # Mahalanobis post-filter.
+        if left_idx.size > 0:
+            sra2_l, sde2_l, rho_l = cov_l
+            sra2_r, sde2_r, rho_r = cov_r
+            delta_ra = (
+                left[left_src.ra_column].to_numpy()[left_idx]
+                - right[right_src.ra_column].to_numpy()[right_idx]
+            ) * 3600.0 * math.cos(math.radians(
+                float(np.nanmean(left[left_src.dec_column].to_numpy()[left_idx]))
+            ))
+            delta_dec = (
+                left[left_src.dec_column].to_numpy()[left_idx]
+                - right[right_src.dec_column].to_numpy()[right_idx]
+            ) * 3600.0
+            d2 = _mahalanobis_pairwise(
+                delta_ra, delta_dec,
+                sra2_l[left_idx], sde2_l[left_idx], rho_l[left_idx],
+                sra2_r[right_idx], sde2_r[right_idx], rho_r[right_idx],
+            )
+            keep = d2 <= spec.max_error**2
+            left_idx, right_idx, seps = left_idx[keep], right_idx[keep], seps[keep]
+
+        if spec.find == "best" and len(left_idx) > 0:
+            # Pick best match by Mahalanobis distance d², not spatial sep.
+            # Recompute d² for the filtered pairs (already computed above).
+            sra2_l2, sde2_l2, rho_l2 = cov_l
+            sra2_r2, sde2_r2, rho_r2 = cov_r
+            mean_dec2 = 0.5 * (
+                left[left_src.dec_column].to_numpy()[left_idx]
+                + right[right_src.dec_column].to_numpy()[right_idx]
+            )
+            cos_dec2 = np.cos(np.radians(mean_dec2))
+            delta_ra2 = (
+                left[left_src.ra_column].to_numpy()[left_idx]
+                - right[right_src.ra_column].to_numpy()[right_idx]
+            ) * 3600.0 * cos_dec2
+            delta_dec2 = (
+                left[left_src.dec_column].to_numpy()[left_idx]
+                - right[right_src.dec_column].to_numpy()[right_idx]
+            ) * 3600.0
+            d2 = _mahalanobis_pairwise(
+                delta_ra2, delta_dec2,
+                sra2_l2[left_idx], sde2_l2[left_idx], rho_l2[left_idx],
+                sra2_r2[right_idx], sde2_r2[right_idx], rho_r2[right_idx],
+            )
+            order = np.argsort(d2)
+            _, first_idx = np.unique(left_idx[order], return_index=True)
+            sel = order[np.sort(first_idx)]
+            left_idx, right_idx, seps = left_idx[sel], right_idx[sel], seps[sel]
+        return left_idx, right_idx, seps
+
     lsig = _pos_sigma_arcsec(left, left_src)
     rsig = _pos_sigma_arcsec(right, right_src)
     if lsig is None or rsig is None:

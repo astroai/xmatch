@@ -168,3 +168,137 @@ def kde_log_at(kde, centre_values: np.ndarray) -> np.ndarray:
     if kde is None:
         return np.zeros(centre.shape, dtype=float)
     return kde.logpdf(centre)
+
+
+# --------------------------------------------------------------------------- #
+# N-way Bayesian multi-catalogue crossmatching (Budavári & Szalay 2008)
+# --------------------------------------------------------------------------- #
+def compute_nway_bayes_factor(
+    ras: list,
+    decs: list,
+    sigmas: list,
+    radius_arcsec: float,
+) -> np.ndarray:
+    """Compute the N-way spatial Bayes factor for a set of tuples.
+
+    Each tuple consists of N sources (one per catalogue).  *ras*, *decs*, and
+    *sigmas* are lists of length N, each element being an array of shape
+    ``(n_tuples,)`` with the RA (deg), Dec (deg), and positional uncertainty
+    (arcsec) for that catalogue's contribution to every tuple.
+
+    The spatial Bayes factor combines the positional agreement of all N
+    catalogues into a single scalar per tuple (Budavári & Szalay 2008, eq. 25):
+
+        B = (2π)^(N−1) · ∏(σ_i^−2) / (Σ σ_i^−2)^(N−1) · exp(−χ²/2)
+
+    where χ² = Σ (Δ_i − Δ̂)² / σ_i², and Δ̂ is the inverse-variance weighted
+    mean position.
+
+    Returns log10(B) per tuple.
+    """
+    N = len(ras)
+    if N < 2:
+        return np.zeros(0, dtype=float)
+
+    n_tuples = len(ras[0])
+    if n_tuples == 0:
+        return np.zeros(0, dtype=float)
+
+    # Convert sigmas to inverse-variance weights (1/σ²).
+    inv_var: list = []
+    for s in sigmas:
+        s_arcsec = np.asarray(s, dtype=float)
+        safe_s = np.where(s_arcsec > 1e-6, s_arcsec, 1e-6)
+        inv_var.append(1.0 / safe_s**2)
+
+    # Weighted mean position (inverse-variance weighted).
+    sum_w = np.zeros(n_tuples, dtype=float)
+    ra_weighted = np.zeros(n_tuples, dtype=float)
+    dec_weighted = np.zeros(n_tuples, dtype=float)
+    for i in range(N):
+        w = inv_var[i]
+        sum_w += w
+        ra_weighted += w * np.asarray(ras[i], dtype=float)
+        dec_weighted += w * np.asarray(decs[i], dtype=float)
+
+    ra_hat = ra_weighted / sum_w
+    dec_hat = dec_weighted / sum_w
+
+    # χ² = Σ (x_i − x̂)² / σ_i².
+    # Convert RA differences to arcsec (cosDec-corrected).
+    cos_dec = np.cos(np.radians(dec_hat))
+    chi2 = np.zeros(n_tuples, dtype=float)
+    for i in range(N):
+        dra = (np.asarray(ras[i], dtype=float) - ra_hat) * 3600.0 * cos_dec
+        ddec = (np.asarray(decs[i], dtype=float) - dec_hat) * 3600.0
+        chi2 += (dra**2 + ddec**2) * inv_var[i]
+
+    # Log Bayes factor: log10 B.
+    # log B = (N−1)·log(2π) + Σ(−2·log σ_i) − (N−1)·log(Σ 1/σ_i²) − χ²/2
+    # Then convert to log10.
+    log_factor = (N - 1) * np.log(2.0 * math.pi)
+    log_factor -= (N - 1) * np.log(sum_w)
+    for i in range(N):
+        log_factor += np.log(inv_var[i])  # log(1/σ²) = −2·log σ
+    log_factor -= 0.5 * chi2
+
+    return log_factor / math.log(10.0)
+
+
+def compute_nway_p_match(
+    ras: list,
+    decs: list,
+    sigmas: list,
+    radius_arcsec: float,
+    prior_columns: list = None,
+) -> np.ndarray:
+    """Compute N-way posterior match probability p ∈ [0, 1] per tuple.
+
+    Combines the spatial Bayes factor with an optional photometric prior
+    (same KDE-per-column approach as the pairwise Tier-3 qualifier).
+
+    *ras*, *decs*, *sigmas* — per-catalogue arrays (each length n_tuples).
+    *prior_columns* — if provided, a list of per-catalogue arrays for each
+    photometric column; the match hypothesis uses the KDE at the midpoint,
+    the background uses independent KDE draws.
+
+    Returns p_match ∈ [0, 1] per tuple.
+    """
+    n_tuples = len(ras[0])
+    if n_tuples == 0:
+        return np.zeros(0, dtype=float)
+
+    log10_B = compute_nway_bayes_factor(ras, decs, sigmas, radius_arcsec)
+
+    # Convert log10 Bayes factor to log posterior odds.
+    # p_match = 1 / (1 + 1/B) = B / (1 + B)
+    # For large B, this saturates at 1.
+    B = 10.0**log10_B  # B can overflow for well-matched tuples; clip.
+    B = np.clip(B, 0.0, 1e300)
+
+    if prior_columns:
+        # Photometric likelihood ratio multiplies B.
+        from scipy.stats import gaussian_kde
+
+        for col_idx in range(len(prior_columns)):
+            col_values = prior_columns[col_idx]  # list of N arrays
+            combined = np.concatenate([np.asarray(v, dtype=float) for v in col_values])
+            combined = combined[np.isfinite(combined)]
+            if combined.size < 2:
+                continue
+            try:
+                kde = gaussian_kde(combined, bw_method="scott")
+                # Match hypothesis: KDE at the midpoint.
+                midpoint = np.mean([np.asarray(v, dtype=float) for v in col_values], axis=0)
+                log_match = kde.logpdf(midpoint)
+                # Background: product of independent KDE draws.
+                log_bg = np.zeros(n_tuples, dtype=float)
+                for v in col_values:
+                    log_bg += kde.logpdf(np.asarray(v, dtype=float))
+                B *= np.exp(log_match - log_bg)
+            except Exception:
+                pass  # uniform prior if KDE fails
+
+    B_safe = np.clip(B, 0.0, 1e300)
+    p_match = B_safe / (1.0 + B_safe)
+    return np.clip(p_match, 0.0, 1.0)

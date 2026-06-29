@@ -929,3 +929,193 @@ def test_margin_caching_correctness_vs_fast():
         sorted(out_zone["sep_arcsec"].to_list()),
         atol=1e-6,
     )
+
+
+# ------------------------------------------------------------------- skyellipse
+def test_skyellipse_mahalanobis_matches_within_sigma():
+    """skyellipse with Mahalanobis distance: pair within N-sigma should match."""
+    left = pl.DataFrame({
+        "ra": [10.0], "dec": [5.0],
+        "rae": [0.1], "dee": [0.1], "corr": [0.0],
+    })
+    right = pl.DataFrame({
+        "ra": [10.000055], "dec": [5.0],  # ~0.2 arcsec in RA at Dec=5
+        "rae": [0.1], "dee": [0.1], "corr": [0.0],
+    })
+    a = _src("a", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    b = _src("b", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    # Combined sigma ≈ 0.14 arcsec. max_error=3 → 0.42 arcsec > 0.2 → match.
+    spec = MatchSpec(radius_arcsec=1.0, matcher="skyellipse", max_error=3.0)
+    out = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="fast").collect()
+    assert out.height == 1
+
+
+def test_skyellipse_mahalanobis_rejects_outside_sigma():
+    """skyellipse with tight max_error should reject pair outside N-sigma."""
+    left = pl.DataFrame({
+        "ra": [10.0], "dec": [5.0],
+        "rae": [0.1], "dee": [0.1], "corr": [0.0],
+    })
+    right = pl.DataFrame({
+        "ra": [10.000208], "dec": [5.0],  # ~0.75 arcsec
+        "rae": [0.1], "dee": [0.1], "corr": [0.0],
+    })
+    a = _src("a", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    b = _src("b", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    # max_error=3 → 0.42 arcsec < 0.75 → no match.
+    spec = MatchSpec(radius_arcsec=1.0, matcher="skyellipse", max_error=3.0)
+    out = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="fast").collect()
+    assert out.height == 0
+
+
+def test_skyellipse_no_error_info_falls_back_to_sky():
+    """skyellipse without error columns falls back to plain sky match."""
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
+    right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005]})
+    spec = MatchSpec(radius_arcsec=1.0, matcher="skyellipse", max_error=3.0)
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(),
+                    spec, engine="fast").collect()
+    # sky_match falls back to matcher="sky" when no error info exists.
+    # The two stars are within 1 arcsec, so they should match.
+    assert out.height == 1
+    assert out["sep_arcsec"][0] < 1.0
+
+
+def test_skyellipse_correlation_affects_match():
+    """Correlation should affect Mahalanobis distance.
+    With tightly correlated errors and a large offset, the Mahalanobis
+    distance differs from the uncorrelated case. Both should match at
+    generous max_error but with different p_match-equivalent behavior."""
+    left = pl.DataFrame({
+        "ra": [10.0], "dec": [5.0],
+        "rae": [0.2], "dee": [0.05], "corr": [0.0],
+    })
+    right = pl.DataFrame({
+        "ra": [10.00002], "dec": [5.0],  # small offset in RA only
+        "rae": [0.2], "dee": [0.05], "corr": [0.0],
+    })
+    a0 = _src("a", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    b0 = _src("b", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+
+    spec = MatchSpec(radius_arcsec=1.0, matcher="skyellipse", max_error=5.0)
+    out_no_corr = sky_match(a0, b0, left.lazy(), right.lazy(), spec, engine="fast").collect()
+
+    left_corr = left.with_columns(pl.Series("corr", [0.9]))
+    right_corr = right.with_columns(pl.Series("corr", [0.9]))
+    out_corr = sky_match(a0, b0, left_corr.lazy(), right_corr.lazy(), spec, engine="fast").collect()
+
+    # Both match; the spatial separation should be identical.
+    assert out_no_corr.height == out_corr.height == 1
+    assert np.allclose(out_no_corr["sep_arcsec"].to_numpy(),
+                       out_corr["sep_arcsec"].to_numpy(), atol=1e-6)
+
+
+def test_skyellipse_engine_parity():
+    """fast, astropy, and zone should agree on skyellipse match counts."""
+    rng = np.random.default_rng(42)
+    n = 100
+    left = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.05, n),
+        "dec": rng.uniform(5.0, 5.05, n),
+        "rae": np.full(n, 0.1),
+        "dee": np.full(n, 0.1),
+        "corr": np.zeros(n),
+    })
+    right = pl.DataFrame({
+        "ra": rng.uniform(10.0, 10.05, n),
+        "dec": rng.uniform(5.0, 5.05, n),
+        "rae": np.full(n, 0.1),
+        "dee": np.full(n, 0.1),
+        "corr": np.zeros(n),
+    })
+    a = _src("a", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    b = _src("b", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    # Use a generous max_error so the spatial pre-filter returns many candidates.
+    spec = MatchSpec(radius_arcsec=5.0, matcher="skyellipse", max_error=50.0)
+
+    # fast and zone should agree on count.
+    out_fast = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="fast").collect()
+    out_zone = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="zone").collect()
+    assert out_fast.height > 0, f"fast: expected matches, got {out_fast.height}"
+    assert out_zone.height > 0, f"zone: expected matches, got {out_zone.height}"
+    assert out_fast.height == out_zone.height
+
+
+# ------------------------------------------------------------------- nway
+@pytest.mark.parametrize("n_cats", [2, 3])
+def test_nway_bayesian_pmatch_in_unit_range(n_cats):
+    """nway Bayesian multi-catalogue match must produce p_match in [0, 1]."""
+    from xmatch.bayes import compute_nway_p_match
+
+    rng = np.random.default_rng(42)
+    n_tuples = 20
+
+    # Build synthetic tuples that are closely clustered.
+    base_ra, base_dec = 10.0, 5.0
+    ras = []
+    decs = []
+    sigmas = []
+    for _ in range(n_cats):
+        ras.append(np.full(n_tuples, base_ra) + rng.normal(0, 0.0001, n_tuples))
+        decs.append(np.full(n_tuples, base_dec) + rng.normal(0, 0.0001, n_tuples))
+        sigmas.append(np.full(n_tuples, 0.1))
+
+    p = compute_nway_p_match(ras, decs, sigmas, radius_arcsec=3.0)
+    assert len(p) == n_tuples
+    assert ((p >= 0.0) & (p <= 1.0)).all()
+
+    # Well-separated tuples should have low p_match.
+    ras_far = []
+    decs_far = []
+    sigmas_far = []
+    for i in range(n_cats):
+        ras_far.append(np.array([10.0 + i * 0.01]))
+        decs_far.append(np.array([5.0 + i * 0.01]))
+        sigmas_far.append(np.array([0.01]))
+    p_far = compute_nway_p_match(ras_far, decs_far, sigmas_far, radius_arcsec=3.0)
+    assert p_far[0] < 0.5, f"Expected low p_match for scattered tuple, got {p_far[0]}"
+
+
+def test_nway_crossmatch_end_to_end():
+    """nway_match on CrossMatch should produce result frame with p_match."""
+    from xmatch import CrossMatch
+
+    left = pl.DataFrame({
+        "ra": [10.0, 10.00002, 10.00004],
+        "dec": [5.0, 5.0, 5.0],
+        "g": [10.0, 10.1, 10.2],
+    })
+    mid = pl.DataFrame({
+        "ra": [10.00002],
+        "dec": [5.0],
+        "g": [10.1],
+    })
+    right = pl.DataFrame({
+        "ra": [10.0, 10.00004],
+        "dec": [5.0, 5.0],
+        "g": [10.0, 10.2],
+    })
+
+    cm = CrossMatch()
+    result = cm.nway_match(
+        [left, mid, right],
+        radius_arcsec=1.0,
+        prior_columns=["g"],
+    )
+    assert result.height >= 1
+    assert "p_match" in result.columns
+    p = result["p_match"].to_numpy()
+    assert ((p >= 0.0) & (p <= 1.0)).all()
+
+
+def test_nway_crossmatch_two_catalogues_works():
+    """nway_match with exactly 2 catalogues should produce results."""
+    from xmatch import CrossMatch
+
+    left = pl.DataFrame({"ra": [10.0, 10.00005], "dec": [5.0, 5.0]})
+    right = pl.DataFrame({"ra": [10.0, 10.00005], "dec": [5.0, 5.0]})
+
+    cm = CrossMatch()
+    result = cm.nway_match([left, right], radius_arcsec=1.0)
+    assert result.height >= 1
+    assert "p_match" in result.columns

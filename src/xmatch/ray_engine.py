@@ -207,6 +207,14 @@ def ray_zone_match(
     """
     from .matchers import _zone_match, _scipy_match
 
+    # N-dimensional extra_distance_cols are delegated to _scipy_match
+    # (single-machine cKDTree with N-d ranking).
+    if spec.extra_distance_cols:
+        logger.info(
+            "extra_distance_cols set; using Tier 1 cKDTree for N-d matching."
+        )
+        return _scipy_match(left, right, left_src, right_src, spec)
+
     if not ray_available():
         logger.info("Ray unavailable; using single-machine zone engine.")
         return _zone_match(left, right, left_src, right_src, spec)

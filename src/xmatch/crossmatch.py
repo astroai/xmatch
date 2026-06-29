@@ -357,15 +357,61 @@ class CrossMatch:
         # First pair: use _dispatch so local/remote/hats all work.
         # ------------------------------------------------------------------ #
         accum_lf = self._dispatch(sources[0], sources[1], req)
+        first_ra = first_src.ra_column or "ra"
+        first_dec = first_src.dec_column or "dec"
 
         # ------------------------------------------------------------------ #
         # Remaining catalogues: local match against the accumulator.
         # Each successive right side gets its own suffix: _2, _3, _4, …
         # An eager checkpoint prevents O(N²) query-graph re-evaluation.
+        #
+        # For union/outer join types, unmatched rows from earlier catalogues
+        # may have null spatial coordinates.  We inject _accum_ra / _accum_dec
+        # columns that coalesce the best-known position from all prior
+        # catalogues, ensuring every row has a spatial foot-print for the next
+        # pairwise match.
         # ------------------------------------------------------------------ #
+        # Build a proxy CatalogueSource pointing at the coalesced columns so
+        # _local_match uses them as the left-side spatial reference.
+        from dataclasses import replace
+
         for i in range(2, len(sources)):
             right_src = sources[i]
             suffix = f"_{i + 1}"  # catalogue 3 → _3, catalogue 4 → _4, …
+
+            # --- coalesce spatial columns -----------------------------------
+            # After the first match (i=2), we already have ra/dec from cat-1
+            # and ra_2/dec_2 from cat-2.  Coalesce them so unmatched cat-2
+            # rows still have usable coordinates.
+            if i == 2:
+                ra_candidates = [first_ra, f"{first_ra}_2"]
+                dec_candidates = [first_dec, f"{first_dec}_2"]
+            else:
+                # For cat-4+, coalesce the accumulated column with the
+                # previous match's right-side coordinates (suffix _{i}).
+                ra_candidates = ["_accum_ra", f"{first_ra}_{i}"]
+                dec_candidates = ["_accum_dec", f"{first_dec}_{i}"]
+
+            # Only include columns that actually exist in the frame.
+            accum_cols = set(accum_lf.collect_schema().names())
+            ra_present = [c for c in ra_candidates if c in accum_cols]
+            dec_present = [c for c in dec_candidates if c in accum_cols]
+
+            if ra_present:
+                accum_lf = accum_lf.with_columns(
+                    pl.coalesce([pl.col(c) for c in ra_present]).alias("_accum_ra")
+                )
+            if dec_present:
+                accum_lf = accum_lf.with_columns(
+                    pl.coalesce([pl.col(c) for c in dec_present]).alias("_accum_dec")
+                )
+
+            # Create a lightweight proxy source pointing at coalesced columns.
+            accum_src = replace(
+                first_src,
+                ra_column="_accum_ra",
+                dec_column="_accum_dec",
+            )
 
             if right_src.access_method == "hats":
                 # HATS at position 3+: route via hats_crossmatch with the
@@ -373,7 +419,7 @@ class CrossMatch:
                 from . import hats_source
 
                 accum_lf = hats_source.hats_crossmatch(
-                    first_src, right_src, req.spec,
+                    accum_src, right_src, req.spec,
                     local_lf1=accum_lf,
                     right_suffix=suffix,
                 ).lazy()
@@ -381,7 +427,7 @@ class CrossMatch:
                 right_lf = right_src.lazy()
                 accum_lf = (
                     self._local_match(
-                        first_src,  # spatial reference: always cat-1 RA/Dec
+                        accum_src,  # proxy source with coalesced RA/Dec
                         right_src,
                         accum_lf,
                         right_lf,
@@ -396,6 +442,224 @@ class CrossMatch:
             io_utils.write_frame(accum_lf, output_file)
             return None
         return accum_lf if lazy else accum_lf.collect()
+
+    def nway_match(
+        self,
+        catalogues: List[FrameInput],
+        *,
+        radius_arcsec: float = 1.0,
+        prior_columns: Optional[List[str]] = None,
+        **params: Any,
+    ) -> pl.DataFrame:
+        """Bayesian N-way multi-catalogue crossmatching (Budavári & Szalay 2008).
+
+        Matches *catalogues* simultaneously, computing an N-way Bayes factor
+        for each tuple of sources and returning a ``p_match`` column in [0, 1].
+
+        Unlike :meth:`crossmatch_multi` (which chains pairwise inner joins),
+        this method builds cross-product tuples from catalogue 1 × catalogue 2
+        × … × catalogue N and scores them with the full N-way spatial +
+        photometric posterior.
+
+        Parameters
+        ----------
+        catalogues : list of FrameInput
+            2+ catalogues (paths, names, or in-memory frames).
+        radius_arcsec : float
+            Search radius (arcsec) for pairwise spatial pre-selection.
+        prior_columns : list of str, optional
+            Photometric columns for the photometric prior component.
+        **params
+            Passed through to :meth:`resolve_source`.
+
+        Returns
+        -------
+        pl.DataFrame
+            One row per matched N-tuple, with columns from all catalogues
+            (collisions get ``_2``, ``_3``, … suffixes) plus ``p_match``.
+        """
+        import numpy as np
+
+        from . import matchers
+
+        if len(catalogues) < 2:
+            raise CrossMatchError(
+                "nway_match requires at least 2 catalogues, got %d" % len(catalogues)
+            )
+
+        # Resolve all sources.
+        sources: List[CatalogueSource] = []
+        for cat_input in catalogues:
+            sources.append(self.resolve_source(cat_input, {}))
+
+        # Ensure all sources are local.
+        for i, src in enumerate(sources):
+            if not src.is_local:
+                if src.access_method in ("tap", "cds_xmatch"):
+                    req = MatchRequest.from_legacy(
+                        catalogues[0], catalogues[0],  # dummy
+                        ra=params.get("ra"),
+                        dec=params.get("dec"),
+                        radius_deg=params.get("radius_deg"),
+                        radius_arcsec=radius_arcsec,
+                    )
+                    downloaded = self._download_remote(src, req, prefix=str(i + 1))
+                    sources[i] = src.with_frame(downloaded.lazy())
+                else:
+                    raise CrossMatchError(
+                        f"Catalogue {i+1} ('{src.name}') is not local; "
+                        f"nway_match requires local or downloadable catalogues."
+                    )
+
+        frames = [s.lazy().collect() for s in sources]
+
+        # Primary (catalogue 1) matched against each other catalogue.
+        primary = frames[0]
+        p_ra = sources[0].ra_column or "ra"
+        p_dec = sources[0].dec_column or "dec"
+
+        # collect match indices: for each catalogue j (1-indexed), a list of
+        # (primary_idx, other_idx) pairs within radius_arcsec.
+        all_pairs: list = []
+        for j in range(1, len(sources)):
+            spec = matchers.MatchSpec(radius_arcsec=radius_arcsec, find="all")
+            result = sky_match(
+                sources[0], sources[j],
+                frames[0].lazy(), frames[j].lazy(),
+                spec, engine="fast",
+            ).collect()
+            # Extract (primary_idx, other_idx) as numpy arrays.
+            if result.height == 0:
+                all_pairs.append((np.array([], int), np.array([], int)))
+                continue
+            # We need indices. The result frame has columns from both sides;
+            # we can match back by position. Use the fact that sky_match
+            # returns the result in predictable order.
+            # Simpler: re-run with return_indices pattern.
+            l_ra = frames[0][p_ra].to_numpy()
+            l_dec = frames[0][p_dec].to_numpy()
+            r_ra = frames[j][sources[j].ra_column or "ra"].to_numpy()
+            r_dec = frames[j][sources[j].dec_column or "dec"].to_numpy()
+
+            from .matchers import _arcsec_to_chord, _radec_to_xyz
+            from scipy.spatial import cKDTree
+
+            l_xyz = _radec_to_xyz(l_ra, l_dec)
+            r_xyz = _radec_to_xyz(r_ra, r_dec)
+            chord_max = _arcsec_to_chord(radius_arcsec)
+            tree = cKDTree(r_xyz)
+            idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
+            p_idx_parts, o_idx_parts = [], []
+            for pi, neighbors in enumerate(idx_lists):
+                if neighbors:
+                    p_idx_parts.append(np.full(len(neighbors), pi, dtype=int))
+                    o_idx_parts.append(np.asarray(neighbors, dtype=int))
+            if p_idx_parts:
+                all_pairs.append((np.concatenate(p_idx_parts), np.concatenate(o_idx_parts)))
+            else:
+                all_pairs.append((np.array([], int), np.array([], int)))
+
+        # If any non-primary catalogue has no matches, return empty.
+        if any(len(p[0]) == 0 for p in all_pairs):
+            result_cols = list(frames[0].columns)
+            for j in range(1, len(sources)):
+                suffix = f"_{j + 1}"
+                for c in frames[j].columns:
+                    if c in result_cols:
+                        result_cols.append(c + suffix)
+                    else:
+                        result_cols.append(c)
+            result_cols.append("p_match")
+            return pl.DataFrame(schema={c: pl.Float64 for c in result_cols}).clear()
+
+        # Build cross-product tuples: for each primary source, cartesian
+        # product of matches across catalogues 2..N.
+        # For efficiency, process primary-by-primary.
+        n_primary = frames[0].height
+        tuple_parts: list = []  # list of (indices lists for all catalogues)
+
+        for pi in range(n_primary):
+            # Get matches for this primary source from each catalogue.
+            matches_per_cat = []
+            for cat_j in range(len(all_pairs)):
+                p_idx, o_idx = all_pairs[cat_j]
+                mask = p_idx == pi
+                matches_per_cat.append(o_idx[mask])
+
+            # Cartesian product.
+            if any(len(m) == 0 for m in matches_per_cat):
+                continue
+
+            # Recursive cartesian product builder.
+            grid = np.array(np.meshgrid(*matches_per_cat, indexing="ij"))
+            n_tuples = grid.shape[1] if grid.ndim > 1 else 1
+            flat = grid.reshape(len(matches_per_cat), -1)
+            for t in range(flat.shape[1]):
+                indices = [pi] + [flat[c][t] for c in range(len(matches_per_cat))]
+                tuple_parts.append(indices)
+
+        if not tuple_parts:
+            result_cols = list(frames[0].columns)
+            for j in range(1, len(sources)):
+                suffix = f"_{j + 1}"
+                for c in frames[j].columns:
+                    if c in result_cols:
+                        result_cols.append(c + suffix)
+                    else:
+                        result_cols.append(c)
+            result_cols.append("p_match")
+            return pl.DataFrame(schema={c: pl.Float64 for c in result_cols}).clear()
+
+        # Compute N-way Bayes factor.
+        indices_per_cat = [[t[i] for t in tuple_parts] for i in range(len(sources))]
+        ras = [frames[i][sources[i].ra_column or "ra"].to_numpy()[idx].astype(float)
+               for i, idx in enumerate(indices_per_cat)]
+        decs = [frames[i][sources[i].dec_column or "dec"].to_numpy()[idx].astype(float)
+                for i, idx in enumerate(indices_per_cat)]
+
+        # Positional errors.
+        sigmas = []
+        for i, src in enumerate(sources):
+            sigma = matchers._pos_sigma_arcsec(frames[i], src)
+            if sigma is None:
+                sigma = np.full(frames[i].height, 0.5, dtype=float)
+            sigmas.append(sigma[indices_per_cat[i]])
+
+        from .bayes import compute_nway_p_match
+
+        if prior_columns:
+            prior_data = []
+            for col in prior_columns:
+                col_vals = []
+                for i, f in enumerate(frames):
+                    if col in f.columns:
+                        col_vals.append(f[col].to_numpy()[indices_per_cat[i]].astype(float))
+                    else:
+                        col_vals.append(np.full(len(indices_per_cat[i]), np.nan))
+                prior_data.append(col_vals)
+            p_match = compute_nway_p_match(
+                ras, decs, sigmas, radius_arcsec,
+                prior_columns=prior_data,
+            )
+        else:
+            p_match = compute_nway_p_match(ras, decs, sigmas, radius_arcsec)
+
+        # Build the result frame.
+        result_parts = []
+        for i, f in enumerate(frames):
+            suffix = f"_{i + 1}" if i > 0 else ""
+            idx = np.asarray(indices_per_cat[i], dtype=np.int64)
+            part = f.gather(idx)
+            if suffix:
+                overlap = set(frames[0].columns) & set(part.columns)
+                part = part.rename({c: f"{c}{suffix}" for c in overlap})
+            result_parts.append(part)
+
+        result = pl.concat(result_parts, how="horizontal")
+        result = result.with_columns(
+            pl.Series(matchers.PMATCH_COLUMN, p_match)
+        )
+        return result
 
     def crossmatch_request(
         self,
