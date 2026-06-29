@@ -158,7 +158,9 @@ class CrossMatch:
         elide the "did you mean?" suffix in that case.
         """
         pool = list(self.catalogues_config) + list(self.aliases_config)
-        return difflib.get_close_matches(name.lower(), pool, n=n, cutoff=cutoff)
+        lower_pool = {cand.lower(): cand for cand in pool}
+        matches = difflib.get_close_matches(name.lower(), list(lower_pool.keys()), n=n, cutoff=cutoff)
+        return [lower_pool[m] for m in matches]
 
     # ----------------------------------------------------------------- sources
     def resolve_source(self, value: FrameInput, overrides: Dict[str, Any]) -> CatalogueSource:
@@ -552,8 +554,9 @@ class CrossMatch:
             r_ra = frames[j][sources[j].ra_column or "ra"].to_numpy()
             r_dec = frames[j][sources[j].dec_column or "dec"].to_numpy()
 
-            from .matchers import _arcsec_to_chord, _radec_to_xyz
             from scipy.spatial import cKDTree
+
+            from .matchers import _arcsec_to_chord, _radec_to_xyz
 
             l_xyz = _radec_to_xyz(l_ra, l_dec)
             r_xyz = _radec_to_xyz(r_ra, r_dec)
