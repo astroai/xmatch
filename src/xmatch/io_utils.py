@@ -47,10 +47,17 @@ def is_hats_dir(path: Union[str, Path]) -> bool:
 
 
 def _decode_pandas_bytes_columns(pdf) -> Any:
-    """Decode ``bytes`` columns in a pandas DataFrame to UTF-8 strings."""
+    """Decode ``bytes`` columns in a pandas DataFrame to UTF-8 strings.
 
-    for col in pdf.columns:
-        if pdf[col].dtype == object and len(pdf) and isinstance(pdf[col].iloc[0], bytes):
+    Optimized for astronomical catalogs (which are primarily numerical) by vectorized
+    type checking and avoiding .iloc lookups for fast single-element access.
+    """
+    if not len(pdf):
+        return pdf
+
+    object_cols = pdf.columns[pdf.dtypes == "object"]
+    for col in object_cols:
+        if isinstance(pdf[col].to_numpy()[0], bytes):
             pdf[col] = pdf[col].str.decode("utf-8", errors="replace")
     return pdf
 

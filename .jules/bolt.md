@@ -21,3 +21,7 @@
 ## 2024-06-18 - NumPy Unique Vectorization Over Python Sets
 **Learning:** When performing duplicate filtering in large array operations (such as finding the best astropy matches), using a native Python `for` loop with a `set` for lookup incurs significant overhead due to Python's variable tracking and dynamic typing.
 **Action:** Prefer vectorized NumPy operations like `np.unique(array, return_index=True)` followed by `np.sort` on the indices. This pushes the loop down to the fast C backend, providing a substantial speedup for massive astronomical arrays.
+
+## 2026-06-29 - Vectorized DataFrame Column Filtering
+**Learning:** Checking column types iteratively in pandas (`for col in pdf.columns: if pdf[col].dtype == object...`) introduces significant overhead when working with large astronomical DataFrames that are mostly numerical with hundreds of columns. Furthermore, using `.iloc[0]` is slow compared to NumPy array access.
+**Action:** Use vectorized type checking (`object_cols = pdf.columns[pdf.dtypes == "object"]`) to quickly isolate columns that need transformation. Combine this with fast single-element access via NumPy arrays (`pdf[col].to_numpy()[0]`) to bypass pandas `.iloc` overhead.
