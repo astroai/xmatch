@@ -449,6 +449,8 @@ class CrossMatch:
         *,
         radius_arcsec: float = 1.0,
         prior_columns: Optional[List[str]] = None,
+        max_tuples_per_source: int = 10_000,
+        chunk_size: int = 50_000,
         **params: Any,
     ) -> pl.DataFrame:
         """Bayesian N-way multi-catalogue crossmatching (Budavári & Szalay 2008).
@@ -469,6 +471,13 @@ class CrossMatch:
             Search radius (arcsec) for pairwise spatial pre-selection.
         prior_columns : list of str, optional
             Photometric columns for the photometric prior component.
+        max_tuples_per_source : int
+            Maximum Cartesian-product tuples per primary source before
+            truncating with a warning (default 10 000).  Set to 0 for
+            unlimited (use with caution in dense fields).
+        chunk_size : int
+            Process tuples in batches of this size to bound memory.
+            p_match is computed per chunk and results are concatenated.
         **params
             Passed through to :meth:`resolve_source`.
 
@@ -478,6 +487,8 @@ class CrossMatch:
             One row per matched N-tuple, with columns from all catalogues
             (collisions get ``_2``, ``_3``, … suffixes) plus ``p_match``.
         """
+        from itertools import product as cartesian_product
+
         import numpy as np
 
         from . import matchers
@@ -573,93 +584,122 @@ class CrossMatch:
             return pl.DataFrame(schema={c: pl.Float64 for c in result_cols}).clear()
 
         # Build cross-product tuples: for each primary source, cartesian
-        # product of matches across catalogues 2..N.
-        # For efficiency, process primary-by-primary.
+        # product of matches across catalogues 2..N, capped and chunked.
         n_primary = frames[0].height
-        tuple_parts: list = []  # list of (indices lists for all catalogues)
+        n_cats = len(sources)
+        cat_names = [sources[i].ra_column or "ra" for i in range(n_cats)]
+        cat_dec_names = [sources[i].dec_column or "dec" for i in range(n_cats)]
+
+        # Pre-compute sigma arrays for all catalogues.
+        sigmas_all = []
+        for i, src in enumerate(sources):
+            sigma = matchers._pos_sigma_arcsec(frames[i], src)
+            if sigma is None:
+                sigma = np.full(frames[i].height, 0.5, dtype=float)
+            sigmas_all.append(sigma)
+
+        from .bayes import compute_nway_p_match
+
+        # Result frame builder helper.
+        def _build_empty_result():
+            cols = list(frames[0].columns)
+            for j in range(1, n_cats):
+                suffix = f"_{j + 1}"
+                for c in frames[j].columns:
+                    cols.append(c + suffix if c in cols else c)
+            cols.append("p_match")
+            return pl.DataFrame(schema={c: pl.Float64 for c in cols}).clear()
+
+        # --- chunked tuple iterator -----------------------------------------
+        result_chunks: list = []
+        chunk_tuples: list = []  # accumulator for current chunk
+        total_tuples = 0
+        truncated_sources = 0
 
         for pi in range(n_primary):
-            # Get matches for this primary source from each catalogue.
+            # Gather matches for this primary from each catalogue.
             matches_per_cat = []
             for cat_j in range(len(all_pairs)):
                 p_idx, o_idx = all_pairs[cat_j]
                 mask = p_idx == pi
                 matches_per_cat.append(o_idx[mask])
 
-            # Cartesian product.
             if any(len(m) == 0 for m in matches_per_cat):
                 continue
 
-            # Recursive cartesian product builder.
-            grid = np.array(np.meshgrid(*matches_per_cat, indexing="ij"))
-            n_tuples = grid.shape[1] if grid.ndim > 1 else 1
-            flat = grid.reshape(len(matches_per_cat), -1)
-            for t in range(flat.shape[1]):
-                indices = [pi] + [flat[c][t] for c in range(len(matches_per_cat))]
-                tuple_parts.append(indices)
+            # Product size before capping.
+            prod_size = 1
+            for m in matches_per_cat:
+                prod_size *= len(m)
+            if prod_size == 0:
+                continue
 
-        if not tuple_parts:
-            result_cols = list(frames[0].columns)
-            for j in range(1, len(sources)):
-                suffix = f"_{j + 1}"
-                for c in frames[j].columns:
-                    if c in result_cols:
-                        result_cols.append(c + suffix)
-                    else:
-                        result_cols.append(c)
-            result_cols.append("p_match")
-            return pl.DataFrame(schema={c: pl.Float64 for c in result_cols}).clear()
+            # Cap per-source tuples.
+            if max_tuples_per_source and prod_size > max_tuples_per_source:
+                truncated_sources += 1
+                if truncated_sources == 1:
+                    logger.warning(
+                        "Per-source tuple count %d exceeds max_tuples_per_source=%d; "
+                        "truncating (further warnings suppressed).",
+                        prod_size, max_tuples_per_source,
+                    )
+                # Truncate the largest match list proportionally.
+                # Simple approach: cap total by iterating with a count.
+                count = 0
+                for combo in cartesian_product(*matches_per_cat):
+                    if count >= max_tuples_per_source:
+                        break
+                    indices = [pi] + list(combo)
+                    chunk_tuples.append(indices)
+                    total_tuples += 1
+                    count += 1
+                    # Flush chunk if full.
+                    if len(chunk_tuples) >= chunk_size:
+                        result_chunks.append(_process_chunk(
+                            chunk_tuples, n_cats, frames, sources,
+                            cat_names, cat_dec_names, sigmas_all,
+                            radius_arcsec, prior_columns,
+                            matchers, compute_nway_p_match,
+                        ))
+                        chunk_tuples = []
+            else:
+                # Unbounded case: iterate cartesian product.
+                for combo in cartesian_product(*matches_per_cat):
+                    indices = [pi] + list(combo)
+                    chunk_tuples.append(indices)
+                    total_tuples += 1
+                    if len(chunk_tuples) >= chunk_size:
+                        result_chunks.append(_process_chunk(
+                            chunk_tuples, n_cats, frames, sources,
+                            cat_names, cat_dec_names, sigmas_all,
+                            radius_arcsec, prior_columns,
+                            matchers, compute_nway_p_match,
+                        ))
+                        chunk_tuples = []
 
-        # Compute N-way Bayes factor.
-        indices_per_cat = [[t[i] for t in tuple_parts] for i in range(len(sources))]
-        ras = [frames[i][sources[i].ra_column or "ra"].to_numpy()[idx].astype(float)
-               for i, idx in enumerate(indices_per_cat)]
-        decs = [frames[i][sources[i].dec_column or "dec"].to_numpy()[idx].astype(float)
-                for i, idx in enumerate(indices_per_cat)]
+        # Flush final chunk.
+        if chunk_tuples:
+            result_chunks.append(_process_chunk(
+                chunk_tuples, n_cats, frames, sources,
+                cat_names, cat_dec_names, sigmas_all,
+                radius_arcsec, prior_columns,
+                matchers, compute_nway_p_match,
+            ))
 
-        # Positional errors.
-        sigmas = []
-        for i, src in enumerate(sources):
-            sigma = matchers._pos_sigma_arcsec(frames[i], src)
-            if sigma is None:
-                sigma = np.full(frames[i].height, 0.5, dtype=float)
-            sigmas.append(sigma[indices_per_cat[i]])
+        if not result_chunks:
+            return _build_empty_result()
 
-        from .bayes import compute_nway_p_match
-
-        if prior_columns:
-            prior_data = []
-            for col in prior_columns:
-                col_vals = []
-                for i, f in enumerate(frames):
-                    if col in f.columns:
-                        col_vals.append(f[col].to_numpy()[indices_per_cat[i]].astype(float))
-                    else:
-                        col_vals.append(np.full(len(indices_per_cat[i]), np.nan))
-                prior_data.append(col_vals)
-            p_match = compute_nway_p_match(
-                ras, decs, sigmas, radius_arcsec,
-                prior_columns=prior_data,
+        if truncated_sources:
+            logger.info(
+                "%d/%d primary sources had tuples truncated at %d per source.",
+                truncated_sources, n_primary, max_tuples_per_source,
             )
-        else:
-            p_match = compute_nway_p_match(ras, decs, sigmas, radius_arcsec)
 
-        # Build the result frame.
-        result_parts = []
-        for i, f in enumerate(frames):
-            suffix = f"_{i + 1}" if i > 0 else ""
-            idx = np.asarray(indices_per_cat[i], dtype=np.int64)
-            part = f.gather(idx)
-            if suffix:
-                overlap = set(frames[0].columns) & set(part.columns)
-                part = part.rename({c: f"{c}{suffix}" for c in overlap})
-            result_parts.append(part)
-
-        result = pl.concat(result_parts, how="horizontal")
-        result = result.with_columns(
-            pl.Series(matchers.PMATCH_COLUMN, p_match)
+        logger.info(
+            "nway_match: %d tuples from %d catalogues across %d primary sources.",
+            total_tuples, n_cats, n_primary,
         )
-        return result
+        return pl.concat(result_chunks, how="vertical")
 
     def crossmatch_request(
         self,
@@ -839,3 +879,77 @@ class CrossMatch:
                 columns=columns,
             )
         raise CrossMatchError(f"Cannot download from access method '{src.access_method}'.")
+
+
+# --------------------------------------------------------------------------- #
+# nway_match chunk processing helper (module-level for pickling safety)
+# --------------------------------------------------------------------------- #
+def _process_chunk(
+    chunk_tuples: list,
+    n_cats: int,
+    frames: list,
+    sources: list,
+    cat_names: list,
+    cat_dec_names: list,
+    sigmas_all: list,
+    radius_arcsec: float,
+    prior_columns: list,
+    matchers,
+    compute_nway_p_match,
+) -> "pl.DataFrame":
+    """Process one chunk of N-way tuples: compute p_match and build frame."""
+    import numpy as np
+
+    from .matchers import PMATCH_COLUMN
+
+    # Extract per-catalogue index arrays from the chunk.
+    indices_per_cat = [
+        np.array([t[i] for t in chunk_tuples], dtype=np.int64)
+        for i in range(n_cats)
+    ]
+
+    ras = [
+        frames[i][cat_names[i]].to_numpy()[indices_per_cat[i]].astype(float)
+        for i in range(n_cats)
+    ]
+    decs = [
+        frames[i][cat_dec_names[i]].to_numpy()[indices_per_cat[i]].astype(float)
+        for i in range(n_cats)
+    ]
+    sigmas = [sigmas_all[i][indices_per_cat[i]] for i in range(n_cats)]
+
+    if prior_columns:
+        prior_data = []
+        for col in prior_columns:
+            col_vals = []
+            for i, f in enumerate(frames):
+                if col in f.columns:
+                    col_vals.append(
+                        f[col].to_numpy()[indices_per_cat[i]].astype(float)
+                    )
+                else:
+                    col_vals.append(np.full(len(indices_per_cat[i]), np.nan))
+            prior_data.append(col_vals)
+        p_match = compute_nway_p_match(
+            ras, decs, sigmas, radius_arcsec,
+            prior_columns=prior_data,
+        )
+    else:
+        p_match = compute_nway_p_match(ras, decs, sigmas, radius_arcsec)
+
+    # Build chunk result frame.
+    result_parts = []
+    for i, f in enumerate(frames):
+        suffix = f"_{i + 1}" if i > 0 else ""
+        part = f.gather(indices_per_cat[i])
+        if suffix:
+            overlap = set(frames[0].columns) & set(part.columns)
+            part = part.rename({c: f"{c}{suffix}" for c in overlap})
+        result_parts.append(part)
+
+    result = pl.concat(result_parts, how="horizontal")
+
+    result = result.with_columns(
+        pl.Series(PMATCH_COLUMN, p_match)
+    )
+    return result
