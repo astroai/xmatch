@@ -148,3 +148,87 @@ breaks an unrelated assertion.
 *Note:* when both ``tests/test_ci_smoke.py`` and ``CHANGELOG.md`` are
 modified, commit them atomically — split commits leave the guard in
 a failing state on intermediate SHAs that CI will flag.
+
+---
+
+## Quarterly maintenance: stale AI-agent PR cleanup
+
+AI-agent flows in this repo historically shipped their work as
+``bolt-*`` / ``palette-*`` / ``ux-*`` / ``jules-*`` / ``integrate-*`` /
+``perf-*`` branches with corresponding PRs.  When the v0.3 audit
+consolidated that work into the main branch, the originals were left
+around and started competing with human-authored PRs for review
+attention.  Run the cleanup roughly once per quarter (**and only when
+no  in-progress AI-PR is still relevant**):
+
+### Step 0 — Decide whether to cleanup at all.
+
+Browse the matching list first:
+
+    gh pr list --state open --limit 200 \
+        --json number,title,headRefName,author,updatedAt,additions,deletions | jq \
+        '[.[] | select(.headRefName | test("^(bolt|palette|ux|jules|integrate|perf)(/|-)"))]'
+
+If any item looks still relevant (typo fix, fresh feedback, unmerged
+test data), port the value to ``main``, leave the PR open, and **stop**
+— do NOT continue this runbook for leftover items.
+
+### Step 1 — Run a dry-run listing.
+
+    bash scripts/cleanup-stale-prs.sh
+
+The script prints a title table and a per-group breakdown
+(``bolt``, ``palette``, …).  Default mode is **dry-run only**: nothing is
+muted, nothing is deleted.
+
+If you want machine-readable output for a CI check or audit log:
+
+    bash scripts/cleanup-stale-prs.sh --json | jq
+
+Note that ``--json`` is mutually exclusive with ``--apply`` in the
+current implementation — passing both returns the JSON listing and
+short-circuits before the destructive path.  See the script's
+``main()`` for the order of checks.
+
+### Step 2 — Apply the cleanup (destructive).
+
+    bash scripts/cleanup-stale-prs.sh --apply
+
+This closes each matching PR with a comment that points at
+``AUDIT.md`` / ``CHANGELOG.md`` and runs ``gh pr close --delete-branch``
+to remove the remote branch.  The script writes **two rollback files**
+to a temp dir on success:
+
+* ``cleanup-prs-*.txt`` — one PR number per line.  Rollback via
+  ``while read N; do gh pr reopen "$N"; done < <file>``.
+* ``cleanup-branches-*.txt`` — ``<head> <sha>`` per line.  Rollback via
+  ``while read line; do set -- $line; git push origin "$2:refs/heads/$1"; done < <file>``.
+
+Both files are printed to the terminal too — copy them somewhere safe
+before the next ``reboot`` clears ``$TMPDIR``.
+
+### Step 3 — Verify.
+
+    gh pr list --state all --limit 200 | grep -E 'bolt|palette|ux|jules|integrate|perf' || echo OK
+    git ls-remote --heads origin | grep -E 'bolt-|palette-' || echo OK
+
+The first command should print zero open matching PRs; the second
+should print zero remote matching refs.  If either grep returns
+something, edit the downcased branch name into the cleanup script's
+``PREFIXES`` tuple and re-run.
+
+### Step 4 — Commit any final indices.
+
+If the cleanup cycle ran into a new prefix that hadn't been seen
+before (e.g. a freshly-named AI agent), add it to
+``scripts/cleanup-stale-prs.py:PREFIXES`` and commit.  No other
+artefacts need committing — ``cleanup-prs-*.txt`` and
+``cleanup-branches-*.txt`` are scratch files intended for short-term
+rupture recovery only.
+
+### Cadence.
+
+Run this runbook quarterly in a calendar-aligned fashion: end of
+March, June, September, December.  Trigger immediately if a human
+contributor complains that their PR is competing with 30+ dead
+agent-flow PRs for reviewer eyeballs.
