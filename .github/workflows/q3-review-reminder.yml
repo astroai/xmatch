@@ -69,6 +69,13 @@ jobs:
 
       - name: Dry-run scan (--json only)
         id: scan
+        env:
+          # gh CLI auth: the script calls `gh pr list` via subprocess and
+          # relies on the env. While Actions sets GITHUB_TOKEN automatically,
+          # gh CLI 2.46+ prefers GH_TOKEN; mapping both here keeps every
+          # gh version we care about happy. Without this the call exits 4
+          # (authentication failure) and the script aborts.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pixi run python scripts/cleanup-stale-prs.py --json > /tmp/scan.json || {
             echo "Scan failed; aborting." >&2; exit 1; }
