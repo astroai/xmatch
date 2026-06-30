@@ -30,10 +30,16 @@ on:
         type: string
 
 permissions:
-  # Tight: checkout implicitly grants contents:read on public repos; only
-  # issues:write is needed to file the triage issue. pull-requests:read is
-  # unused because the script reads via gh under the default GITHUB_TOKEN
-  # (which already has repo scope).
+  # Two permissions only:
+  #   contents: read  - `actions/checkout@v4` clones the repo. Note that
+  #                    specifying ANY `permissions:` block REMOVES the
+  #                    default GITHUB_TOKEN implicit scopes; an explicit
+  #                    `contents: read` is required (a plain `default`
+  #                    workflow wouldn't need this).
+  #   issues: write   - gh issue create for the triage issue.
+  # pull-requests: read is unused; the script reads via gh under the same
+  # token's repo scope.
+  contents: read
   issues: write
 
 # Avoid racing scheduled and manual runs on the same quarter. With
