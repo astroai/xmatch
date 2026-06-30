@@ -185,10 +185,16 @@ If you want machine-readable output for a CI check or audit log:
 
     bash scripts/cleanup-stale-prs.sh --json | jq
 
-Note that ``--json`` is mutually exclusive with ``--apply`` in the
-current implementation — passing both returns the JSON listing and
-short-circuits before the destructive path.  See the script's
-``main()`` for the order of checks.
+For audit-logging of a destructive run (capture rollback pointers
+alongside the matching PRs), combine the flags so ``--apply`` runs
+first and the JSON dump at the end captures the per-row rollback
+file path and capture SHA:
+
+    bash scripts/cleanup-stale-prs.sh --apply --json | jq
+
+The script's ``main()`` orders ``close_and_debranch`` before
+``render_json`` when both flags are set, so the JSON output always
+reflects the post-apply state.
 
 ### Step 2 — Apply the cleanup (destructive).
 

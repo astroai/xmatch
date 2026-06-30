@@ -68,6 +68,12 @@ class StalePR:
     deletions: int
     updated: str
     group: str
+    # Populated by ``close_and_debranch`` after a successful ``--apply`` run.
+    # Used by the JSON renderer so audit logs see the rollback pointers
+    # that the destructive path generated.  Defaults are ``None`` for the
+    # dry-runstatesc before any PR is closed.
+    pr_rollback_file: str | None = None
+    branch_rollback_sha: str | None = None
 
     @classmethod
     def from_gh(cls, payload: dict[str, object]) -> "StalePR | None":
@@ -157,6 +163,17 @@ def render_json(rows: list[StalePR]) -> str:
 # --------------------------------------------------------------------------- #
 # apply
 # --------------------------------------------------------------------------- #
+def _status(args: argparse.Namespace, msg: str, **kwargs: object) -> None:
+    """Print a user-facing status line. Goes to ``stderr`` when ``--json`` is
+    set (so audit pipes ``| jq`` see pure JSON on ``stdout``); goes to
+    ``stdout`` in default text-rendering mode (where ``stderr`` isn't
+    special and the operator reads everything inline).
+    """
+    if args.json:
+        kwargs.setdefault("file", sys.stderr)
+    print(msg, **kwargs)
+
+
 def close_and_debranch(rows: list[StalePR]) -> tuple[str, str]:
     """Close each PR (with --delete-branch) and capture rollback info."""
     pr_list = tempfile.NamedTemporaryFile(  # noqa: SIM115 - using context for clarity
@@ -169,7 +186,17 @@ def close_and_debranch(rows: list[StalePR]) -> tuple[str, str]:
     br_list.close()
 
     for row in rows:
-        print(f"  closing #{row.number} (head={row.head})", flush=True)
+        # The destructive-op progress belongs on stderr regardless of
+        # mode (operators pipe ``stdout`` to ``jq`` / log files; stderr
+        # is the human channel).  Routing this to stdout would break
+        # ``cleanup-stale-prs.sh --apply --json | jq`` -- jq would
+        # choke on the leading ``  closing #N`` line before reaching
+        # the JSON array.
+        print(
+            f"  closing #{row.number} (head={row.head})",
+            flush=True,
+            file=sys.stderr,
+        )
         subprocess.run(
             [
                 "gh",
@@ -200,6 +227,12 @@ def close_and_debranch(rows: list[StalePR]) -> tuple[str, str]:
         with open(br_list.name, "a") as fh:
             fh.write(f"{row.head} {sha}\n")
 
+        # Annotate the row so the JSON output (rendered after ``--apply``
+        # completes) carries the per-row rollback pointers an audit log
+        # needs.  Both fields remain ``None`` in the dry-run state.
+        row.pr_rollback_file = pr_list.name
+        row.branch_rollback_sha = sha or None
+
     return pr_list.name, br_list.name
 
 
@@ -219,36 +252,68 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Output matching PRs as JSON instead of a tabular summary.",
+        help=(
+            "Output matching PRs as JSON instead of a tabular summary.  "
+            "Compositional with --apply: --apply fires first (closing PRs "
+            "and recording per-row rollback pointers), then the JSON "
+            "renderer emits the post-apply state so audit logs include "
+            "the rollback file path and capture SHA per PR.  Without "
+            "--apply, --json is a dry-run-only listing."
+        ),
     )
     args = parser.parse_args(argv)
 
-    print("==> Fetching every open PR with a bolt/palette/ux/jules/integrate/perf prefix")
+    _status(
+        args,
+        "==> Fetching every open PR with a bolt/palette/ux/jules/integrate/perf prefix",
+    )
     all_prs = fetch_open_prs()
     rows = filter_stale(all_prs)
 
+    # --json path: render LAST so the JSON captures any post-apply state.
+    # When --apply is also set and we have rows, run close_and_debranch
+    # first so each row's pr_rollback_file / branch_rollback_sha fields
+    # are populated before render_json dumps them.  All status lines on
+    # this branch route to stderr via ``_status`` so ``stdout`` stays
+    # pure JSON for ``| jq`` invocation.
     if args.json:
-        print(render_json(rows))
+        if args.apply and rows:
+            _status(
+                args,
+                f"==> --apply: closing {len(rows)} PR(s) "
+                f"(with --delete-branch) and recording rollback lists",
+                flush=True,
+            )
+            close_and_debranch(rows)
+        # The JSON dump is the only stdout payload.
+        sys.stdout.write(render_json(rows) + "\n")
         return 0
 
-    print()
-    print(render_table(rows))
-    print()
-    print(f"==> Total matching stale open PRs: {len(rows)}")
-    groups = Counter(r.group for r in rows)
-    print("==> Group breakdown:")
-    for g, c in sorted(groups.items()):
-        print(f"    {g:<10} {c}")
-    print()
-
+    # Non-JSON path: human-readable.  Skip everything if no matches.
     if not rows:
+        _status(args, "==> No matching stale open PRs found; nothing to apply.")
         return 0
 
     if not args.apply:
+        print()
+        print(render_table(rows))
+        print()
+        print(f"==> Total matching stale open PRs: {len(rows)}")
+        groups = Counter(r.group for r in rows)
+        print("==> Group breakdown:")
+        for g, c in sorted(groups.items()):
+            print(f"    {g:<10} {c}")
+        print()
         print("==> Dry-run only. Re-run with --apply to actually close + delete branches.")
         return 0
 
-    print("==> --apply: closing PRs (with --delete-branch) and recording rollback lists")
+    # --apply (no --json): destructive path, then human-readable rollback info.
+    _status(
+        args,
+        f"==> --apply: closing {len(rows)} PR(s) "
+        f"(with --delete-branch) and recording rollback lists",
+        flush=True,
+    )
     pr_list, br_list = close_and_debranch(rows)
     print()
     print("==> Done. Rollback lists:")
