@@ -22,7 +22,7 @@ import multiprocessing
 from dataclasses import replace
 from itertools import product as cartesian_product
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import polars as pl
@@ -33,8 +33,8 @@ from .astro_utils import coord_arrays, find_coord_columns, sky_extent, sky_exten
 from .bayes import compute_nway_p_match
 from .exceptions import ConfigError, CrossMatchError, InputError
 from .matchers import (
-    PMATCH_COLUMN,
     _RIGHT_SUFFIX,
+    PMATCH_COLUMN,
     _arcsec_to_chord,
     _pos_sigma_arcsec,
     _radec_to_xyz,
@@ -200,9 +200,12 @@ class CrossMatch:
             return []
         lower_to_orig = {name.lower(): name for name in pool}
         matches = difflib.get_close_matches(
-            name.lower(), list(lower_to_orig), n=n, cutoff=cutoff,
+            name.lower(),
+            list(lower_to_orig),
+            n=n,
+            cutoff=cutoff,
         )
-        return [lower_to_orig[m] for m in matches]      
+        return [lower_to_orig[m] for m in matches]
 
     # ----------------------------------------------------------------- sources
     def resolve_source(self, value: FrameInput, overrides: Dict[str, Any]) -> CatalogueSource:
@@ -304,12 +307,16 @@ class CrossMatch:
         output_file: Optional[Union[str, Path]] = None,
         *,
         lazy: bool = False,
+        progress_cb: Optional[Callable[[str], None]] = None,
         **params,
     ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
         """Run a crossmatch (backward-compatible spread-args entry point).
 
         For new code prefer :meth:`crossmatch_request` with a typed
         :class:`~xmatch.request.MatchRequest`.
+
+        ``progress_cb``, when supplied, is forwarded to :meth:`_download_remote`
+        so the CLI can render a spinner during TAP/CDS downloads.
         """
         req = MatchRequest.from_legacy(
             catalogue_1_input,
@@ -319,7 +326,7 @@ class CrossMatch:
             **params,
         )
         hats_threshold = params.pop("hats_threshold", 100_000)
-        return self.crossmatch_request(req, hats_threshold=hats_threshold)
+        return self.crossmatch_request(req, hats_threshold=hats_threshold, progress_cb=progress_cb)
 
     def crossmatch_multi(
         self,
@@ -327,6 +334,7 @@ class CrossMatch:
         output_file: Optional[Union[str, Path]] = None,
         *,
         lazy: bool = False,
+        progress_cb: Optional[Callable[[str], None]] = None,
         **params: Any,
     ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
         """Run an N-catalogue crossmatch using sequential pairwise matching.
@@ -343,7 +351,9 @@ class CrossMatch:
         first two; remote catalogues in positions 3+ require ``ra``, ``dec``,
         and ``radius_deg`` in ``params`` so they can be downloaded.
         """
-        return self._multi_match_impl(catalogues, output_file, lazy, **params)
+        return self._multi_match_impl(
+            catalogues, output_file, lazy, progress_cb=progress_cb, **params
+        )
 
     def union_match(
         self,
@@ -351,6 +361,7 @@ class CrossMatch:
         output_file: Optional[Union[str, Path]] = None,
         *,
         lazy: bool = False,
+        progress_cb: Optional[Callable[[str], None]] = None,
         **params: Any,
     ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
         """Build a master union catalogue via sequential full outer joins.
@@ -398,12 +409,16 @@ class CrossMatch:
         >>> # Every row has: cat-1 cols (Gaia), cat-2 cols (_2 suffix),
         >>> # cat-3 cols (_3 suffix), _src_cats, sep_arcsec
         >>> print(master["_src_cats"].value_counts())
-        """
-        # Force full outer join at every pairwise step.
+        """  # Force full outer join at every pairwise step.
         union_params = dict(params)
         union_params.setdefault("join_type", "1or2")
         return self._multi_match_impl(
-            catalogues, output_file, lazy, union_match=True, **union_params,
+            catalogues,
+            output_file,
+            lazy,
+            progress_cb=progress_cb,
+            union_match=True,
+            **union_params,
         )
 
     def fof_match(
@@ -413,6 +428,7 @@ class CrossMatch:
         *,
         radius_arcsec: float = 1.0,
         hats_threshold: int = 100_000,
+        progress_cb: Optional[Callable[[str], None]] = None,
         **params: Any,
     ) -> Optional[pl.DataFrame]:
         """Friends-of-Friends transitive closure across all catalogues.
@@ -461,8 +477,10 @@ class CrossMatch:
 
         # Resolve all sources (reuse shared multi-match plumbing).
         req = MatchRequest.from_legacy(
-            catalogues[0], catalogues[1],
-            output_file=None, lazy=True,
+            catalogues[0],
+            catalogues[1],
+            output_file=None,
+            lazy=True,
             radius_arcsec=radius_arcsec,
             find="all",  # FoF needs ALL candidates
             **{k: v for k, v in params.items() if k != "find"},
@@ -479,7 +497,7 @@ class CrossMatch:
 
         # Ensure first source is local.
         if not first_src.is_local and first_src.access_method in ("tap", "cds_xmatch"):
-            downloaded = self._download_remote(first_src, req, prefix="1")
+            downloaded = self._download_remote(first_src, req, prefix="1", progress_cb=progress_cb)
             first_src = first_src.with_frame(downloaded.lazy())
             sources[0] = first_src
 
@@ -490,8 +508,12 @@ class CrossMatch:
             if i <= 1:
                 continue
             downloaded = self._download_remote(
-                src, req, prefix=str(i + 1),
-                region_from=first_src.lazy(), local=first_src,
+                src,
+                req,
+                prefix=str(i + 1),
+                region_from=first_src.lazy(),
+                local=first_src,
+                progress_cb=progress_cb,
             )
             sources[i] = src.with_frame(downloaded.lazy())
 
@@ -547,7 +569,9 @@ class CrossMatch:
 
         logger.info(
             "FoF: %d edges across %d catalogues (%d total nodes).",
-            n_edges, n_total, total_nodes,
+            n_edges,
+            n_total,
+            total_nodes,
         )
 
         if n_edges == 0:
@@ -562,8 +586,10 @@ class CrossMatch:
             result0 = pl.DataFrame(rows0)
             if output_file:
                 io_utils.write_frame(
-                    result0, output_file,
-                    ra_column=p_ra_col, dec_column=p_dec_col,
+                    result0,
+                    output_file,
+                    ra_column=p_ra_col,
+                    dec_column=p_dec_col,
                     hats_threshold=hats_threshold,
                 )
                 return None
@@ -614,7 +640,7 @@ class CrossMatch:
             row: dict = {"bundle_id": bid, "n_cats": 0, "_src_cats": ""}
 
             # --- Primary catalogue: skip components with no primary member ---
-            primary_mask = mask[offsets[0]:offsets[1]]
+            primary_mask = mask[offsets[0] : offsets[1]]
             primary_indices = np.where(primary_mask)[0]
             if len(primary_indices) == 0:
                 # Component has no primary-catalogue node — skip it.
@@ -630,7 +656,7 @@ class CrossMatch:
 
             # --- Secondary catalogues: aggregate contributions ---------------
             for j in range(1, n_total):
-                j_mask = mask[offsets[j]:offsets[j + 1]]
+                j_mask = mask[offsets[j] : offsets[j + 1]]
                 j_indices = np.where(j_mask)[0]
                 if len(j_indices) == 0:
                     continue
@@ -671,14 +697,18 @@ class CrossMatch:
         lazy: bool,
         *,
         union_match: bool = False,
+        progress_cb: Optional[Callable[[str], None]] = None,
         **params: Any,
     ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
         if len(catalogues) < 2:
             raise CrossMatchError("At least two catalogues are required for crossmatching.")
 
         req = MatchRequest.from_legacy(
-            catalogues[0], catalogues[1],
-            output_file=None, lazy=True, **params,
+            catalogues[0],
+            catalogues[1],
+            output_file=None,
+            lazy=True,
+            **params,
         )
 
         # Resolve ALL sources up front.
@@ -693,7 +723,7 @@ class CrossMatch:
 
         # Ensure first source is local.
         if not first_src.is_local and first_src.access_method in ("tap", "cds_xmatch"):
-            downloaded = self._download_remote(first_src, req, prefix="1")
+            downloaded = self._download_remote(first_src, req, prefix="1", progress_cb=progress_cb)
             first_src = first_src.with_frame(downloaded.lazy())
             sources[0] = first_src
 
@@ -706,8 +736,12 @@ class CrossMatch:
             if i <= 1:
                 continue
             downloaded = self._download_remote(
-                src, req, prefix=str(i + 1),
-                region_from=first_src.lazy(), local=first_src,
+                src,
+                req,
+                prefix=str(i + 1),
+                region_from=first_src.lazy(),
+                local=first_src,
+                progress_cb=progress_cb,
             )
             sources[i] = src.with_frame(downloaded.lazy())
 
@@ -721,15 +755,21 @@ class CrossMatch:
             # Check if the right side's spatial columns are non-null.
             r2_ra = sources[1].ra_column or "ra"
             r2_dec = sources[1].dec_column or "dec"
-            # Determine the renamed right-side RA column in the result.
-            # If r2_ra collides with left columns, _build_result renames it to r2_ra_2.
+            # Determine the renamed right-side RA/Dec columns in the result.
+            # If they collide with left columns, _build_result renames them
+            # with a ``_2`` suffix; mirror that suffixing here so the
+            # ``_src_cats`` tag accurately reflects which side(s) contributed
+            # (i.e. requires *both* RA and Dec non-null on every side).
             left_cols = set(sources[0].columns()) if sources[0].is_local else set()
             r2_ra_in_result = f"{r2_ra}_2" if r2_ra in left_cols else r2_ra
+            r2_dec_in_result = f"{r2_dec}_2" if r2_dec in left_cols else r2_dec
             accum_lf = accum_lf.with_columns(
                 pl.when(
                     pl.col(r2_ra_in_result).is_not_null()
+                    & pl.col(r2_dec_in_result).is_not_null()
                     & pl.col(first_ra).is_not_null()
-                ).then(pl.lit("1+2"))
+                )
+                .then(pl.lit("1+2"))
                 .when(pl.col(r2_ra_in_result).is_not_null())
                 .then(pl.lit("2"))
                 .otherwise(pl.lit("1"))
@@ -765,16 +805,24 @@ class CrossMatch:
 
             if right_src.access_method == "hats":
                 from . import hats_source
+
                 accum_lf = hats_source.hats_crossmatch(
-                    accum_src, right_src, req.spec,
-                    local_lf1=accum_lf, right_suffix=suffix,
+                    accum_src,
+                    right_src,
+                    req.spec,
+                    local_lf1=accum_lf,
+                    right_suffix=suffix,
                 ).lazy()
             else:
                 right_lf = right_src.lazy()
                 accum_lf = (
                     self._local_match(
-                        accum_src, right_src,
-                        accum_lf, right_lf, req, right_suffix=suffix,
+                        accum_src,
+                        right_src,
+                        accum_lf,
+                        right_lf,
+                        req,
+                        right_suffix=suffix,
                     )
                     .collect()
                     .lazy()
@@ -789,17 +837,13 @@ class CrossMatch:
                 cat_only = str(i + 1)
                 accum_lf = accum_lf.with_columns(
                     pl.when(
-                        pl.col(rN_ra_in_result).is_not_null()
-                        & pl.col("_src_cats").is_not_null()
-                    ).then(
-                        pl.col("_src_cats") + pl.lit(cat_tag)
-                    ).when(
-                        pl.col(rN_ra_in_result).is_not_null()
-                    ).then(
-                        pl.lit(cat_only)
-                    ).otherwise(
-                        pl.col("_src_cats")
-                    ).alias("_src_cats")
+                        pl.col(rN_ra_in_result).is_not_null() & pl.col("_src_cats").is_not_null()
+                    )
+                    .then(pl.col("_src_cats") + pl.lit(cat_tag))
+                    .when(pl.col(rN_ra_in_result).is_not_null())
+                    .then(pl.lit(cat_only))
+                    .otherwise(pl.col("_src_cats"))
+                    .alias("_src_cats")
                 )
 
         if output_file:
@@ -823,6 +867,7 @@ class CrossMatch:
         max_tuples_per_source: int = 10_000,
         chunk_size: int = 50_000,
         hats_threshold: int = 100_000,
+        progress_cb: Optional[Callable[[str], None]] = None,
         **params: Any,
     ) -> Optional[pl.DataFrame]:
         """Bayesian N-way multi-catalogue crossmatching (Budavári & Szalay 2008).
@@ -876,17 +921,20 @@ class CrossMatch:
             if not src.is_local:
                 if src.access_method in ("tap", "cds_xmatch"):
                     req = MatchRequest.from_legacy(
-                        catalogues[0], catalogues[0],  # dummy cat1/cat2
+                        catalogues[0],
+                        catalogues[0],  # dummy cat1/cat2
                         ra=params.get("ra"),
                         dec=params.get("dec"),
                         radius_deg=params.get("radius_deg"),
                         radius_arcsec=radius_arcsec,
                     )
-                    downloaded = self._download_remote(src, req, prefix=str(i + 1))
+                    downloaded = self._download_remote(
+                        src, req, prefix=str(i + 1), progress_cb=progress_cb
+                    )
                     src = src.with_frame(downloaded.lazy())
                 else:
                     raise CrossMatchError(
-                        f"Catalogue {i+1} ('{src.name}') is not local; "
+                        f"Catalogue {i + 1} ('{src.name}') is not local; "
                         f"nway_match requires local or downloadable catalogues."
                     )
             sources.append(src)
@@ -919,9 +967,7 @@ class CrossMatch:
                     p_idx_parts.append(np.full(len(neighbors), pi, dtype=int))
                     o_idx_parts.append(np.asarray(neighbors, dtype=int))
             if p_idx_parts:
-                all_pairs.append(
-                    (np.concatenate(p_idx_parts), np.concatenate(o_idx_parts))
-                )
+                all_pairs.append((np.concatenate(p_idx_parts), np.concatenate(o_idx_parts)))
             else:
                 all_pairs.append((np.array([], int), np.array([], int)))
 
@@ -977,22 +1023,29 @@ class CrossMatch:
                     logger.warning(
                         "Per-source tuple count %d exceeds max_tuples_per_source=%d; "
                         "truncating (further warnings suppressed).",
-                        prod_size, max_tuples_per_source,
+                        prod_size,
+                        max_tuples_per_source,
                     )
-                count = 0
-                for combo in cartesian_product(*matches_per_cat):
-                    if count >= max_tuples_per_source:
+                cap = max_tuples_per_source
+                for count, combo in enumerate(cartesian_product(*matches_per_cat)):
+                    if count >= cap:
                         break
                     indices = [pi] + list(combo)
                     chunk_tuples.append(indices)
                     total_tuples += 1
-                    count += 1
                     if len(chunk_tuples) >= chunk_size:
-                        result_chunks.append(_process_nway_chunk(
-                            chunk_tuples, n_cats, frames,
-                            cat_ra_names, cat_dec_names, sigmas_all,
-                            radius_arcsec, prior_columns,
-                        ))
+                        result_chunks.append(
+                            _process_nway_chunk(
+                                chunk_tuples,
+                                n_cats,
+                                frames,
+                                cat_ra_names,
+                                cat_dec_names,
+                                sigmas_all,
+                                radius_arcsec,
+                                prior_columns,
+                            )
+                        )
                         chunk_tuples = []
             else:
                 for combo in cartesian_product(*matches_per_cat):
@@ -1000,19 +1053,33 @@ class CrossMatch:
                     chunk_tuples.append(indices)
                     total_tuples += 1
                     if len(chunk_tuples) >= chunk_size:
-                        result_chunks.append(_process_nway_chunk(
-                            chunk_tuples, n_cats, frames,
-                            cat_ra_names, cat_dec_names, sigmas_all,
-                            radius_arcsec, prior_columns,
-                        ))
+                        result_chunks.append(
+                            _process_nway_chunk(
+                                chunk_tuples,
+                                n_cats,
+                                frames,
+                                cat_ra_names,
+                                cat_dec_names,
+                                sigmas_all,
+                                radius_arcsec,
+                                prior_columns,
+                            )
+                        )
                         chunk_tuples = []
 
         if chunk_tuples:
-            result_chunks.append(_process_nway_chunk(
-                chunk_tuples, n_cats, frames,
-                cat_ra_names, cat_dec_names, sigmas_all,
-                radius_arcsec, prior_columns,
-            ))
+            result_chunks.append(
+                _process_nway_chunk(
+                    chunk_tuples,
+                    n_cats,
+                    frames,
+                    cat_ra_names,
+                    cat_dec_names,
+                    sigmas_all,
+                    radius_arcsec,
+                    prior_columns,
+                )
+            )
 
         if not result_chunks:
             empty = _build_empty_nway_result(frames, n_cats)
@@ -1030,12 +1097,16 @@ class CrossMatch:
         if truncated_sources:
             logger.info(
                 "%d/%d primary sources had tuples truncated at %d per source.",
-                truncated_sources, n_primary, max_tuples_per_source,
+                truncated_sources,
+                n_primary,
+                max_tuples_per_source,
             )
 
         logger.info(
             "nway_match: %d tuples from %d catalogues across %d primary sources.",
-            total_tuples, n_cats, n_primary,
+            total_tuples,
+            n_cats,
+            n_primary,
         )
         result = pl.concat(result_chunks, how="vertical")
         if output_file:
@@ -1054,16 +1125,21 @@ class CrossMatch:
         req: MatchRequest,
         *,
         hats_threshold: int = 100_000,
+        progress_cb: Optional[Callable[[str], None]] = None,
     ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
         """Run a crossmatch from a typed :class:`~xmatch.request.MatchRequest`.
 
         This is the preferred entry point for new code. It gives mypy and IDEs
         full visibility into every parameter.
+
+        ``progress_cb``, when supplied, is forwarded to
+        :meth:`_dispatch` so the CLI can render a spinner during TAP/CDS
+        downloads.
         """
         src1 = self.resolve_source(req.cat1, req.side1.as_dict())
         src2 = self.resolve_source(req.cat2, req.side2.as_dict())
 
-        result_lf = self._dispatch(src1, src2, req)
+        result_lf = self._dispatch(src1, src2, req, progress_cb=progress_cb)
 
         if req.output_file:
             io_utils.write_frame(
@@ -1084,6 +1160,7 @@ class CrossMatch:
         req: MatchRequest,
         *,
         right_suffix: str = _RIGHT_SUFFIX,
+        progress_cb: Optional[Callable[[str], None]] = None,
     ) -> pl.LazyFrame:
         if src1.access_method == "hats" or src2.access_method == "hats":
             from . import hats_source
@@ -1091,8 +1168,11 @@ class CrossMatch:
             lf1 = src1.lazy() if src1.is_local else None
             lf2 = src2.lazy() if src2.is_local else None
             return hats_source.hats_crossmatch(
-                src1, src2, req.spec,
-                local_lf1=lf1, local_lf2=lf2,
+                src1,
+                src2,
+                req.spec,
+                local_lf1=lf1,
+                local_lf2=lf2,
                 right_suffix=right_suffix,
             ).lazy()
 
@@ -1100,9 +1180,9 @@ class CrossMatch:
             return self._local_match(src1, src2, src1.lazy(), src2.lazy(), req)
 
         if src1.is_local != src2.is_local:
-            return self._local_vs_remote(src1, src2, req)
+            return self._local_vs_remote(src1, src2, req, progress_cb=progress_cb)
 
-        return self._remote_vs_remote(src1, src2, req)
+        return self._remote_vs_remote(src1, src2, req, progress_cb=progress_cb)
 
     def _id_columns(self, src1: CatalogueSource, src2: CatalogueSource, req: MatchRequest):
         if not req.id_join:
@@ -1141,7 +1221,14 @@ class CrossMatch:
             right_suffix=right_suffix,
         )
 
-    def _local_vs_remote(self, src1: CatalogueSource, src2: CatalogueSource, req: MatchRequest) -> pl.LazyFrame:
+    def _local_vs_remote(
+        self,
+        src1: CatalogueSource,
+        src2: CatalogueSource,
+        req: MatchRequest,
+        *,
+        progress_cb: Optional[Callable[[str], None]] = None,
+    ) -> pl.LazyFrame:
         local, remote = (src1, src2) if src1.is_local else (src2, src1)
         local_lf = local.lazy()
         remote_prefix = "2" if src1.is_local else "1"
@@ -1153,14 +1240,26 @@ class CrossMatch:
             return result.lazy()
 
         remote_lf = self._download_remote(
-            remote, req, prefix=remote_prefix, region_from=local_lf, local=local
+            remote,
+            req,
+            prefix=remote_prefix,
+            region_from=local_lf,
+            local=local,
+            progress_cb=progress_cb,
         ).lazy()
         downloaded = remote.with_frame(remote_lf)
         new1 = src1 if src1.is_local else downloaded
         new2 = downloaded if src1.is_local else src2
         return self._local_match(new1, new2, new1.lazy(), new2.lazy(), req)
 
-    def _remote_vs_remote(self, src1: CatalogueSource, src2: CatalogueSource, req: MatchRequest) -> pl.LazyFrame:
+    def _remote_vs_remote(
+        self,
+        src1: CatalogueSource,
+        src2: CatalogueSource,
+        req: MatchRequest,
+        *,
+        progress_cb: Optional[Callable[[str], None]] = None,
+    ) -> pl.LazyFrame:
         if (
             src1.access_method == "tap"
             and src2.access_method == "tap"
@@ -1172,14 +1271,21 @@ class CrossMatch:
             auth_session = self.auth_config.get_auth_session(src1.archive)
             return tap_self_join(src1, src2, req.spec, auth_session=auth_session).lazy()
 
-        lf1 = self._download_remote(src1, req, prefix="1").lazy()
-        lf2 = self._download_remote(src2, req, prefix="2").lazy()
+        lf1 = self._download_remote(src1, req, prefix="1", progress_cb=progress_cb).lazy()
+        lf2 = self._download_remote(src2, req, prefix="2", progress_cb=progress_cb).lazy()
         new1 = src1.with_frame(lf1)
         new2 = src2.with_frame(lf2)
         return self._local_match(new1, new2, lf1, lf2, req)
 
     def _download_remote(
-        self, src: CatalogueSource, req: MatchRequest, *, prefix: str, region_from=None, local=None
+        self,
+        src: CatalogueSource,
+        req: MatchRequest,
+        *,
+        prefix: str,
+        region_from=None,
+        local=None,
+        progress_cb: Optional[Callable[[str], None]] = None,
     ) -> pl.DataFrame:
         ra = req.ra
         dec = req.dec
@@ -1206,11 +1312,7 @@ class CrossMatch:
             )
 
         columns = (
-            req.side1.columns
-            if prefix == "1"
-            else req.side2.columns
-            if prefix == "2"
-            else None
+            req.side1.columns if prefix == "1" else req.side2.columns if prefix == "2" else None
         )
         auth_session = self.auth_config.get_auth_session(src.archive)
         if src.access_method == "tap":
@@ -1223,6 +1325,7 @@ class CrossMatch:
                 radius_deg=radius_deg,
                 columns=columns,
                 auth_session=auth_session,
+                progress_cb=progress_cb,
             )
         if src.access_method == "cds_xmatch":
             from .remote_cds import download_from_cds
@@ -1233,6 +1336,7 @@ class CrossMatch:
                 dec=dec,
                 radius_arcsec=radius_deg * 3600.0,
                 columns=columns,
+                progress_cb=progress_cb,
             )
         raise CrossMatchError(f"Cannot download from access method '{src.access_method}'.")
 
@@ -1264,8 +1368,7 @@ def _process_nway_chunk(
     """Process one chunk of N-way tuples: compute p_match and build frame."""
     # Extract per-catalogue index arrays from the chunk.
     indices_per_cat = [
-        np.array([t[i] for t in chunk_tuples], dtype=np.int64)
-        for i in range(n_cats)
+        np.array([t[i] for t in chunk_tuples], dtype=np.int64) for i in range(n_cats)
     ]
 
     ras = [
@@ -1284,14 +1387,15 @@ def _process_nway_chunk(
             col_vals = []
             for i, f in enumerate(frames):
                 if col in f.columns:
-                    col_vals.append(
-                        f[col].to_numpy()[indices_per_cat[i]].astype(float)
-                    )
+                    col_vals.append(f[col].to_numpy()[indices_per_cat[i]].astype(float))
                 else:
                     col_vals.append(np.full(len(indices_per_cat[i]), np.nan))
             prior_data.append(col_vals)
         p_match = compute_nway_p_match(
-            ras, decs, sigmas, radius_arcsec,
+            ras,
+            decs,
+            sigmas,
+            radius_arcsec,
             prior_columns=prior_data,
         )
     else:

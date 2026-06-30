@@ -56,6 +56,21 @@ pip install -e ".[hats]" # optional HATS/LSDB support
 
 ## Command line
 
+The CLI is **subcommand-driven**.  The legacy `xmatch CAT1 CAT2` flat form
+keeps working exactly as before, but you'll get a tidier experience with the
+explicit subcommands.
+
+| Goal                              | Command                                               |
+|-----------------------------------|-------------------------------------------------------|
+| Match two catalogues              | `xmatch match cat1 cat2 [-o out.parquet -r 1.5]`      |
+| Match a local file vs a remote    | `xmatch my_sources.csv gaia -o my_gaia.parquet -r 2`  |
+| N-way or union match              | `xmatch match gaia allwise.csv twomass.csv --union`   |
+| List configured catalogues        | `xmatch list`                                         |
+| Show a catalogue's columns        | `xmatch describe gaia`                                |
+| Search remote TAP services        | `xmatch search gaia`                                  |
+| Browse a remote endpoint          | `xmatch discover noirlab`                             |
+| Schema + YAML hint for a table    | `xmatch discover noirlab --schema nsc_dr2.object`     |
+
 ```bash
 # Two local files (coordinate columns auto-detected); CSV result on stdout
 xmatch a.parquet b.csv
@@ -64,37 +79,111 @@ xmatch a.parquet b.csv
 xmatch a.parquet b.csv -o matches.parquet -r 1.5
 
 # Save a union catalogue as a HATS directory for spatial queries
-xmatch gaia allwise.csv twomass.csv --union -r 1.5 -o master.hats --hats-threshold 50000
+xmatch match gaia allwise.csv twomass.csv --union -r 1.5 -o master.hats --hats-threshold 50000
 
 # Local file vs a configured remote catalogue (downloaded around the local footprint)
 xmatch my_sources.csv gaia -o my_gaia.parquet -r 2.0
 
 # Error-ellipse match (needs error columns in the catalogue config)
-xmatch gaia desils_noao --matcher skyerr --max-error 3.0 -o out.parquet
+xmatch match gaia desils_noao --matcher skyerr --max-error 3.0 -o out.parquet
 
 # Pick the in-process cKDTree engine (no Java) and stream matches to disk
-xmatch a.parquet b.parquet --engine fast -r 1.0 -o matches.parquet
+xmatch match a.parquet b.parquet --engine fast -r 1.0 -o matches.parquet
 
 # Compute a probabilistic p_match column from a photometric prior
-xmatch a.parquet b.parquet --engine fast --probabilistic --priors g_mag,r_mag -o matches.parquet
+xmatch match a.parquet b.parquet --engine fast --probabilistic --priors g_mag,r_mag -o matches.parquet
 
 # Keep all matches within the radius, and use an outer join
-xmatch a.csv b.csv --find all --join 1or2
+xmatch match a.csv b.csv --find all --join 1or2
 
 # ID join instead of sky position
-xmatch a.csv b.csv --id-join --id1 source_id --id2 source_id
+xmatch match a.csv b.csv --id-join --id1 source_id --id2 source_id
 
 # Inspect the catalogue configuration
-xmatch --list
-xmatch --describe gaia
+xmatch list
+xmatch describe gaia
+xmatch --list            # legacy alias kept for backwards compatibility
+xmatch --describe gaia   # legacy alias kept for backwards compatibility
 ```
 
-Run `xmatch --help` for the full option list.
+### Help, colour, and discovery
+
+* Every command has rich, grouped `--help`: `xmatch --help` shows the five
+  subcommands and a one-screen example block; `xmatch match --help` shows
+  only the match options, grouped into **Output / Geometry / Match algorithm
+  / ID join / Probabilistic / Proper motion / Advanced filters /
+  Matcher-specific / Region** sections.
+* Output is **auto-colourised** when stdout and stderr are TTYs, and
+  automatically disabled otherwise (CI logs, pipes, `pytest -s`, etc.).
+  Override with `--no-color`, or set `NO_COLOR=1` (or `XMATCH_NO_COLOR=1`)
+  in your shell — see https://no-color.org/.
+* Errors include a **"Did you mean: …"** hint when a catalogue name is
+  close to one in the config (e.g. `xmatch --describe gaiaesa` suggests
+  `gaia_esa`).
+
+Run `xmatch --help` for the full top-level summary, and `xmatch <cmd> --help`
+for command-specific options.
 
 `--matcher` / `--max-error`: with `skyerr`/`skyellipse` a pair matches when
 `separation ≤ max_error · (err₁ + err₂)` using the catalogues' positional errors
 (`--radius` applies only to `sky`). `skyellipse` currently behaves like `skyerr`
 (correlation is not yet modelled).
+
+### Shell tab completion
+
+`xmatch completion <bash|zsh|fish>` emits a self-contained completion
+script. Catalogue names and TAP-endpoint short-names are pulled from the
+active `xmatch.yaml` at emission time and embedded into the script &mdash;
+so `xmatch match <TAB>`, `xmatch describe <TAB>`, and `xmatch discover <TAB>`
+complete against the catalogues **you** have configured. A short fallback
+list is bundled so completion never breaks if the config can't be loaded.
+
+| Shell | Install                                                                                       |
+|-------|-----------------------------------------------------------------------------------------------|
+| bash  | `eval "$(xmatch completion bash)"` *(current shell only)*                                     |
+| bash  | `xmatch completion bash > ~/.local/share/bash-completion/completions/xmatch` *(persistent)*    |
+| zsh   | `xmatch completion zsh > "${ZDOTDIR:-$HOME}/.zsh/completions/_xmatch"`                        |
+| fish  | `xmatch completion fish > ~/.config/fish/completions/xmatch.fish`                             |
+
+```bash
+# Preview a generated script before installing
+xmatch completion bash | less
+
+# Compose with other init scripts: shell-only `eval`
+eval "$(xmatch completion bash)"
+```
+
+Refresh the script whenever you add or rename a catalogue in your
+`xmatch.yaml` so TAB-complete reflects the new set.
+
+### Configuration drift — `xmatch doctor`
+
+`xmatch doctor` compares your active `xmatch.yaml` against the bundled
+baseline and reports any drift. Three categories are tracked:
+
+* **OUTDATED FIELDS** — the same catalogue exists in both configs but a
+  structural field (`ra_column`, `dec_column`, `id_column`, `default_columns`,
+  `archive`, `service_id`, `access_identifier`, `epoch`, …) differs.
+  This is the kind of change that may silently break a downstream query,
+  so it flips the exit code to **1**.
+* **INFORMATIONAL** — `description`, `estimated_size`, `release` — cosmetic
+  drift; reported but exit code stays 0.
+* **MISSING IN USER / USER-ONLY** — intentional local trims or additions;
+  reported but exit code stays 0 unless `--strict` is passed.
+
+| Goal                                                          | Command                                  |
+|---------------------------------------------------------------|------------------------------------------|
+| Human-readable drift report                                    | `xmatch doctor`                          |
+| Machine-readable JSON (for CI / dashboards)                  | `xmatch doctor --json`                   |
+| Strict — exit 1 on **any** drift                              | `xmatch doctor --strict`                 |
+| Quiet — single-line summary, ideal for scripts                | `xmatch doctor --quiet`                  |
+| Inspect a custom config (skip auto-detected user config)      | `xmatch doctor --config ~/.config/xmatch/xmatch.yaml` |
+
+Exit codes: **0** matches baseline (or only informational drift), **1**
+drift detected, **2** cannot parse user/bundled config. The bundled baseline
+is loaded from the package via `importlib.resources` so it tracks the
+exact baseline shipped with your installed `xmatch` version — run
+`xmatch doctor` after every upgrade to see what changed.
 
 ## Python API
 

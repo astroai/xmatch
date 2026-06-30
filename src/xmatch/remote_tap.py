@@ -1,7 +1,7 @@
 """TAP backends: cone-search download and same-service ADQL self-join."""
 
 import logging
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 import polars as pl
 
@@ -36,8 +36,15 @@ def download_from_tap(
     columns: Optional[List[str]] = None,
     auth_session: Optional[Any] = None,
     maxrec: Optional[int] = None,
+    progress_cb: Optional[Callable[[str], None]] = None,
 ) -> pl.DataFrame:
-    """Download a (optionally cone-limited) catalogue from a TAP service."""
+    """Download a (optionally cone-limited) catalogue from a TAP service.
+
+    ``progress_cb`` (when supplied) is forwarded to
+    :func:`xmatch.tap.execute_tap_query` so the CLI can surface
+    ``"submitting"`` / ``"phase: queued"`` / ``"fetching N rows"`` updates
+    as the async TAP job progresses.
+    """
     if not src.tap_url or not src.access_identifier:
         raise CrossMatchError(f"Missing tap_url/table for '{src.name}'.")
 
@@ -55,7 +62,9 @@ def download_from_tap(
             f" CIRCLE('ICRS', {ra}, {dec}, {radius_deg}))"
         )
     service = get_tap_service(src.tap_url, auth_session=auth_session)
-    table = execute_tap_query(service, query, maxrec=maxrec)
+    if progress_cb is not None:
+        progress_cb(f"connecting to {src.tap_url}")
+    table = execute_tap_query(service, query, maxrec=maxrec, progress_cb=progress_cb)
     logger.info("Downloaded %d rows from %s.", len(table), src.name)
     return astropy_table_to_polars(table)
 

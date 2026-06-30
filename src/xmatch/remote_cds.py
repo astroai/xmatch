@@ -1,7 +1,7 @@
 """CDS backends: VizieR download and the CDS XMatch service (local vs remote)."""
 
 import logging
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 import polars as pl
 
@@ -22,9 +22,16 @@ def download_from_cds(
     dec: Optional[float] = None,
     radius_arcsec: Optional[float] = None,
     columns: Optional[List[str]] = None,
+    progress_cb: Optional["Callable[[str], None]"] = None,
     **_: Any,
 ) -> pl.DataFrame:
-    """Download a VizieR catalogue (cone-limited if a region is given)."""
+    """Download a VizieR catalogue (cone-limited if a region is given).
+
+    ``progress_cb`` (when supplied) is invoked with short status strings
+    before (``"querying VizieR"``) and after (``"received N tables"`` /
+    ``"converting to polars"``) the synchronous astroquery call so the
+    CLI spinner can confirm the connection is alive.
+    """
     import astropy.units as u
     from astropy.coordinates import SkyCoord
     from astroquery.vizier import Vizier
@@ -38,11 +45,17 @@ def download_from_cds(
             f"A spatial region (ra/dec/radius) is required to download '{src.name}' from CDS."
         )
     center = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
+    if progress_cb is not None:
+        progress_cb("querying VizieR")
     tables = vizier.query_region(
         center, radius=radius_arcsec * u.arcsec, catalog=src.access_identifier
     )
     if not tables:
+        if progress_cb is not None:
+            progress_cb("no tables returned")
         return pl.DataFrame()
+    if progress_cb is not None:
+        progress_cb(f"received {len(tables)} table(s); converting to polars")
     return astropy_table_to_polars(tables[0])
 
 

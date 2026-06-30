@@ -287,6 +287,39 @@ common case for modern catalogues such as Gaia.
 
 ---
 
+### Added — Progress Spinner for Remote Downloads
+
+* **`Progress` class** (`src/xmatch/cli.py`): minimal, dependency-free
+  Unicode-Braille spinner rendered in-place on stderr via `‎\r\033[K‎`.
+  Auto-disables on non-TTY streams and when `XMATCH_NO_PROGRESS` or
+  `NO_COLOR` is set. Background animation thread reads an atomic
+  `_status` field written by backend callbacks — backend I/O stays on
+  the main thread so pyvo / astroquery races are not introduced.
+* **`progress_cb` callback plumbing** (`crossmatch.py`,
+  `remote_tap.py`, `remote_cds.py`, `tap.py`): every public crossmatch
+  entry point (`crossmatch`, `crossmatch_multi`, `union_match`,
+  `fof_match`, `nway_match`, `crossmatch_request`) accepts and forwards
+  `progress_cb` to TAP/CDS downloads. TAP async jobs emit live
+  `"phase: queued"` / `"phase: running"` updates via a main-thread
+  polling loop replacing `job.wait()`; CDS VizieR queries emit
+  `"querying VizieR"` and `"received N tables"` around the synchronous
+  `astroquery` call. Backwards compatible — passing `None` is a true
+  no-op.
+* **CLI integration** (`src/xmatch/cli.py::_execute_match`):
+  `_execute_match` wraps every crossmatch call in
+  ``with Progress(label, enabled=console.enabled) as p`` so users get
+  visible download progress on every `xmatch match` / `xmatch match
+  --union` / `xmatch match --fof` invocation. Labelled with the
+  number of catalogues being matched (e.g. ``Cross-matching 3
+  catalogues``).
+* **3 Progress unit tests** (`tests/test_cli.py`):
+  `test_progress_disabled_is_silent` (zero frames, zero leftover
+  threads), `test_progress_enabled_emits_animated_frames` (CR +
+  clear-to-EOL frames + label + latest status), and
+  `test_progress_update_replaces_status` (final status wins).
+
+---
+
 ## [0.4.0] — v0.4 Lean API + Catalogue Discovery
 
 ### Added
