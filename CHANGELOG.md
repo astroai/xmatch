@@ -95,11 +95,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `right_suffix`; `crossmatch_multi` handles HATS catalogues at any position
   (including 3+); download loop guards against HATS sources.
 * **`_dist_arcsec` missing warning**: logs a warning when LSDB result lacks the
-  expected column (e.g., future API change).
-* **16 HATS tests** (`tests/test_hats.py`): fully mocked (no LSDB required),
-  covering alias resolution, crossmatch parameter passthrough, multi-row
-  `find="all"` results, join type validation, local-frame conversion, column
-  renaming, and `crossmatch_multi` routing.
+  expected column (e.g., future API change).* **16 HATS tests** (`tests/test_hats.py`): fully mocked (no LSDB required),
+covering alias resolution, crossmatch parameter passthrough, multi-row
+`find="all"` results, join type validation, local-frame conversion,
+column renaming, and `crossmatch_multi` routing.  Names verified by
+the bidirectional static-scan guards in `tests/test_ci_smoke.py`:
+`test_lsdb_available_false`, `test_require_lsdb_raises_with_helpful_message`,
+`test_read_hats_no_path`, `test_hats_crossmatch_unsupported_join_type_raises`,
+`test_hats_crossmatch_passes_n_neighbors_best`,
+`test_hats_crossmatch_passes_n_neighbors_all`,
+`test_hats_crossmatch_find_all_multi_row_rename`,
+`test_hats_crossmatch_custom_right_suffix`,
+`test_hats_crossmatch_warns_on_missing_dist_arcsec`,
+`test_hats_crossmatch_with_local_left_frame`,
+`test_hats_crossmatch_warns_on_prior_columns`, `test_resolve_source_hats_dir`,
+`test_resolve_source_hats_dir_with_overrides`,
+`test_crossmatch_multi_hats_at_position_3_routes_via_hats_crossmatch`,
+`test_crossmatch_two_hats_via_dispatch`, `test_is_hats_dir_multiple_markers`.
 
 ### Added — NOAO Data Lab Catalogues
 
@@ -112,10 +124,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `id1`/`id2`/`distance` columns for instant matching without downloads.
 * **14 new aliases**: `nsc`, `des`, `decals`→tractor, `decals_objects`→object
   table, `smash`, `unwise`, `allwise_dl`, `nsc_x_gaia`, `des_x_gaia`,
-  `decals_x_gaia`, `allwise_x_gaia`, and qualifiers.
-* **2 Data Lab source resolution tests** (`tests/test_crossmatch.py`): verify
-  aliases resolve to TAP-backed `CatalogueSource` with correct table names,
-  archive, and column metadata. Tractor vs object table routing verified.
+  `decals_x_gaia`, `allwise_x_gaia`, and qualifiers.* **2 Data Lab source resolution tests** (`tests/test_crossmatch.py`): verify aliases resolve to TAP-backed
+`CatalogueSource` with correct table names, archive, and column
+metadata.  Tractor vs object-table routing verified; the specific test
+names are pinned by the bidirectional static-scan guards in
+`tests/test_ci_smoke.py`: `test_resolve_source_datalab_alias`,
+`test_resolve_source_datalab_aliases_point_to_tractor_not_object`.
 * **28 aliases total**, **19 configured catalogues**.
 
 ### Changed — Documentation
@@ -132,6 +146,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * 92 non-slow tests pass; 9 slow (real-catalogue) tests pass; 16 HATS tests;
   2 Data Lab tests. Zero regressions across Gaia DR3, AllWISE, USNO-B1.0.
 * No breaking changes — all existing APIs unchanged.
+
+### Added — Likelihood Ratio Matcher (`matcher="lr"`)
+
+* **Sutherland & Saunders (1992) counterpart identification**: new
+  `_likelihood_ratio_scoring()` estimates the true-counterpart magnitude
+  distribution q(m) by background subtraction, computes Rayleigh positional
+  PDF f(r) from combined per-row errors, and produces `lr` and `reliability`
+  columns in [0,1]. Requires `lr_magnitude_column`; accepts `lr_q` prior.
+* **CLI**: `--matcher lr`, `--lr-magnitude-column`, `--lr-q` flags.
+
+### Added — ML & XGBoost Matchers (`matcher="ml"`, `matcher="xgb"`)
+
+* **Random Forest classifier** (`matcher="ml"`): `_ml_rf_score()` engineers
+  per-candidate features (separation/error ratio, colour differences, local
+  density) and scores with a `RandomForestClassifier` trained on-the-fly.
+  Falls back to weighted heuristic when scikit-learn unavailable.
+  Outputs `ml_score` in [0,1]. Requires `ml_color_columns` (CLI:
+  `--ml-color-cols`).
+* **XGBoost classifier** (`matcher="xgb"`): `_xgb_score()` uses the same
+  feature engineering with a gradient-boosted tree model (XGBoost → LightGBM
+  → sklearn GradientBoosting → weighted heuristic fallback chain).
+  Outputs `xgb_score` in [0,1]. Reuses `ml_color_columns` from ML matcher.
+* **Shared feature engineering**: `_engineer_ml_features_and_labels()` helper
+  extracts sigma computation, colour differences, local density, pseudo-label
+  generation (nearest-neighbour = positive), and optional synthetic negatives
+  for both matchers — eliminates ~150 lines of duplication.
+* **Shared best-per-primary selection**: `_pick_best_per_primary()` helper
+  (argmax over score groups) used by ML, XGB, AUF, and macauff matchers.
+* **Model persistence**: `--ml-model-path` and `--xgb-model-path` CLI flags
+  (and `ml_model_path` / `xgb_model_path` MatchSpec fields) save/load
+  trained models in joblib format for reuse across runs.
+* **Synthetic negatives**: both ML and XGB matchers now append random
+  far-apart pairings (>10× search radius) as negative training examples
+  for improved classifier discriminability.
+
+### Added — AUF Matcher (`matcher="auf"`)
+
+* **Astrometric Uncertainty Function** (Wilson & Naylor 2017): `_auf_score()`
+  builds an empirical separation PDF from observed candidate pairs, subtracts
+  the expected background (n_bg × 2πr·dr annulus area), and computes
+  `P(r) = f_AUF/(f_AUF + n_bg)`. Captures non-Gaussian error wings common in
+  ground-based survey data. Outputs `auf_prob` in [0,1].
+* **CLI**: `--matcher auf`.
+
+### Added — macauff Matcher (`matcher="macauff"`)
+
+* **AUF + flux likelihood ratios**: `_macauff_score()` combines the empirical
+  AUF positional probability with per-band magnitude-difference likelihood
+  ratios (Gaussian match model with photometric errors, histogram-based
+  background model). Outputs `macauff_prob` in [0,1].
+* **CLI**: `--matcher macauff`, `--macauff-flux-cols` flags.
+
+### Added — PM Drift Prior (`pm_prior=True`)
+
+* **Wilson (2023) probabilistic PM drift model**: `_apply_pm_drift_prior()`
+  inflates positional error floors for sources lacking measured proper motions
+  based on Galactic latitude: `σ_μ(b) = 3 + 7·exp(−|b|/20°)` mas/yr,
+  `σ_drift = σ_μ × |Δt| / 1000` arcsec, added in quadrature to
+  `default_pos_error_arcsec`. Works with any sky-match engine + matcher.
+* **Magnitude refinement** (`pm_prior_magnitude_column`): optionally scales
+  `σ_μ` by `10^{−0.2(m−15)}` (clipped to [0.3, 3.0]) as a distance proxy —
+  brighter stars are statistically closer and get larger PM dispersion.
+* **CLI**: `--pm-prior` flag (requires `--target-epoch`), `--pm-prior-mag-col`
+  flag for optional magnitude refinement.
+* **`_galactic_latitude()`** helper: converts equatorial RA/Dec to Galactic
+  latitude for the drift model.
+* 5 PM drift prior baseline tests: skyerr inflation, no-epoch skip,
+  large-baseline, magnitude scaling, missing magnitude column.
+
+### Added — Per-Row PM Drift Mode (when `pm_prior=True`)
+
+Builds on the PM Drift Prior entry above.  Per-row mode triggers when
+the catalogue has per-row `ra_error` / `dec_error` columns — the
+common case for modern catalogues such as Gaia.
+
+* **Per-row drift column**: `_apply_pm_drift_prior()` appends a per-row
+  `_pm_drift_arcsec` column to each side's `DataFrame` (drift computed
+  per-row from Galactic latitude and `|Δt|`), and `_pos_sigma_arcsec`
+  (skyerr) and `_pos_covariance` (skyellipse) add it in quadrature to
+  that row's per-axis astrometric error.  Each row's sigma carries the
+  inflation independently — a row with `mag=10` (with
+  `pm_prior_magnitude_column`) gets a wider per-row sigma than a row
+  with `mag=20` at the same epoch.  Note that skyerr's `chord_max` is
+  derived from `np.nanmax(lsig) + np.nanmax(rsig)`, so within a
+  single query the row with the largest per-row sigma governs the
+  chord radius.
+* **Source-level and drift-only fallbacks**: when per-row error
+  columns are absent, `default_pos_error_arcsec` is still used as a
+  floor (with drift added in quadrature), preserving the prior
+  behaviour.  When neither per-row errors nor a floor are configured, the per-row
+  drift becomes the sole positional uncertainty — `_pos_sigma_arcsec`
+  returns `drift`, `_pos_covariance` returns `drift²` — so catalogues
+  with only a `pm_prior` and an epoch column can now be matched
+  without a separate positional error source.
+* **Asymmetry preserved**: sides whose `epoch` equals `target_epoch`
+  (Δt < 0.01 yr) silently skip drift inflation — typical when
+  crossmatching an old survey against a modern reference catalogue at
+  its reference epoch.  Two-old-survey case (e.g., USNO-B vs 2MASS
+  at the Gaia DR3 reference epoch — both sides carry `epoch` gaps)
+  lets each side contribute its own per-row drift to the joint
+  skyerr `chord_max`; per-side budgets and the joint budget are
+  independently testable at separations straddling the per-side chord
+  boundaries.
+* **Internals**: `_PM_DRIFT_COLUMN = "_pm_drift_arcsec"` module
+  constant; `_build_result` strips the column from `matched`,
+  `left`, and `right` output paths so it never leaks into the
+  result DataFrame.  CLI unchanged (`--pm-prior`); per-row mode is
+  automatic when per-row error columns are present.
+* **3 new tests** (additive to the 5 baseline):
+  `test_pm_prior_per_row_drift_added_to_astrometric_errors` —
+  per-row drift added in quadrature to per-row astrometric errors
+  with a 1.6" sep quadrature-vs-linear-add regression;
+  `test_pm_prior_per_row_gaia_realistic_error_budgets` — Gaia-style
+  per-row budgets at the Galactic plane with magnitude scaling,
+  joint `chord_max`-vs-single-call isolation, and a 1.6" sep
+  quadrature regression; `test_pm_prior_both_sides_drift_inflation`
+  — two-old-survey case verifying both sides contribute drift
+  independently and quadratically.
+
+### Added — Comprehensive E2E Test
+
+* `test_all_matchers_e2e_on_shared_catalogues`: runs all 8 matchers (sky,
+  skyerr, skyellipse, lr, ml, xgb, auf, macauff) against shared catalogues,
+  verifies output shapes, score columns, and `find="all"` ≥ `find="best"`
+  row counts. 174 non-slow tests pass.
+
+### Changed — Documentation
+
+* `CROSSMATCH_ALGORITHMS.md`: added AUF, XGBoost, and macauff as implemented
+  algorithms; updated ML section with model save/load and shared helpers;
+  removed AUF and XGB from Roadmap; added Design Notes section documenting
+  shared helpers; added PM Drift Prior (Wilson 2023) as algorithm #12 with
+  formulas, magnitude refinement, and RASTI 2,1 reference.
+* `API.md`: updated MatchSpec table with lr/ml/xgb/auf/macauff fields;
+  added advanced match features subsections for LR, ML/XGB, AUF, and macauff
+  matchers with Python examples; added CLI examples for all new matchers;
+  added PM drift prior subsection (formulas, code example, reference) and
+  `pm_prior`/`pm_prior_magnitude_column` MatchSpec fields.
 
 ---
 

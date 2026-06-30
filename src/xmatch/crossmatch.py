@@ -3,21 +3,44 @@
 Resolves inputs into :class:`~xmatch.sources.CatalogueSource` objects, selects a
 strategy from the input types, executes it on the appropriate backend, and
 returns the result as a polars frame (eager by default, lazy on request).
+
+Top-level operations:
+
+* :meth:`CrossMatch.crossmatch` — classic two-catalogue match.
+* :meth:`CrossMatch.crossmatch_multi` — N-catalogue pairwise intersection.
+* :meth:`CrossMatch.union_match` — build a master union catalogue via sequential
+  full outer joins across all catalogues.
+* :meth:`CrossMatch.nway_match` — Bayesian N-way simultaneous crossmatching.
+* :meth:`CrossMatch.fof_match` — Friends-of-Friends transitive closure across
+  all catalogues, merging multi-survey detections into object bundles.
+* :meth:`CrossMatch.crossmatch_request` — typed entry point for new code.
 """
 
 import difflib
 import logging
 import multiprocessing
+from dataclasses import replace
+from itertools import product as cartesian_product
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+import numpy as np
 import polars as pl
 import yaml
 
 from . import auth, io_utils
 from .astro_utils import coord_arrays, find_coord_columns, sky_extent, sky_extent_from_frame
+from .bayes import compute_nway_p_match
 from .exceptions import ConfigError, CrossMatchError, InputError
-from .matchers import _RIGHT_SUFFIX, id_join, sky_match
+from .matchers import (
+    PMATCH_COLUMN,
+    _RIGHT_SUFFIX,
+    _arcsec_to_chord,
+    _pos_sigma_arcsec,
+    _radec_to_xyz,
+    id_join,
+    sky_match,
+)
 from .request import MatchRequest
 from .sources import CatalogueSource
 
@@ -274,7 +297,8 @@ class CrossMatch:
             lazy=lazy,
             **params,
         )
-        return self.crossmatch_request(req)
+        hats_threshold = params.pop("hats_threshold", 100_000)
+        return self.crossmatch_request(req, hats_threshold=hats_threshold)
 
     def crossmatch_multi(
         self,
@@ -298,21 +322,131 @@ class CrossMatch:
         first two; remote catalogues in positions 3+ require ``ra``, ``dec``,
         and ``radius_deg`` in ``params`` so they can be downloaded.
         """
-        if len(catalogues) < 2:
-            raise CrossMatchError("At least two catalogues are required for crossmatching.")
+        return self._multi_match_impl(catalogues, output_file, lazy, **params)
 
-        # Build a shared request for every pairwise step.
-        req = MatchRequest.from_legacy(
-            catalogues[0],
-            catalogues[1],
-            output_file=None,
-            lazy=True,
-            **params,
+    def union_match(
+        self,
+        catalogues: List[FrameInput],
+        output_file: Optional[Union[str, Path]] = None,
+        *,
+        lazy: bool = False,
+        **params: Any,
+    ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
+        """Build a master union catalogue via sequential full outer joins.
+
+        Every catalogue's measurements are preserved — unmatched sources from
+        any catalogue appear in the output with nulls for the other catalogues'
+        columns. This is the core primitive for building a "gigantic union
+        catalogue of all measurements of all sources on the sky."
+
+        Unlike :meth:`crossmatch_multi` (which defaults to inner joins and
+        progressively filters), this method uses ``join_type="1or2"`` (full
+        outer) at every step, so rows from *every* catalogue survive even if
+        they have no positional counterpart in any other catalogue.
+
+        A ``_src_cats`` column is added identifying which catalogue(s)
+        contributed to each row (a bitmask string like ``"1+2"``, ``"1+2+3"``,
+        ``"3"`` for unmatched).  A ``sep_arcsec`` column holds the latest
+        pairwise separation (or null for unmatched rows).
+
+        Parameters
+        ----------
+        catalogues : list of FrameInput
+            2+ catalogues (paths, names, or in-memory frames).
+        output_file : str or Path, optional
+            Stream final result to file.
+        lazy : bool
+            Return a ``LazyFrame`` instead of collecting.
+        **params
+            Same as :meth:`crossmatch` (``radius_arcsec``, ``matcher``,
+            ``engine``, ``ra``/``dec``/``radius_deg``, …).
+
+        Returns
+        -------
+        pl.DataFrame or pl.LazyFrame or None (when output_file is set)
+            Master union catalogue with columns from all inputs plus
+            ``_src_cats`` and ``sep_arcsec``.
+
+        Examples
+        --------
+        >>> cm = CrossMatch()
+        >>> master = cm.union_match(
+        ...     ["gaia", "allwise_dl", "twomass.csv"],
+        ...     ra=180, dec=-30, radius_deg=0.01, radius_arcsec=1.5,
+        ... )
+        >>> # Every row has: cat-1 cols (Gaia), cat-2 cols (_2 suffix),
+        >>> # cat-3 cols (_3 suffix), _src_cats, sep_arcsec
+        >>> print(master["_src_cats"].value_counts())
+        """
+        # Force full outer join at every pairwise step.
+        union_params = dict(params)
+        union_params.setdefault("join_type", "1or2")
+        return self._multi_match_impl(
+            catalogues, output_file, lazy, union_match=True, **union_params,
         )
 
-        # ------------------------------------------------------------------ #
-        # Resolve ALL sources up front.
-        # ------------------------------------------------------------------ #
+    def fof_match(
+        self,
+        catalogues: List[FrameInput],
+        output_file: Optional[Union[str, Path]] = None,
+        *,
+        radius_arcsec: float = 1.0,
+        hats_threshold: int = 100_000,
+        **params: Any,
+    ) -> Optional[pl.DataFrame]:
+        """Friends-of-Friends transitive closure across all catalogues.
+
+        Matches the first catalogue against every other catalogue pairwise,
+        then applies transitive closure: if source A matches B and B matches
+        C (in different catalogues), {A, B, C} becomes a single **bundle** —
+        one row in the output representing one physical object.
+
+        Unlike :meth:`crossmatch_multi` (which chains pairwise inner joins
+        and progressively filters) and :meth:`union_match` (which builds a
+        giant table via outer joins), FoF builds a graph from all pairwise
+        matches and collapses each connected component into one merged row.
+
+        Parameters
+        ----------
+        catalogues : list of FrameInput
+            2+ catalogues (paths, names, or in-memory frames).  Catalogue 1
+            acts as the spatial hub — all pairwise matches go through it.
+        output_file : str or Path, optional
+            Write result to file.
+        radius_arcsec : float
+            Search radius for pairwise spatial matching.
+        hats_threshold : int
+            Max rows per HEALPix pixel for .hats output.
+        **params
+            Passed through to :meth:`resolve_source` and per-pair matching
+            (``engine``, ``ra``, ``dec``, ``radius_deg``, …).
+
+        Returns
+        -------
+        pl.DataFrame or None
+            One row per connected component (bundle).  Columns:
+
+            * ``bundle_id`` — unique integer per bundle.
+            * ``n_cats`` — how many catalogues contributed to this bundle.
+            * ``_src_cats`` — e.g. ``"1+2+3"``.
+            * Data columns from the primary catalogue are preserved where
+              possible; columns from other catalogues are averaged (numerics)
+              or first-value (strings).
+        """
+        if len(catalogues) < 2:
+            raise CrossMatchError(
+                "fof_match requires at least 2 catalogues, got %d" % len(catalogues),
+            )
+
+        # Resolve all sources (reuse shared multi-match plumbing).
+        req = MatchRequest.from_legacy(
+            catalogues[0], catalogues[1],
+            output_file=None, lazy=True,
+            radius_arcsec=radius_arcsec,
+            find="all",  # FoF needs ALL candidates
+            **{k: v for k, v in params.items() if k != "find"},
+        )
+
         sources: List[CatalogueSource] = []
         sources.append(self.resolve_source(req.cat1, req.side1.as_dict()))
         sources.append(self.resolve_source(req.cat2, req.side2.as_dict()))
@@ -320,83 +454,283 @@ class CrossMatch:
             sources.append(self.resolve_source(cat_input, {}))
 
         first_src = sources[0]
+        n_total = len(sources)
 
-        # Ensure first source is local so we can use its frame for region
-        # inference and as the spatial reference throughout the chain.
+        # Ensure first source is local.
         if not first_src.is_local and first_src.access_method in ("tap", "cds_xmatch"):
             downloaded = self._download_remote(first_src, req, prefix="1")
             first_src = first_src.with_frame(downloaded.lazy())
             sources[0] = first_src
 
-        # Download remote (tap/cds_xmatch) sources beyond the first two when
-        # possible.  HATS sources at any position are handled by _dispatch /
-        # hats_crossmatch below — skip them here.
-        #
-        # NOTE: when *first_src* is a HATS catalogue, region inference via
-        # ``first_src.lazy()`` below is impossible for TAP/CDS downloads at
-        # positions 3+.  Work around this by passing explicit ``ra``, ``dec``,
-        # and ``radius_deg`` in the params.  The clearer error surfaces from
-        # ``_download_remote`` rather than a bare ``ValueError``.
+        # Download remaining remote sources.
         for i, src in enumerate(sources):
             if src.is_local or src.access_method == "hats":
                 continue
             if i <= 1:
-                continue  # handled by _dispatch below
-            # For catalogues 3+, download the region inferred from the first
-            # source (or explicit ra/dec/radius_deg from params).
+                continue
             downloaded = self._download_remote(
-                src,
-                req,
-                prefix=str(i + 1),
-                region_from=first_src.lazy(),
-                local=first_src,
+                src, req, prefix=str(i + 1),
+                region_from=first_src.lazy(), local=first_src,
             )
             sources[i] = src.with_frame(downloaded.lazy())
 
-        # ------------------------------------------------------------------ #
-        # First pair: use _dispatch so local/remote/hats all work.
-        # ------------------------------------------------------------------ #
-        accum_lf = self._dispatch(sources[0], sources[1], req)
+        frames = [s.lazy().collect() for s in sources]
+
+        # --- Pairwise matches: cat1 × each other catalogue -----------------
+        # Build a union-find structure across all rows.
+        # Node IDs: [0..N0) for cat0, [N0..N0+N1) for cat1, etc.
+        from scipy.spatial import cKDTree
+
+        offsets = [0]
+        for f in frames:
+            offsets.append(offsets[-1] + f.height)
+        total_nodes = offsets[-1]
+
+        # Union-find parent array.
+        parent = np.arange(total_nodes, dtype=np.int64)
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+
+        # Match cat1 (index 0) against each other catalogue.
+        p_ra_col = sources[0].ra_column or "ra"
+        p_dec_col = sources[0].dec_column or "dec"
+        p_ra = frames[0][p_ra_col].to_numpy().astype(float)
+        p_dec = frames[0][p_dec_col].to_numpy().astype(float)
+        p_xyz = _radec_to_xyz(p_ra, p_dec)
+        chord_max = _arcsec_to_chord(radius_arcsec)
+
+        n_edges = 0
+        for j in range(1, n_total):
+            s_ra = frames[j][sources[j].ra_column or "ra"].to_numpy().astype(float)
+            s_dec = frames[j][sources[j].dec_column or "dec"].to_numpy().astype(float)
+            s_xyz = _radec_to_xyz(s_ra, s_dec)
+            tree = cKDTree(s_xyz)
+            idx_lists = tree.query_ball_point(p_xyz, r=chord_max, workers=-1)
+            offset_j = offsets[j]
+            for pi, neighbors in enumerate(idx_lists):
+                if not neighbors:
+                    continue
+                node_p = offsets[0] + pi
+                for nb in neighbors:
+                    union(node_p, offset_j + int(nb))
+                    n_edges += 1
+
+        logger.info(
+            "FoF: %d edges across %d catalogues (%d total nodes).",
+            n_edges, n_total, total_nodes,
+        )
+
+        if n_edges == 0:
+            # No cross-catalogue matches: every primary source is its own bundle.
+            primary_cols0 = list(frames[0].columns)
+            rows0: list = []
+            for pi in range(frames[0].height):
+                row0: dict = {"bundle_id": pi, "n_cats": 1, "_src_cats": "1"}
+                for c in primary_cols0:
+                    row0[c] = frames[0][c][pi]
+                rows0.append(row0)
+            result0 = pl.DataFrame(rows0)
+            if output_file:
+                io_utils.write_frame(
+                    result0, output_file,
+                    ra_column=p_ra_col, dec_column=p_dec_col,
+                    hats_threshold=hats_threshold,
+                )
+                return None
+            return result0
+
+        # --- Find connected components -------------------------------------
+        component = np.full(total_nodes, -1, dtype=np.int64)
+        comp_id = 0
+        for node in range(total_nodes):
+            root = find(node)
+            if component[root] < 0:
+                component[root] = comp_id
+                comp_id += 1
+        # Propagate component IDs to all nodes.
+        for node in range(total_nodes):
+            component[node] = component[find(node)]
+
+        n_bundles = comp_id
+        logger.info("FoF: %d connected components (bundles).", n_bundles)
+
+        # --- Build output: one row per bundle ------------------------------
+        # For each bundle, collect contributing rows from each catalogue.
+        # Output: bundle_id, n_cats, _src_cats, and merged data columns.
+
+        # Gather primary catalogue columns as the output schema backbone.
+        primary_cols = list(frames[0].columns)
+        # Pre-build per-catalogue column lookup: cat_idx -> {orig_name: output_name}
+        all_cols_seen = set(primary_cols)
+        per_cat_cols: Dict[int, Dict[str, str]] = {}
+        for j in range(1, n_total):
+            cat_map: Dict[str, str] = {}
+            for c in frames[j].columns:
+                if c in all_cols_seen:
+                    suffixed = f"{c}_{j + 1}"
+                else:
+                    suffixed = c
+                cat_map[c] = suffixed
+                all_cols_seen.add(suffixed)
+            per_cat_cols[j] = cat_map
+
+        rows: list = []
+        for bid in range(n_bundles):
+            mask = component == bid
+            cat_members: List[str] = []
+            total_contributing = 0
+
+            # Build merged row values.
+            row: dict = {"bundle_id": bid, "n_cats": 0, "_src_cats": ""}
+
+            # --- Primary catalogue: skip components with no primary member ---
+            primary_mask = mask[offsets[0]:offsets[1]]
+            primary_indices = np.where(primary_mask)[0]
+            if len(primary_indices) == 0:
+                # Component has no primary-catalogue node — skip it.
+                # (Can happen when a secondary source is isolated — no edges
+                # to any primary source.)
+                continue
+            cat_members.append("1")
+            total_contributing += 1
+            # Take the first matched primary row.
+            pi = int(primary_indices[0])
+            for c in primary_cols:
+                row[c] = frames[0][c][pi]
+
+            # --- Secondary catalogues: aggregate contributions ---------------
+            for j in range(1, n_total):
+                j_mask = mask[offsets[j]:offsets[j + 1]]
+                j_indices = np.where(j_mask)[0]
+                if len(j_indices) == 0:
+                    continue
+                cat_members.append(str(j + 1))
+                total_contributing += 1
+                cat_map = per_cat_cols[j]
+                for orig_c, suf_name in cat_map.items():
+                    vals = frames[j][orig_c].to_numpy()[j_indices]
+                    if vals.dtype.kind in ("f", "i", "u"):
+                        row[suf_name] = float(np.nanmean(vals.astype(float)))
+                    else:
+                        row[suf_name] = vals[0]
+
+            row["n_cats"] = total_contributing
+            row["_src_cats"] = "+".join(cat_members)
+            rows.append(row)
+
+        result = pl.DataFrame(rows)
+
+        if output_file:
+            io_utils.write_frame(
+                result,
+                output_file,
+                ra_column=p_ra_col,
+                dec_column=p_dec_col,
+                hats_threshold=hats_threshold,
+            )
+            return None
+        return result
+
+    # ------------------------------------------------------------------ #
+    # Shared multi-catalogue implementation (crossmatch_multi + union_match).
+    # ------------------------------------------------------------------ #
+    def _multi_match_impl(
+        self,
+        catalogues: List[FrameInput],
+        output_file: Optional[Union[str, Path]],
+        lazy: bool,
+        *,
+        union_match: bool = False,
+        **params: Any,
+    ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
+        if len(catalogues) < 2:
+            raise CrossMatchError("At least two catalogues are required for crossmatching.")
+
+        req = MatchRequest.from_legacy(
+            catalogues[0], catalogues[1],
+            output_file=None, lazy=True, **params,
+        )
+
+        # Resolve ALL sources up front.
+        sources: List[CatalogueSource] = []
+        sources.append(self.resolve_source(req.cat1, req.side1.as_dict()))
+        sources.append(self.resolve_source(req.cat2, req.side2.as_dict()))
+        for cat_input in catalogues[2:]:
+            sources.append(self.resolve_source(cat_input, {}))
+
+        first_src = sources[0]
+        n_total = len(sources)
+
+        # Ensure first source is local.
+        if not first_src.is_local and first_src.access_method in ("tap", "cds_xmatch"):
+            downloaded = self._download_remote(first_src, req, prefix="1")
+            first_src = first_src.with_frame(downloaded.lazy())
+            sources[0] = first_src
+
+        hats_threshold = params.pop("hats_threshold", 100_000)
+
+        # Download remote sources beyond the first two.
+        for i, src in enumerate(sources):
+            if src.is_local or src.access_method == "hats":
+                continue
+            if i <= 1:
+                continue
+            downloaded = self._download_remote(
+                src, req, prefix=str(i + 1),
+                region_from=first_src.lazy(), local=first_src,
+            )
+            sources[i] = src.with_frame(downloaded.lazy())
+
         first_ra = first_src.ra_column or "ra"
         first_dec = first_src.dec_column or "dec"
 
-        # ------------------------------------------------------------------ #
-        # Remaining catalogues: local match against the accumulator.
-        # Each successive right side gets its own suffix: _2, _3, _4, …
-        # An eager checkpoint prevents O(N²) query-graph re-evaluation.
-        #
-        # For union/outer join types, unmatched rows from earlier catalogues
-        # may have null spatial coordinates.  We inject _accum_ra / _accum_dec
-        # columns that coalesce the best-known position from all prior
-        # catalogues, ensuring every row has a spatial foot-print for the next
-        # pairwise match.
-        # ------------------------------------------------------------------ #
-        # Build a proxy CatalogueSource pointing at the coalesced columns so
-        # _local_match uses them as the left-side spatial reference.
-        from dataclasses import replace
+        # First pair.
+        accum_lf = self._dispatch(sources[0], sources[1], req)
+        if union_match:
+            # Per-row detection: which catalogue(s) contributed?
+            # Check if the right side's spatial columns are non-null.
+            r2_ra = sources[1].ra_column or "ra"
+            r2_dec = sources[1].dec_column or "dec"
+            # Determine the renamed right-side RA column in the result.
+            # If r2_ra collides with left columns, _build_result renames it to r2_ra_2.
+            left_cols = set(sources[0].columns()) if sources[0].is_local else set()
+            r2_ra_in_result = f"{r2_ra}_2" if r2_ra in left_cols else r2_ra
+            accum_lf = accum_lf.with_columns(
+                pl.when(
+                    pl.col(r2_ra_in_result).is_not_null()
+                    & pl.col(first_ra).is_not_null()
+                ).then(pl.lit("1+2"))
+                .when(pl.col(r2_ra_in_result).is_not_null())
+                .then(pl.lit("2"))
+                .otherwise(pl.lit("1"))
+                .alias("_src_cats")
+            )
 
-        for i in range(2, len(sources)):
+        # Remaining catalogues.
+        for i in range(2, n_total):
             right_src = sources[i]
-            suffix = f"_{i + 1}"  # catalogue 3 → _3, catalogue 4 → _4, …
+            suffix = f"_{i + 1}"
 
-            # --- coalesce spatial columns -----------------------------------
-            # After the first match (i=2), we already have ra/dec from cat-1
-            # and ra_2/dec_2 from cat-2.  Coalesce them so unmatched cat-2
-            # rows still have usable coordinates.
+            # Coalesce spatial columns for unmatched rows.
+            accum_cols = set(accum_lf.collect_schema().names())
             if i == 2:
                 ra_candidates = [first_ra, f"{first_ra}_2"]
                 dec_candidates = [first_dec, f"{first_dec}_2"]
             else:
-                # For cat-4+, coalesce the accumulated column with the
-                # previous match's right-side coordinates (suffix _{i}).
                 ra_candidates = ["_accum_ra", f"{first_ra}_{i}"]
                 dec_candidates = ["_accum_dec", f"{first_dec}_{i}"]
 
-            # Only include columns that actually exist in the frame.
-            accum_cols = set(accum_lf.collect_schema().names())
             ra_present = [c for c in ra_candidates if c in accum_cols]
             dec_present = [c for c in dec_candidates if c in accum_cols]
-
             if ra_present:
                 accum_lf = accum_lf.with_columns(
                     pl.coalesce([pl.col(c) for c in ra_present]).alias("_accum_ra")
@@ -406,53 +740,70 @@ class CrossMatch:
                     pl.coalesce([pl.col(c) for c in dec_present]).alias("_accum_dec")
                 )
 
-            # Create a lightweight proxy source pointing at coalesced columns.
-            accum_src = replace(
-                first_src,
-                ra_column="_accum_ra",
-                dec_column="_accum_dec",
-            )
+            accum_src = replace(first_src, ra_column="_accum_ra", dec_column="_accum_dec")
 
             if right_src.access_method == "hats":
-                # HATS at position 3+: route via hats_crossmatch with the
-                # accumulated frame as the local left side.
                 from . import hats_source
-
                 accum_lf = hats_source.hats_crossmatch(
                     accum_src, right_src, req.spec,
-                    local_lf1=accum_lf,
-                    right_suffix=suffix,
+                    local_lf1=accum_lf, right_suffix=suffix,
                 ).lazy()
             else:
                 right_lf = right_src.lazy()
                 accum_lf = (
                     self._local_match(
-                        accum_src,  # proxy source with coalesced RA/Dec
-                        right_src,
-                        accum_lf,
-                        right_lf,
-                        req,
-                        right_suffix=suffix,
+                        accum_src, right_src,
+                        accum_lf, right_lf, req, right_suffix=suffix,
                     )
                     .collect()
-                    .lazy()  # checkpoint: materialise before next iteration
+                    .lazy()
+                )
+
+            if union_match:
+                # Per-row detection: did accumulator row match the new catalogue?
+                # Use the suffixed column name since right-side columns are renamed.
+                rN_ra = right_src.ra_column or "ra"
+                rN_ra_in_result = f"{rN_ra}{suffix}"
+                cat_tag = f"+{i + 1}"
+                cat_only = str(i + 1)
+                accum_lf = accum_lf.with_columns(
+                    pl.when(
+                        pl.col(rN_ra_in_result).is_not_null()
+                        & pl.col("_src_cats").is_not_null()
+                    ).then(
+                        pl.col("_src_cats") + pl.lit(cat_tag)
+                    ).when(
+                        pl.col(rN_ra_in_result).is_not_null()
+                    ).then(
+                        pl.lit(cat_only)
+                    ).otherwise(
+                        pl.col("_src_cats")
+                    ).alias("_src_cats")
                 )
 
         if output_file:
-            io_utils.write_frame(accum_lf, output_file)
+            io_utils.write_frame(
+                accum_lf,
+                output_file,
+                ra_column=first_ra,
+                dec_column=first_dec,
+                hats_threshold=hats_threshold,
+            )
             return None
         return accum_lf if lazy else accum_lf.collect()
 
     def nway_match(
         self,
         catalogues: List[FrameInput],
+        output_file: Optional[Union[str, Path]] = None,
         *,
         radius_arcsec: float = 1.0,
         prior_columns: Optional[List[str]] = None,
         max_tuples_per_source: int = 10_000,
         chunk_size: int = 50_000,
+        hats_threshold: int = 100_000,
         **params: Any,
-    ) -> pl.DataFrame:
+    ) -> Optional[pl.DataFrame]:
         """Bayesian N-way multi-catalogue crossmatching (Budavári & Szalay 2008).
 
         Matches *catalogues* simultaneously, computing an N-way Bayes factor
@@ -467,174 +818,138 @@ class CrossMatch:
         ----------
         catalogues : list of FrameInput
             2+ catalogues (paths, names, or in-memory frames).
+        output_file : str or Path, optional
+            Write result to file (.parquet/.csv/.fits/.hats).  When ``None``
+            (default), returns the DataFrame.
         radius_arcsec : float
             Search radius (arcsec) for pairwise spatial pre-selection.
         prior_columns : list of str, optional
             Photometric columns for the photometric prior component.
         max_tuples_per_source : int
             Maximum Cartesian-product tuples per primary source before
-            truncating with a warning (default 10 000).  Set to 0 for
-            unlimited (use with caution in dense fields).
+            truncating with a warning (default 10 000).
         chunk_size : int
             Process tuples in batches of this size to bound memory.
-            p_match is computed per chunk and results are concatenated.
+        hats_threshold : int
+            Max rows per HEALPix pixel for .hats output (default 100 000).
         **params
-            Passed through to :meth:`resolve_source`.
+            Passed through to :meth:`resolve_source` (``ra``, ``dec``,
+            ``radius_deg`` for remote downloads).
 
         Returns
         -------
-        pl.DataFrame
+        pl.DataFrame or None
             One row per matched N-tuple, with columns from all catalogues
             (collisions get ``_2``, ``_3``, … suffixes) plus ``p_match``.
+            Returns ``None`` when ``output_file`` is set.
         """
-        from itertools import product as cartesian_product
-
-        import numpy as np
-
-        from . import matchers
-
         if len(catalogues) < 2:
             raise CrossMatchError(
                 "nway_match requires at least 2 catalogues, got %d" % len(catalogues)
             )
 
-        # Resolve all sources.
+        # Resolve all sources and ensure they are local (download if remote).
         sources: List[CatalogueSource] = []
-        for cat_input in catalogues:
-            sources.append(self.resolve_source(cat_input, {}))
-
-        # Ensure all sources are local.
-        for i, src in enumerate(sources):
+        for i, cat_input in enumerate(catalogues):
+            src = self.resolve_source(cat_input, {})
             if not src.is_local:
                 if src.access_method in ("tap", "cds_xmatch"):
                     req = MatchRequest.from_legacy(
-                        catalogues[0], catalogues[0],  # dummy
+                        catalogues[0], catalogues[0],  # dummy cat1/cat2
                         ra=params.get("ra"),
                         dec=params.get("dec"),
                         radius_deg=params.get("radius_deg"),
                         radius_arcsec=radius_arcsec,
                     )
                     downloaded = self._download_remote(src, req, prefix=str(i + 1))
-                    sources[i] = src.with_frame(downloaded.lazy())
+                    src = src.with_frame(downloaded.lazy())
                 else:
                     raise CrossMatchError(
                         f"Catalogue {i+1} ('{src.name}') is not local; "
                         f"nway_match requires local or downloadable catalogues."
                     )
+            sources.append(src)
 
         frames = [s.lazy().collect() for s in sources]
+        n_cats = len(sources)
 
-        # Primary (catalogue 1) matched against each other catalogue.
-        primary = frames[0]
+        # Collect pairwise spatial match indices (primary × each other cat).
         p_ra = sources[0].ra_column or "ra"
         p_dec = sources[0].dec_column or "dec"
-
-        # collect match indices: for each catalogue j (1-indexed), a list of
-        # (primary_idx, other_idx) pairs within radius_arcsec.
         all_pairs: list = []
-        for j in range(1, len(sources)):
-            spec = matchers.MatchSpec(radius_arcsec=radius_arcsec, find="all")
-            result = sky_match(
-                sources[0], sources[j],
-                frames[0].lazy(), frames[j].lazy(),
-                spec, engine="fast",
-            ).collect()
-            # Extract (primary_idx, other_idx) as numpy arrays.
-            if result.height == 0:
-                all_pairs.append((np.array([], int), np.array([], int)))
-                continue
-            # We need indices. The result frame has columns from both sides;
-            # we can match back by position. Use the fact that sky_match
-            # returns the result in predictable order.
-            # Simpler: re-run with return_indices pattern.
-            l_ra = frames[0][p_ra].to_numpy()
-            l_dec = frames[0][p_dec].to_numpy()
-            r_ra = frames[j][sources[j].ra_column or "ra"].to_numpy()
-            r_dec = frames[j][sources[j].dec_column or "dec"].to_numpy()
 
-            from .matchers import _arcsec_to_chord, _radec_to_xyz
+        for j in range(1, n_cats):
             from scipy.spatial import cKDTree
 
-            l_xyz = _radec_to_xyz(l_ra, l_dec)
-            r_xyz = _radec_to_xyz(r_ra, r_dec)
+            l_ra_np = frames[0][p_ra].to_numpy()
+            l_dec_np = frames[0][p_dec].to_numpy()
+            r_ra_np = frames[j][sources[j].ra_column or "ra"].to_numpy()
+            r_dec_np = frames[j][sources[j].dec_column or "dec"].to_numpy()
+
+            l_xyz = _radec_to_xyz(l_ra_np, l_dec_np)
+            r_xyz = _radec_to_xyz(r_ra_np, r_dec_np)
             chord_max = _arcsec_to_chord(radius_arcsec)
             tree = cKDTree(r_xyz)
             idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
+
             p_idx_parts, o_idx_parts = [], []
             for pi, neighbors in enumerate(idx_lists):
                 if neighbors:
                     p_idx_parts.append(np.full(len(neighbors), pi, dtype=int))
                     o_idx_parts.append(np.asarray(neighbors, dtype=int))
             if p_idx_parts:
-                all_pairs.append((np.concatenate(p_idx_parts), np.concatenate(o_idx_parts)))
+                all_pairs.append(
+                    (np.concatenate(p_idx_parts), np.concatenate(o_idx_parts))
+                )
             else:
                 all_pairs.append((np.array([], int), np.array([], int)))
 
         # If any non-primary catalogue has no matches, return empty.
         if any(len(p[0]) == 0 for p in all_pairs):
-            result_cols = list(frames[0].columns)
-            for j in range(1, len(sources)):
-                suffix = f"_{j + 1}"
-                for c in frames[j].columns:
-                    if c in result_cols:
-                        result_cols.append(c + suffix)
-                    else:
-                        result_cols.append(c)
-            result_cols.append("p_match")
-            return pl.DataFrame(schema={c: pl.Float64 for c in result_cols}).clear()
-
-        # Build cross-product tuples: for each primary source, cartesian
-        # product of matches across catalogues 2..N, capped and chunked.
-        n_primary = frames[0].height
-        n_cats = len(sources)
-        cat_names = [sources[i].ra_column or "ra" for i in range(n_cats)]
-        cat_dec_names = [sources[i].dec_column or "dec" for i in range(n_cats)]
+            empty = _build_empty_nway_result(frames, n_cats)
+            if output_file:
+                io_utils.write_frame(
+                    empty,
+                    output_file,
+                    ra_column=p_ra,
+                    dec_column=p_dec,
+                    hats_threshold=hats_threshold,
+                )
+                return None
+            return empty
 
         # Pre-compute sigma arrays for all catalogues.
+        cat_ra_names = [sources[i].ra_column or "ra" for i in range(n_cats)]
+        cat_dec_names = [sources[i].dec_column or "dec" for i in range(n_cats)]
         sigmas_all = []
         for i, src in enumerate(sources):
-            sigma = matchers._pos_sigma_arcsec(frames[i], src)
+            sigma = _pos_sigma_arcsec(frames[i], src)
             if sigma is None:
                 sigma = np.full(frames[i].height, 0.5, dtype=float)
             sigmas_all.append(sigma)
 
-        from .bayes import compute_nway_p_match
-
-        # Result frame builder helper.
-        def _build_empty_result():
-            cols = list(frames[0].columns)
-            for j in range(1, n_cats):
-                suffix = f"_{j + 1}"
-                for c in frames[j].columns:
-                    cols.append(c + suffix if c in cols else c)
-            cols.append("p_match")
-            return pl.DataFrame(schema={c: pl.Float64 for c in cols}).clear()
-
-        # --- chunked tuple iterator -----------------------------------------
+        # Chunked cartesian-product tuple iteration.
+        n_primary = frames[0].height
         result_chunks: list = []
-        chunk_tuples: list = []  # accumulator for current chunk
+        chunk_tuples: list = []
         total_tuples = 0
         truncated_sources = 0
 
         for pi in range(n_primary):
-            # Gather matches for this primary from each catalogue.
             matches_per_cat = []
             for cat_j in range(len(all_pairs)):
                 p_idx, o_idx = all_pairs[cat_j]
                 mask = p_idx == pi
                 matches_per_cat.append(o_idx[mask])
-
             if any(len(m) == 0 for m in matches_per_cat):
                 continue
 
-            # Product size before capping.
             prod_size = 1
             for m in matches_per_cat:
                 prod_size *= len(m)
             if prod_size == 0:
                 continue
 
-            # Cap per-source tuples.
             if max_tuples_per_source and prod_size > max_tuples_per_source:
                 truncated_sources += 1
                 if truncated_sources == 1:
@@ -643,8 +958,6 @@ class CrossMatch:
                         "truncating (further warnings suppressed).",
                         prod_size, max_tuples_per_source,
                     )
-                # Truncate the largest match list proportionally.
-                # Simple approach: cap total by iterating with a count.
                 count = 0
                 for combo in cartesian_product(*matches_per_cat):
                     if count >= max_tuples_per_source:
@@ -653,41 +966,45 @@ class CrossMatch:
                     chunk_tuples.append(indices)
                     total_tuples += 1
                     count += 1
-                    # Flush chunk if full.
                     if len(chunk_tuples) >= chunk_size:
-                        result_chunks.append(_process_chunk(
-                            chunk_tuples, n_cats, frames, sources,
-                            cat_names, cat_dec_names, sigmas_all,
+                        result_chunks.append(_process_nway_chunk(
+                            chunk_tuples, n_cats, frames,
+                            cat_ra_names, cat_dec_names, sigmas_all,
                             radius_arcsec, prior_columns,
-                            matchers, compute_nway_p_match,
                         ))
                         chunk_tuples = []
             else:
-                # Unbounded case: iterate cartesian product.
                 for combo in cartesian_product(*matches_per_cat):
                     indices = [pi] + list(combo)
                     chunk_tuples.append(indices)
                     total_tuples += 1
                     if len(chunk_tuples) >= chunk_size:
-                        result_chunks.append(_process_chunk(
-                            chunk_tuples, n_cats, frames, sources,
-                            cat_names, cat_dec_names, sigmas_all,
+                        result_chunks.append(_process_nway_chunk(
+                            chunk_tuples, n_cats, frames,
+                            cat_ra_names, cat_dec_names, sigmas_all,
                             radius_arcsec, prior_columns,
-                            matchers, compute_nway_p_match,
                         ))
                         chunk_tuples = []
 
-        # Flush final chunk.
         if chunk_tuples:
-            result_chunks.append(_process_chunk(
-                chunk_tuples, n_cats, frames, sources,
-                cat_names, cat_dec_names, sigmas_all,
+            result_chunks.append(_process_nway_chunk(
+                chunk_tuples, n_cats, frames,
+                cat_ra_names, cat_dec_names, sigmas_all,
                 radius_arcsec, prior_columns,
-                matchers, compute_nway_p_match,
             ))
 
         if not result_chunks:
-            return _build_empty_result()
+            empty = _build_empty_nway_result(frames, n_cats)
+            if output_file:
+                io_utils.write_frame(
+                    empty,
+                    output_file,
+                    ra_column=p_ra,
+                    dec_column=p_dec,
+                    hats_threshold=hats_threshold,
+                )
+                return None
+            return empty
 
         if truncated_sources:
             logger.info(
@@ -699,11 +1016,23 @@ class CrossMatch:
             "nway_match: %d tuples from %d catalogues across %d primary sources.",
             total_tuples, n_cats, n_primary,
         )
-        return pl.concat(result_chunks, how="vertical")
+        result = pl.concat(result_chunks, how="vertical")
+        if output_file:
+            io_utils.write_frame(
+                result,
+                output_file,
+                ra_column=p_ra,
+                dec_column=p_dec,
+                hats_threshold=hats_threshold,
+            )
+            return None
+        return result
 
     def crossmatch_request(
         self,
         req: MatchRequest,
+        *,
+        hats_threshold: int = 100_000,
     ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
         """Run a crossmatch from a typed :class:`~xmatch.request.MatchRequest`.
 
@@ -716,7 +1045,13 @@ class CrossMatch:
         result_lf = self._dispatch(src1, src2, req)
 
         if req.output_file:
-            io_utils.write_frame(result_lf, req.output_file)
+            io_utils.write_frame(
+                result_lf,
+                req.output_file,
+                ra_column=src1.ra_column or "ra",
+                dec_column=src1.dec_column or "dec",
+                hats_threshold=hats_threshold,
+            )
             return None
         return result_lf if req.lazy else result_lf.collect()
 
@@ -882,26 +1217,30 @@ class CrossMatch:
 
 
 # --------------------------------------------------------------------------- #
-# nway_match chunk processing helper (module-level for pickling safety)
+# nway_match helpers (module-level for pickling safety)
 # --------------------------------------------------------------------------- #
-def _process_chunk(
+def _build_empty_nway_result(frames: list, n_cats: int) -> "pl.DataFrame":
+    """Return an empty result frame with the correct schema for nway_match."""
+    cols = list(frames[0].columns)
+    for j in range(1, n_cats):
+        suffix = f"_{j + 1}"
+        for c in frames[j].columns:
+            cols.append(c + suffix if c in cols else c)
+    cols.append("p_match")
+    return pl.DataFrame(schema={c: pl.Float64 for c in cols}).clear()
+
+
+def _process_nway_chunk(
     chunk_tuples: list,
     n_cats: int,
     frames: list,
-    sources: list,
-    cat_names: list,
+    cat_ra_names: list,
     cat_dec_names: list,
     sigmas_all: list,
     radius_arcsec: float,
-    prior_columns: list,
-    matchers,
-    compute_nway_p_match,
+    prior_columns: Optional[list],
 ) -> "pl.DataFrame":
     """Process one chunk of N-way tuples: compute p_match and build frame."""
-    import numpy as np
-
-    from .matchers import PMATCH_COLUMN
-
     # Extract per-catalogue index arrays from the chunk.
     indices_per_cat = [
         np.array([t[i] for t in chunk_tuples], dtype=np.int64)
@@ -909,7 +1248,7 @@ def _process_chunk(
     ]
 
     ras = [
-        frames[i][cat_names[i]].to_numpy()[indices_per_cat[i]].astype(float)
+        frames[i][cat_ra_names[i]].to_numpy()[indices_per_cat[i]].astype(float)
         for i in range(n_cats)
     ]
     decs = [
@@ -938,9 +1277,8 @@ def _process_chunk(
         p_match = compute_nway_p_match(ras, decs, sigmas, radius_arcsec)
 
     # Build chunk result frame.
-    # Track ALL seen column names (not just catalogue 1) so collisions
-    # between catalogues 2+3 (e.g. RAJ2000 in both AllWISE and USNO)
-    # are suffixed correctly.
+    # Track ALL seen column names so collisions between catalogues 2+3
+    # (e.g. RAJ2000 in both AllWISE and USNO) are suffixed correctly.
     result_parts = []
     seen_columns: set = set()
     for i, f in enumerate(frames):
@@ -953,8 +1291,5 @@ def _process_chunk(
         result_parts.append(part)
 
     result = pl.concat(result_parts, how="horizontal")
-
-    result = result.with_columns(
-        pl.Series(PMATCH_COLUMN, p_match)
-    )
+    result = result.with_columns(pl.Series(PMATCH_COLUMN, p_match))
     return result

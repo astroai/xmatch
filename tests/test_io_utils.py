@@ -1,5 +1,6 @@
 import polars as pl
 import pytest
+from unittest import mock
 
 from xmatch import io_utils
 from xmatch.exceptions import InputError
@@ -93,3 +94,95 @@ def test_polars_to_astropy_accepts_lazyframe():
     table = io_utils.polars_to_astropy(lf)
     assert len(table) == 2
     assert set(table.colnames) == {"id", "ra", "dec"}
+
+
+# --------------------------------------------------------------------------- #
+# HATS write tests (mocked — no actual lsdb required)
+# --------------------------------------------------------------------------- #
+
+
+def test_write_frame_hats_suffix_routes_to_write_hats(tmp_path):
+    """write_frame with .hats suffix dispatches to write_hats (mocked)."""
+    sample = pl.DataFrame({"ra": [10.0, 20.0], "dec": [5.0, 10.0], "mag": [10.0, 12.0]})
+    hats_dir = tmp_path / "result.hats"
+
+    with mock.patch(
+        "xmatch.io_utils.write_hats"
+    ) as mock_write_hats:
+        io_utils.write_frame(sample, hats_dir)
+        mock_write_hats.assert_called_once()
+        _, kwargs = mock_write_hats.call_args
+        assert kwargs["ra_column"] == "ra"
+        assert kwargs["dec_column"] == "dec"
+        assert kwargs["threshold"] == 100_000
+
+
+def test_write_frame_hats_respects_threshold(tmp_path):
+    """write_frame passes hats_threshold through to write_hats."""
+    sample = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
+    hats_dir = tmp_path / "big.hats"
+
+    with mock.patch(
+        "xmatch.io_utils.write_hats"
+    ) as mock_write_hats:
+        io_utils.write_frame(sample, hats_dir, hats_threshold=42_000)
+        _, kwargs = mock_write_hats.call_args
+        assert kwargs["threshold"] == 42_000
+
+
+def test_write_frame_hats_custom_ra_dec(tmp_path):
+    """write_frame threads ra_column/dec_column through to HATS output."""
+    sample = pl.DataFrame({"alpha": [10.0], "delta": [5.0]})
+    hats_dir = tmp_path / "custom.hats"
+
+    with mock.patch(
+        "xmatch.io_utils.write_hats"
+    ) as mock_write_hats:
+        io_utils.write_frame(
+            sample, hats_dir,
+            ra_column="alpha", dec_column="delta",
+        )
+        _, kwargs = mock_write_hats.call_args
+        assert kwargs["ra_column"] == "alpha"
+        assert kwargs["dec_column"] == "delta"
+
+
+def test_write_hats_unavailable_raises():
+    """write_hats raises clean CrossMatchError when lsdb is missing."""
+    import builtins
+
+    sample = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
+    _original_import = builtins.__import__
+
+    def _raise_on_lsdb(name, *args, **kwargs):
+        if name == "lsdb":
+            raise ImportError("No module named 'lsdb'")
+        return _original_import(name, *args, **kwargs)
+
+    with mock.patch(
+        "builtins.__import__", side_effect=_raise_on_lsdb
+    ):
+        with pytest.raises(Exception) as exc_info:
+            io_utils.write_hats(sample, "/tmp/fake.hats")
+        assert "lsdb" in str(exc_info.value).lower()
+
+
+def test_supported_suffixes_includes_hats():
+    """.hats is a recognized output format."""
+    assert ".hats" in io_utils.SUPPORTED_SUFFIXES
+
+
+def test_write_hats_collects_lazy_frame(tmp_path):
+    """write_hats must collect LazyFrame before passing to lsdb."""
+    lf = pl.LazyFrame({"ra": [10.0, 20.0], "dec": [5.0, 10.0]})
+    hats_dir = tmp_path / "lazy.hats"
+    mock_lsdb = mock.MagicMock()
+    fake_catalog = mock_lsdb.from_dataframe.return_value
+
+    with mock.patch.dict("sys.modules", {"lsdb": mock_lsdb}):
+        io_utils.write_hats(lf, hats_dir)
+        # from_dataframe received a collected (eager) DataFrame, not LazyFrame.
+        call_args, _ = mock_lsdb.from_dataframe.call_args
+        assert not isinstance(call_args[0], pl.LazyFrame)
+        assert isinstance(call_args[0], pl.DataFrame)
+        fake_catalog.to_hats.assert_called_once_with(str(hats_dir))

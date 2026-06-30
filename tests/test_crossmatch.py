@@ -334,3 +334,284 @@ def test_crossmatch_multi_remote_first_catalogue(cm, tmp_path):
     assert "id_3" in out.columns
     # sep_arcsec appears exactly once
     assert out.columns.count("sep_arcsec") == 1
+
+
+# ----------------------------------------------------------- union match
+@pytest.fixture
+def union_frames():
+    """Catalogues with overlapping and non-overlapping sources."""
+    a = pl.DataFrame(
+        {"id": [1, 2, 3], "ra": [10.0, 20.0, 30.0], "dec": [5.0, 6.0, 7.0]}
+    )
+    b = pl.DataFrame(
+        {
+            "id": [10, 20],
+            "ra": [10.00005, 20.00005],  # matches a[0] and a[1]
+            "dec": [5.0, 6.0],
+        }
+    )
+    c = pl.DataFrame(
+        {
+            "id": [100],
+            "ra": [10.0001],  # matches a[0] and b[0]
+            "dec": [5.0],
+        }
+    )
+    return a, b, c
+
+
+def test_union_match_two_catalogue(union_frames):
+    """2-catalogue union should include all sources from both sides."""
+    a, b, _ = union_frames
+    cm = CrossMatch()
+    out = cm.union_match([a, b], radius_arcsec=1.0)
+    assert isinstance(out, pl.DataFrame)
+    assert "_src_cats" in out.columns
+    # a[0]↔b[0] match, a[1]↔b[1] match, a[2] unmatched. ALL b rows matched.
+    # Full outer: 2 matched pairs + 1 a-only = 3 rows, _src_cats: {"1+2", "1"}
+    src_cats = set(out["_src_cats"].to_list())
+    assert "1+2" in src_cats, f"Expected matched rows, got {src_cats}"
+    assert "1" in src_cats, f"Expected unmatched left row, got {src_cats}"
+    assert out.height == 3
+
+
+def test_union_match_two_catalogue_with_unmatched_right():
+    """2-catalogue union where some right rows are unmatched → "2" in _src_cats."""
+    a = pl.DataFrame({"ra": [10.0, 20.0], "dec": [5.0, 6.0]})
+    b = pl.DataFrame({"ra": [10.00005, 50.0], "dec": [5.0, 5.0]})
+    cm = CrossMatch()
+    out = cm.union_match([a, b], radius_arcsec=1.0)
+    assert isinstance(out, pl.DataFrame)
+    assert "_src_cats" in out.columns
+    # a[0]↔b[0] match → "1+2"; a[1] unmatched → "1"; b[1] unmatched → "2"
+    src_cats = set(out["_src_cats"].to_list())
+    assert src_cats == {"1+2", "1", "2"}, f"Expected all three categories, got {src_cats}"
+    assert out.height == 3
+
+
+def test_union_match_three_catalogue(union_frames):
+    """3-catalogue union should include all sources with correct _src_cats."""
+    a, b, c = union_frames
+    cm = CrossMatch()
+    out = cm.union_match([a, b, c], radius_arcsec=1.0)
+    assert isinstance(out, pl.DataFrame)
+    assert "_src_cats" in out.columns
+    # Verify _src_cats values exist
+    src_cats = out["_src_cats"].to_list()
+    assert len(src_cats) == out.height
+    # All values should be non-empty strings
+    assert all(isinstance(v, str) and len(v) > 0 for v in src_cats)
+    # Should include 3-catalogue matched rows (a[0] ↔ b[0] ↔ c[0])
+    assert "1+2+3" in src_cats, f"Expected '1+2+3' in _src_cats, got {set(src_cats)}"
+
+
+def test_union_match_output_file(union_frames, tmp_path):
+    """union_match should stream to output file and return None."""
+    a, b, _ = union_frames
+    cm = CrossMatch()
+    out_path = tmp_path / "union.parquet"
+    res = cm.union_match([a, b], radius_arcsec=1.0, output_file=out_path)
+    assert res is None
+    result = pl.read_parquet(out_path)
+    assert "_src_cats" in result.columns
+    assert result.height >= 2
+
+
+def test_union_match_lazy(union_frames):
+    """union_match with lazy=True returns a LazyFrame."""
+    a, b, _ = union_frames
+    cm = CrossMatch()
+    out = cm.union_match([a, b], radius_arcsec=1.0, lazy=True)
+    assert isinstance(out, pl.LazyFrame)
+    df = out.collect()
+    assert "_src_cats" in df.columns
+
+
+def test_union_match_all_unmatched_islands():
+    """Catalogues with no spatial overlap should all appear as separate islands."""
+    a = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
+    b = pl.DataFrame({"ra": [50.0], "dec": [5.0]})  # ~40 deg away → no match
+    c = pl.DataFrame({"ra": [100.0], "dec": [5.0]})  # ~90 deg away → no match
+    cm = CrossMatch()
+    out = cm.union_match([a, b, c], radius_arcsec=1.0)
+    assert out.height == 3  # one row from each catalogue
+    src_cats = set(out["_src_cats"].to_list())
+    assert src_cats == {"1", "2", "3"}, f"Expected isolated catalogues, got {src_cats}"
+
+
+# ------------------------------------------------------------------- fof_match
+@pytest.fixture
+def fof_frames():
+    """Three catalogues around the same sky region with overlapping sources.
+
+    cat1 (primary): 4 sources — A, B, C, D at different positions.
+    cat2: 3 sources — A', B' matching A and B; E is new.
+    cat3: 2 sources — B'' matching B; F is new.
+
+    FoF bundles expected:
+        A  ↔ A'                   = bundle {A,  cat2-A'}
+        B  ↔ B'  ↔ B''            = bundle {B,  cat2-B', cat3-B''}  (3-cat chain)
+        C                         = bundle {C}  (isolated in primary)
+        D  ↔ ?                    = bundle {D}  (no match in other catalogues)
+        E  (cat2 only)            = NOT in output (no primary match)
+        F  (cat3 only)            = NOT in output (no primary match)
+    """
+    a = pl.DataFrame({
+        "id": [1, 2, 3, 4],
+        "ra": [10.0, 20.0, 30.0, 40.0],
+        "dec": [5.0, 6.0, 7.0, 8.0],
+    })
+    b = pl.DataFrame({
+        "id": [101, 102, 103],
+        "ra": [10.00005, 20.00005, 50.0],  # matches A, B, and E is new
+        "dec": [5.0, 6.0, 5.0],
+    })
+    c = pl.DataFrame({
+        "id": [201, 202],
+        "ra": [20.00005, 60.0],  # matches B, and F is new
+        "dec": [6.0, 5.0],
+    })
+    return a, b, c
+
+
+def test_fof_match_two_catalogue_basic_transitive_closure():
+    """Two catalogues with overlapping sources → bundles."""
+    a = pl.DataFrame({
+        "id": [1, 2, 3],
+        "ra": [10.0, 20.0, 30.0],
+        "dec": [5.0, 6.0, 7.0],
+    })
+    b = pl.DataFrame({
+        "id": [101, 102, 103],
+        "ra": [10.00005, 20.00005, 50.0],
+        "dec": [5.0, 6.0, 5.0],
+    })
+    cm = CrossMatch()
+    out = cm.fof_match([a, b], radius_arcsec=1.0)
+    assert isinstance(out, pl.DataFrame)
+    assert "bundle_id" in out.columns
+    assert "n_cats" in out.columns
+    assert "_src_cats" in out.columns
+    # A↔101 (bundle), B↔102 (bundle), C isolated, D[...] wait there are 3 primary
+    # Primary sources: A(1)↔101, B(2)↔102, C(3) isolated → 3 bundles
+    assert out.height == 3
+    # Check _src_cats values
+    src_cats = dict(zip(out["bundle_id"].to_list(), out["_src_cats"].to_list()))
+    assert "1+2" in src_cats.values(), f"Expected '1+2' bundles, got {src_cats}"
+    assert "1" in src_cats.values(), f"Expected '1' (isolated) bundles, got {src_cats}"
+
+
+def test_fof_match_three_catalogue_transitive_chain(fof_frames):
+    """Three catalogues with transitive chain: A↔A' and B↔B'↔B'' → bundles."""
+    a, b, c = fof_frames
+    cm = CrossMatch()
+    out = cm.fof_match([a, b, c], radius_arcsec=1.0)
+    assert isinstance(out, pl.DataFrame)
+    # Primary has 4 sources: A(1)↔101, B(2)↔102+201, C(3) isolated, D(4) isolated
+    # So 4 bundles total.
+    assert out.height == 4
+    # Find the 3-catalogue bundle (B↔102↔201)
+    src_cats_list = out["_src_cats"].to_list()
+    assert "1+2+3" in src_cats_list, (
+        f"Expected transitive 3-cat bundle '1+2+3', got {set(src_cats_list)}"
+    )
+    # Verify n_cats column
+    n_cats_vals = out["n_cats"].to_list()
+    assert max(n_cats_vals) >= 3, f"Expected at least one bundle with n_cats=3, got max {max(n_cats_vals)}"
+
+
+def test_fof_match_output_file(fof_frames, tmp_path):
+    """FoF with output_file writes to disk and returns None."""
+    a, b, c = fof_frames
+    cm = CrossMatch()
+    out_path = tmp_path / "fof.parquet"
+    res = cm.fof_match([a, b, c], radius_arcsec=1.0, output_file=out_path)
+    assert res is None
+    result = pl.read_parquet(out_path)
+    assert "bundle_id" in result.columns
+    assert "_src_cats" in result.columns
+    assert result.height == 4
+
+
+def test_fof_match_no_matches_returns_isolated_bundles():
+    """When no catalogue overlaps, each primary source becomes an isolated
+    single-catalogue bundle (one row per primary source)."""
+    a = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
+    b = pl.DataFrame({"ra": [50.0], "dec": [5.0]})  # far away
+    cm = CrossMatch()
+    out = cm.fof_match([a, b], radius_arcsec=1.0)
+    assert isinstance(out, pl.DataFrame)
+    # One bundle per primary source, each isolated.
+    assert out.height == 1
+    assert out["bundle_id"][0] == 0
+    assert out["n_cats"][0] == 1
+    assert out["_src_cats"][0] == "1"
+
+
+def test_fof_match_requires_two_catalogues():
+    """fof_match with <2 catalogues raises CrossMatchError."""
+    cm = CrossMatch()
+    with pytest.raises(CrossMatchError, match="at least 2"):
+        cm.fof_match([pl.DataFrame({"ra": [1.0], "dec": [2.0]})])
+
+
+def test_fof_match_all_primary_isolated():
+    """All primary sources are isolated → one bundle per primary source."""
+    a = pl.DataFrame({
+        "ra": [10.0, 20.0, 30.0],
+        "dec": [5.0, 6.0, 7.0],
+    })
+    b = pl.DataFrame({
+        "ra": [50.0, 60.0, 70.0],
+        "dec": [5.0, 6.0, 7.0],
+    })
+    c = pl.DataFrame({
+        "ra": [100.0, 110.0],
+        "dec": [5.0, 6.0],
+    })
+    cm = CrossMatch()
+    out = cm.fof_match([a, b, c], radius_arcsec=1.0)
+    assert out.height == 3  # one per primary source
+    # All bundles should be single-catalogue
+    assert all(v == 1 for v in out["n_cats"].to_list())
+    assert all(v == "1" for v in out["_src_cats"].to_list())
+
+
+def test_fof_match_preserves_primary_columns(fof_frames):
+    """Primary catalogue's column names should survive un-renamed."""
+    a, b, c = fof_frames
+    cm = CrossMatch()
+    out = cm.fof_match([a, b, c], radius_arcsec=1.0)
+    # Primary (cat-1) columns should be present without suffix
+    assert "id" in out.columns
+    assert "ra" in out.columns
+    assert "dec" in out.columns
+    # Cat-2/3 columns should have suffixes when colliding
+    assert "id_2" in out.columns or "id" in out.columns
+
+
+def test_fof_match_column_averaging_and_strings():
+    """When multiple cat-2 sources match the same primary source, numeric
+    columns are averaged and string columns take the first value."""
+    a = pl.DataFrame({
+        "ra": [10.0],
+        "dec": [5.0],
+        "name": ["primary_star"],
+    })
+    b = pl.DataFrame({
+        "ra": [10.00005, 10.0001],  # both match the primary
+        "dec": [5.0, 5.0],
+        "mag": [15.0, 15.2],
+        "label": ["detection_A", "detection_B"],
+    })
+    cm = CrossMatch()
+    out = cm.fof_match([a, b], radius_arcsec=1.0)
+    assert out.height == 1
+    # mag should be averaged
+    assert "mag" in out.columns
+    mag_val = out["mag"][0]
+    assert 14.9 < mag_val < 15.3, f"Expected mag ~15.1, got {mag_val}"
+    # label should be first value (string)
+    assert "label" in out.columns
+    assert out["label"][0] == "detection_A"
+

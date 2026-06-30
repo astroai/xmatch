@@ -30,7 +30,7 @@ from .exceptions import InputError
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_SUFFIXES = {".parquet", ".csv", ".fits", ".fit"}
+SUPPORTED_SUFFIXES = {".parquet", ".csv", ".fits", ".fit", ".hats"}
 
 # Files that, when present in a directory, identify a HATS / HiPSCat catalogue.
 _HATS_MARKERS = ("properties", "hats.properties", "catalog_info.json", "_metadata")
@@ -177,11 +177,82 @@ def to_lazy(frame: FrameLike) -> pl.LazyFrame:
     return frame.lazy() if isinstance(frame, pl.DataFrame) else frame
 
 
-def write_frame(frame: FrameLike, output_file: Union[str, Path]) -> None:
-    """Write a frame to ``.parquet`` / ``.csv`` / ``.fits`` based on the suffix.
+def write_hats(
+    frame: FrameLike,
+    output_dir: Union[str, Path],
+    ra_column: str = "ra",
+    dec_column: str = "dec",
+    threshold: int = 100_000,
+) -> None:
+    """Write a frame as a HATS catalogue directory via LSDB.
+
+    LSDB partitions the catalogue into a hierarchical tiling scheme and writes
+    one parquet file per pixel, making the catalogue efficient for spatial
+    queries on massive datasets (especially union-catalogue results).
+
+    Parameters
+    ----------
+    frame:
+        Polars DataFrame or LazyFrame to write.
+    output_dir:
+        Destination directory for the HATS catalogue.
+    ra_column:
+        Right-ascension column name in ``frame``.
+    dec_column:
+        Declination column name in ``frame``.
+    threshold:
+        Maximum rows per HEALPix pixel (default 100 000).
+
+    Raises
+    ------
+    CrossMatchError
+        If ``lsdb`` is not installed.
+    """
+    try:
+        import lsdb
+    except ImportError as exc:
+        from .exceptions import CrossMatchError
+
+        raise CrossMatchError(
+            "HATS output requires the optional 'lsdb' package. "
+            "Install it with `pip install lsdb`."
+        ) from exc
+
+    if isinstance(frame, pl.LazyFrame):
+        frame = frame.collect()
+
+    catalog = lsdb.from_dataframe(
+        frame,
+        ra_column=ra_column,
+        dec_column=dec_column,
+        threshold=threshold,
+    )
+    catalog.to_hats(str(output_dir))
+    logger.info(
+        "Wrote HATS catalogue to %s (%d rows, threshold=%d)",
+        output_dir,
+        frame.height,
+        threshold,
+    )
+
+
+def write_frame(
+    frame: FrameLike,
+    output_file: Union[str, Path],
+    *,
+    ra_column: str = "ra",
+    dec_column: str = "dec",
+    hats_threshold: int = 100_000,
+) -> None:
+    """Write a frame to ``.parquet`` / ``.csv`` / ``.fits`` / ``.hats`` based on the suffix.
 
     Parquet and CSV are streamed via ``sink_*`` with the polars streaming engine
     so large results never need to be fully materialised in memory.
+
+    When the suffix is ``.hats`` the result is written as a HATS catalogue
+    directory (requires ``lsdb``).  ``ra_column`` and ``dec_column`` identify
+    the spatial columns for partitioning; ``hats_threshold`` controls the
+    maximum rows per HEALPix pixel.
     """
     out = Path(output_file)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -194,6 +265,9 @@ def write_frame(frame: FrameLike, output_file: Union[str, Path]) -> None:
         lf.sink_csv(out, engine="streaming")
     elif suffix in (".fits", ".fit"):
         polars_to_astropy(lf).write(out, overwrite=True)
+    elif suffix == ".hats":
+        write_hats(frame, out, ra_column=ra_column, dec_column=dec_column, threshold=hats_threshold)
+        return
     else:
         raise InputError(f"Unsupported output format '{suffix}'.")
     logger.info("Wrote results to %s", out)

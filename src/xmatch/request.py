@@ -158,6 +158,13 @@ class MatchRequest:
             filter_expr=params.get("filter_expr"),
             extra_distance_cols=extra_distance,
             batch_size=params.get("batch_size"),
+            lr_magnitude_column=params.get("lr_magnitude_column"),
+            lr_q=float(params.get("lr_q", 0.8)),
+            ml_color_columns=list(params.get("ml_color_columns") or []),
+            ml_model_path=params.get("ml_model_path"),
+            xgb_model_path=params.get("xgb_model_path"),            macauff_flux_columns=list(params.get("macauff_flux_columns") or []),
+            pm_prior=bool(params.get("pm_prior")),
+            pm_prior_magnitude_column=params.get("pm_prior_magnitude_column"),
         )
         return cls(
             cat1=cat1,

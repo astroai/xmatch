@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-o",
         "--output",
         dest="output_file",
-        help="Output file (.parquet/.csv/.fits). If omitted, CSV is written to stdout.",
+        help="Output file (.parquet/.csv/.fits/.hats). If omitted, CSV is written to stdout.",
     )
     parser.add_argument(
         "-r",
@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--matcher", choices=["sky", "skyerr", "skyellipse"], help="Match algorithm (default: sky)."
+        "--matcher", choices=["sky", "skyerr", "skyellipse", "lr", "ml", "xgb", "auf", "macauff"], help="Match algorithm (default: sky). lr=Likelihood Ratio, ml=Random Forest, xgb=XGBoost, auf=AUF empirical error model, macauff=AUF+flux."
     )
     parser.add_argument(
         "--max-error",
@@ -55,6 +55,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="1and2",
         choices=["1and2", "1or2", "all", "1not2", "2not1", "all1", "all2"],
         help="Join type (1and2=inner, 1or2=outer, 1not2/2not1=anti, all1/all2=outer side).",
+    )
+    parser.add_argument(
+        "--union",
+        dest="union_match",
+        action="store_true",
+        help="Build a master union catalogue (full outer join across all catalogues, adds _src_cats column).",
+    )
+    parser.add_argument(
+        "--fof",
+        dest="fof_match",
+        action="store_true",
+        help="Friends-of-Friends transitive closure: merge all catalogues into object bundles via pairwise matching and connected-component clustering.",
     )
     parser.add_argument(
         "--find",
@@ -111,6 +123,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Julian-year epoch to propagate coordinates to via proper motion.",
     )
     parser.add_argument(
+        "--pm-prior",
+        dest="pm_prior",
+        action="store_true",
+        help="Inflate positional errors for sources without measured proper motions using a Galactic-latitude drift model (Wilson 2023). Requires --target-epoch.",
+    )
+    parser.add_argument(
+        "--pm-prior-mag-col",
+        dest="pm_prior_mag_col",
+        help="Magnitude column for refining the PM drift dispersion estimate (brighter = closer = larger PM). Only effective with --pm-prior.",
+    )
+    parser.add_argument(
         "--filter-expr",
         dest="filter_expr",
         help="Polars SQL WHERE clause to post-filter matched pairs (e.g. 'abs(mag - mag_2) < 0.5').",
@@ -119,6 +142,45 @@ def build_parser() -> argparse.ArgumentParser:
         "--extra-distance-cols",
         dest="extra_distance_cols",
         help="Column:weight pairs for N-dimensional cKDTree ranking (e.g. 'g:0.5,bp_rp:0.3').",
+    )
+    parser.add_argument(
+        "--lr-magnitude-column",
+        dest="lr_magnitude_column",
+        help="Magnitude column for Likelihood Ratio matcher (required when --matcher lr).",
+    )
+    parser.add_argument(
+        "--lr-q",
+        dest="lr_q",
+        type=float,
+        default=0.8,
+        help="Prior Q factor for LR matcher: fraction of primary sources with detectable counterparts (0.5-1.0).",
+    )
+    parser.add_argument(
+        "--ml-color-cols",
+        dest="ml_color_cols",
+        help="Comma-separated photometric columns for ML matcher features (e.g. 'g,r,i'). Required when --matcher ml.",
+    )
+    parser.add_argument(
+        "--ml-model-path",
+        dest="ml_model_path",
+        help="Path to save/load a pre-trained Random Forest model (joblib). If the file exists it is loaded; otherwise a new model is trained and saved.",
+    )
+    parser.add_argument(
+        "--xgb-model-path",
+        dest="xgb_model_path",
+        help="Path to save/load a pre-trained XGBoost model (joblib). If the file exists it is loaded; otherwise a new model is trained and saved.",
+    )
+    parser.add_argument(
+        "--macauff-flux-cols",
+        dest="macauff_flux_cols",
+        help="Comma-separated magnitude columns for macauff flux likelihoods (e.g. 'g,r,i'). Used when --matcher macauff.",
+    )
+    parser.add_argument(
+        "--hats-threshold",
+        dest="hats_threshold",
+        type=int,
+        default=100_000,
+        help="Max rows per HEALPix pixel for .hats output (HATS partitioning granularity).",
     )
     parser.add_argument(
         "--batch-size",
@@ -356,6 +418,35 @@ def handle_discover(cm: CrossMatch, endpoint: str, schema_table: Optional[str] =
             ucd = str(row.get("ucd", ""))
             unit = str(row.get("unit", ""))
             print(f"  {cname:<28} {dtype:<20} {ucd:<30} {unit:<12}")
+
+        # --- suggested YAML config snippet ---------------------------------
+        ra_guess = schema.get("ra_column")
+        dec_guess = schema.get("dec_column")
+        col_list = schema.get("columns_list", [])
+        id_candidates = [c for c in col_list if c.lower() in ("source_id", "id", "objid", "object_id", "allwise", "usno-b1.0", "desig")]
+        id_guess = id_candidates[0] if id_candidates else None
+        err_candidates = [c for c in col_list if "err" in c.lower() or "error" in c.lower()]
+        ra_err_guess = next((c for c in err_candidates if "ra" in c.lower()), None)
+        dec_err_guess = next((c for c in err_candidates if "dec" in c.lower() or "de" in c.lower()), None)
+
+        short_name = schema_table.rsplit(".", 1)[-1] if "." in schema_table else schema_table
+        print(f"\n# --- Suggested xmatch.yaml entry (copy into your config) ---")
+        print(f"  {short_name}:")
+        print(f"    archive: <archive_name>")
+        print(f"    service_id: <service_id>")
+        print(f"    description: \"{schema_table}\"")
+        print(f"    access_identifier: \"{schema_table}\"")
+        if ra_guess:
+            print(f"    ra_column: \"{ra_guess}\"")
+        if dec_guess:
+            print(f"    dec_column: \"{dec_guess}\"")
+        if id_guess:
+            print(f"    id_column: \"{id_guess}\"")
+        if ra_err_guess:
+            print(f"    ra_err_column: \"{ra_err_guess}\"")
+        if dec_err_guess:
+            print(f"    dec_err_column: \"{dec_err_guess}\"")
+        print(f"    # {cols.height} columns discovered")
     else:
         # List tables.
         try:
@@ -401,6 +492,8 @@ def _build_params(args: argparse.Namespace) -> dict:
     """Extract the shared match parameters from CLI args as a kwargs dict."""
     prior_columns = [c.strip() for c in (args.priors or "").split(",") if c.strip()]
     extra_distance = _parse_extra_distance_cols(args.extra_distance_cols)
+    ml_color_columns = [c.strip() for c in (args.ml_color_cols or "").split(",") if c.strip()]
+    macauff_flux_cols = [c.strip() for c in (args.macauff_flux_cols or "").split(",") if c.strip()]
     return dict(
         radius_arcsec=args.radius_arcsec,
         matcher=args.matcher or "sky",
@@ -422,10 +515,19 @@ def _build_params(args: argparse.Namespace) -> dict:
         filter_expr=args.filter_expr,
         extra_distance_cols=extra_distance,
         batch_size=args.batch_size,
+        lr_magnitude_column=args.lr_magnitude_column,
+        lr_q=args.lr_q,
+        ml_color_columns=ml_color_columns,
+        ml_model_path=args.ml_model_path,
+        xgb_model_path=args.xgb_model_path,
+        macauff_flux_columns=macauff_flux_cols,
+        pm_prior=args.pm_prior,
+        pm_prior_magnitude_column=args.pm_prior_mag_col,
         ra=args.ra,
         dec=args.dec,
         radius_deg=args.radius_deg,
         probabilistic=args.probabilistic,
+        hats_threshold=args.hats_threshold,
     )
 
 
@@ -456,11 +558,27 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         params = _build_params(args)
 
-        if len(args.catalogues) == 2:
+        if args.fof_match:
+            # Friends-of-Friends transitive closure across all catalogues.
+            result = cm.fof_match(
+                args.catalogues,
+                output_file=args.output_file,
+                radius_arcsec=params.pop("radius_arcsec", 1.0),
+                hats_threshold=params.pop("hats_threshold", 100_000),
+                **params,
+            )
+        elif len(args.catalogues) == 2 and not args.union_match:
             # Classic two-catalogue match (backward-compatible path).
             result = cm.crossmatch(
                 args.catalogues[0],
                 args.catalogues[1],
+                output_file=args.output_file,
+                **params,
+            )
+        elif args.union_match:
+            # Union catalogue: sequential full outer joins.
+            result = cm.union_match(
+                args.catalogues,
                 output_file=args.output_file,
                 **params,
             )

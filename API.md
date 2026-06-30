@@ -131,7 +131,7 @@ SideOverrides(
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `radius_arcsec` | `float` | `1.0` | Search radius for `matcher="sky"`. |
-| `matcher` | `str` | `"sky"` | `"sky"`, `"skyerr"`, or `"skyellipse"`. |
+| `matcher` | `str` | `"sky"` | `"sky"`, `"skyerr"`, `"skyellipse"`, `"lr"`, `"ml"`, `"xgb"`, `"auf"`, `"macauff"`. |
 | `max_error` | `float` | `3.0` | N-sigma cap for `skyerr`/`skyellipse`. |
 | `join_type` | `str` | `"1and2"` | `"1and2"`, `"1or2"`, `"all1"`, `"all2"`, `"1not2"`, `"2not1"`, `"all"`. |
 | `find` | `str` | `"best"` | `"best"` (closest) or `"all"` (all within radius). |
@@ -140,6 +140,14 @@ SideOverrides(
 | `filter_expr` | `str` | `None` | Polars SQL WHERE clause for post-match filtering. |
 | `extra_distance_cols` | `dict[str,float]` | `{}` | Column→weight map for N-dimensional cKDTree ranking. |
 | `batch_size` | `int` | `None` | HEALPix pixel groups per batch (out-of-core friendly). |
+| `lr_magnitude_column` | `str` | `None` | Magnitude column for Likelihood Ratio matcher (`matcher="lr"`). |
+| `lr_q` | `float` | `0.8` | Prior probability a primary source has a detectable counterpart (LR matcher). |
+| `ml_color_columns` | `list[str]` | `[]` | Photometric columns for ML/XGB matcher feature engineering. |
+| `ml_model_path` | `str` | `None` | Path to save/load a pre-trained Random Forest model (joblib). |
+| `xgb_model_path` | `str` | `None` | Path to save/load a pre-trained XGBoost model (joblib). |
+| `macauff_flux_columns` | `list[str]` | `[]` | Magnitude columns for macauff flux likelihood ratios (`matcher="macauff"`). |
+| `pm_prior` | `bool` | `False` | Enable probabilistic PM drift prior (Wilson 2023). Drift is added in quadrature to each row's per-row astrometric error when `ra_error` / `dec_error` columns exist; otherwise to a source-wide `default_pos_error_arcsec` floor; alone when neither is configured (drift-only mode). Requires `target_epoch`. |
+| `pm_prior_magnitude_column` | `str` | `None` | Magnitude column for the per-row magnitude scaling `10^{−0.2(m−15)}` clipped to [0.3, 3.0]. In per-row mode widens the row's sigma by its magnitude; in source-level mode adjusts the source-wide floor. Only effective with `pm_prior=True`. |
 
 ---
 
@@ -166,6 +174,97 @@ result = cm.crossmatch("wise.csv", "gaia_esa",
 
 Requires `pm_ra_column` / `pm_dec_column` in the catalogue config (e.g., Gaia
 has `pmra`/`pmdec` registered). Uses astropy for the spatial kinematics.
+
+### PM drift prior (Wilson 2023)
+
+When catalogues are separated by a large epoch baseline and one side lacks
+measured proper motions, unknown stellar motion can carry counterparts outside
+the match radius. The probabilistic PM drift model from Wilson (2023) inflates
+positional errors using a Galactic-latitude-based proper-motion dispersion
+estimate.
+
+- ``σ_μ(b) = 3 + 7·exp(−|b| / 20°)`` — PM dispersion in mas/yr.
+- ``σ_drift = σ_μ × |Δt| / 1000`` — drift uncertainty in arcsec.
+
+Three application modes (chosen automatically based on available error info):
+
+* **Per-row mode** (default for modern catalogues such as Gaia with
+  per-row `ra_error` / `dec_error` columns):
+  `_apply_pm_drift_prior()` appends a per-row `_pm_drift_arcsec` column
+  to each side's `DataFrame`. `_pos_sigma_arcsec` (skyerr) and
+  `_pos_covariance` (skyellipse) add it in quadrature to that row's
+  per-axis astrometric error — each row carries its own budget
+  independently, and `_build_result` strips the internal column from
+  the output.
+* **Source-level mode** (fallback when per-row error columns are
+  absent): drift is added in quadrature to `default_pos_error_arcsec`
+  as a single source-wide floor on each side.
+* **Drift-only mode** (when neither per-row errors nor a floor are
+  configured): the per-row drift becomes the sole positional
+  uncertainty — `_pos_sigma_arcsec` returns `drift`,
+  `_pos_covariance` returns `drift²`. Catalogues with only `pm_prior`
+  and an `epoch` column can now be matched against a reference
+  catalogue without a separate positional error source.
+
+**Asymmetry preserved**: a side whose epoch equals `target_epoch`
+(Δt < 0.01 yr) silently skips drift inflation — typical when
+crossmatching an old survey against a modern reference catalogue at
+its reference epoch. Two-old-survey case (both sides have epoch gaps,
+e.g., USNO-B vs 2MASS at the Gaia DR3 reference epoch) inflates each
+side's per-row sigma independently and contributes to the joint
+match budget. Note that under the `skyerr` matcher the `chord_max`
+is derived from `np.nanmax(lsig) + np.nanmax(rsig)`, so within a
+single query the row with the largest per-row sigma governs the
+chord radius; `skyellipse` computes per-pair Mahalanobis distance
+instead and is not subject to this `np.nanmax` aggregation.
+
+Optionally refined by magnitude (`pm_prior_magnitude_column`) — brighter stars
+get larger PM dispersion via a distance-proxy scale factor
+``10^{−0.2(m−15)}`` clipped to [0.3, 3.0].  In per-row mode this widens
+each row's sigma according to its magnitude; in source-level mode it
+adjusts the single source-wide floor.
+
+```python
+spec = MatchSpec(
+    radius_arcsec=2.0,
+    matcher="skyerr",
+    max_error=5.0,
+    target_epoch=2016.0,
+    pm_prior=True,
+    pm_prior_magnitude_column="phot_g_mean_mag",  # optional magnitude refinement
+)
+result = cm.crossmatch("old_survey.parquet", "gaia_esa",
+    ra=180, dec=-30, radius_deg=0.01,
+    spec=spec,
+)
+```
+
+**Drift-only mode** — a catalogue with no positional error source at all
+(no per-row errors, no `default_pos_error_arcsec`, just an `epoch` column)
+can still be matched against a reference catalogue: each row's drift
+becomes the sole positional uncertainty.
+
+```python
+# historical_catalogue.csv has columns ra, dec, epoch only — no
+# ra_error / dec_error columns and no default_pos_error_arcsec on
+# the CatalogueSource.  Drift-only mode applies: each row's drift
+# is the sole positional uncertainty.
+spec = MatchSpec(
+    radius_arcsec=5.0,
+    matcher="skyerr",
+    max_error=5.0,
+    target_epoch=2016.0,
+    pm_prior=True,
+)
+result = cm.crossmatch("historical_catalogue.csv", "gaia_esa",
+    ra=180, dec=-30, radius_deg=0.01,
+    spec=spec,
+)
+```
+
+**Reference**: Wilson, T. J. 2023, *RASTI* 2, 1.  *Overcoming Separation
+Between Counterparts Due to Unknown Proper Motions in Catalogue
+Cross-Matching.*
 
 ### Multi-condition post-match filtering
 
@@ -229,6 +328,90 @@ pip install 'xmatch[ray]'
 result = cm.crossmatch("huge_a.parquet", "huge_b.parquet",
     radius_arcsec=1.0, engine="ray",
 )
+```
+
+### Likelihood Ratio matcher (`matcher="lr"`)
+
+Sutherland & Saunders (1992) counterpart identification. Estimates the
+true-counterpart magnitude distribution q(m) by subtracting the expected
+background from the candidate magnitude histogram, computes the Rayleigh
+positional PDF f(r), and produces `lr` and `reliability` columns in [0,1].
+Requires `lr_magnitude_column`.
+
+```python
+spec = MatchSpec(
+    radius_arcsec=2.0,
+    matcher="lr",
+    lr_magnitude_column="phot_g_mean_mag",
+    lr_q=0.8,  # prior counterpart fraction
+)
+result = cm.crossmatch("radio.csv", "optical.parquet", spec=spec, engine="fast")
+# Output columns: lr, reliability
+```
+
+### Random Forest / XGBoost matchers (`matcher="ml"`, `matcher="xgb"`)
+
+Machine-learning classifiers trained on-the-fly using self-match pseudo-labels.
+Feature engineering (normalised separation, colour differences, local density)
+is shared between both matchers. Requires `ml_color_columns`.
+
+- **ml**: `RandomForestClassifier` (scikit-learn). Falls back to weighted heuristic.
+- **xgb**: XGBoost → LightGBM → sklearn GradientBoosting → weighted heuristic.
+  Reuses the same `ml_color_columns` as the ML matcher.
+
+Both support model save/load via `--ml-model-path` / `--xgb-model-path` for
+reuse across runs without re-training.
+
+```python
+# Random Forest
+spec = MatchSpec(
+    radius_arcsec=2.0,
+    matcher="ml",
+    ml_color_columns=["g", "r", "i"],
+    ml_model_path="my_rf_model.joblib",  # save/load
+)
+result = cm.crossmatch("cat_a.parquet", "cat_b.parquet", spec=spec, engine="fast")
+# Output column: ml_score
+
+# XGBoost with model persistence
+spec = MatchSpec(
+    radius_arcsec=2.0,
+    matcher="xgb",
+    ml_color_columns=["g", "r", "i"],
+    xgb_model_path="my_xgb_model.joblib",  # save/load
+)
+result = cm.crossmatch("cat_a.parquet", "cat_b.parquet", spec=spec, engine="fast")
+# Output column: xgb_score
+```
+
+### AUF matcher (`matcher="auf"`)
+
+Astrometric Uncertainty Function (Wilson & Naylor 2017). Builds an empirical
+separation PDF from observed candidate pairs, subtracts the expected background,
+and computes `P(r) = f_AUF(r) / (f_AUF(r) + n_bg)`. Captures non-Gaussian
+error wings common in ground-based surveys. No extra columns required.
+
+```python
+spec = MatchSpec(radius_arcsec=2.0, matcher="auf")
+result = cm.crossmatch("cat_a.parquet", "cat_b.parquet", spec=spec, engine="fast")
+# Output column: auf_prob
+```
+
+### macauff matcher (`matcher="macauff"`)
+
+AUF + flux likelihood ratios. Combines the empirical AUF positional probability
+with per-band magnitude-difference likelihood ratios for improved match scores.
+Requires `macauff_flux_columns`. Falls back to pure AUF scoring when no flux
+columns are available.
+
+```python
+spec = MatchSpec(
+    radius_arcsec=2.0,
+    matcher="macauff",
+    macauff_flux_columns=["g", "r", "i"],
+)
+result = cm.crossmatch("cat_a.parquet", "cat_b.parquet", spec=spec, engine="fast")
+# Output column: macauff_prob
 ```
 
 ---
@@ -492,10 +675,25 @@ xmatch a.parquet b.parquet --engine fast --probabilistic --priors g,r -o out.par
 
 # Advanced features
 xmatch --target-epoch 2016.0 a.csv b.csv -r 1.5                        # PM correction
+xmatch --target-epoch 2016.0 --pm-prior --matcher skyerr \
+    --max-error 5.0 old_survey.csv gaia_esa -r 2.0                      # PM drift prior
+xmatch --target-epoch 2016.0 --pm-prior --pm-prior-mag-col mag_g \
+    old_survey.csv gaia_esa -r 2.0                                       # PM drift + magnitude refinement
 xmatch --engine fast --filter-expr "abs(mag - mag_2) < 0.5" a.csv b.csv  # post-filter
 xmatch --engine fast --extra-distance-cols g:0.5,bp_rp:0.3 a.csv b.csv  # N-d ranking
 xmatch --engine zone --batch-size 100 large_a.csv large_b.csv            # out-of-core batching
 xmatch --engine ray huge_a.parquet huge_b.parquet -r 1.0                 # Ray distributed
+
+# Matcher-specific examples
+xmatch a.csv b.csv --matcher lr --lr-magnitude-column mag_g -r 2.0      # Likelihood Ratio
+xmatch a.csv b.csv --matcher ml --ml-color-cols g,r,i -r 2.0            # Random Forest
+xmatch a.csv b.csv --matcher ml --ml-color-cols g,r,i -r 2.0 \
+    --ml-model-path my_model.joblib                                     # RF with model save/load
+xmatch a.csv b.csv --matcher xgb --ml-color-cols g,r,i -r 2.0           # XGBoost
+xmatch a.csv b.csv --matcher xgb --ml-color-cols g,r,i -r 2.0 \
+    --xgb-model-path my_xgb.joblib                                      # XGB with model save/load
+xmatch a.csv b.csv --matcher auf -r 2.0                                 # AUF empirical error model
+xmatch a.csv b.csv --matcher macauff --macauff-flux-cols g,r -r 2.0     # AUF + flux likelihoods
 
 # N-catalogue (3+) crossmatching
 xmatch a.csv b.csv c.csv -r 1.0                          # 3-way intersection

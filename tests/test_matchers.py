@@ -1161,3 +1161,576 @@ def test_nway_crossmatch_two_catalogues_works():
     result = cm.nway_match([left, right], radius_arcsec=1.0)
     assert result.height >= 1
     assert "p_match" in result.columns
+
+
+# --------------------------------------------------------------------------- #
+# PM drift prior tests (Wilson 2023)
+# --------------------------------------------------------------------------- #
+def test_pm_prior_inflates_errors_for_sources_without_pm():
+    """pm_prior should work with skyerr matcher (inflated error floor)."""
+    left = pl.DataFrame({
+        "ra": [10.0], "dec": [5.0],
+        "ra_error": [0.1], "dec_error": [0.1],
+        "epoch": [2000.0],
+    })
+    right = pl.DataFrame({
+        "ra": [10.0002], "dec": [5.0],
+        "ra_error": [0.1], "dec_error": [0.1],
+        "epoch": [2016.0],
+    })
+    src_a = _src("a", ra_err_column="ra_error", dec_err_column="dec_error",
+                  epoch_column="epoch", epoch=2000.0)
+    src_b = _src("b", ra_err_column="ra_error", dec_err_column="dec_error",
+                  epoch_column="epoch", epoch=2016.0)
+
+    spec = MatchSpec(
+        radius_arcsec=2.0, matcher="skyerr", max_error=5.0,
+        target_epoch=2016.0, pm_prior=True,
+    )
+    out = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                    spec, engine="fast").collect()
+    assert "sep_arcsec" in out.columns
+
+
+def test_pm_prior_no_epoch_skips_gracefully():
+    """pm_prior should skip sides without epoch info (no crash)."""
+    left = pl.DataFrame({
+        "ra": [10.0, 20.0], "dec": [5.0, 6.0],
+    })
+    right = pl.DataFrame({
+        "ra": [10.00005, 10.0001], "dec": [5.00005, 5.0],
+    })
+    src_a = _src("a")
+    src_b = _src("b")
+
+    spec = MatchSpec(
+        radius_arcsec=2.0, matcher="sky", find="best",
+        target_epoch=2016.0, pm_prior=True,
+    )
+    out = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                    spec, engine="fast").collect()
+    assert out.height >= 1
+    assert "sep_arcsec" in out.columns
+
+
+def test_pm_prior_with_skyerr_matcher():
+    """pm_prior inflated errors should work with skyerr matcher."""
+    left = pl.DataFrame({
+        "ra": [10.0], "dec": [5.0],
+        "ra_error": [0.1], "dec_error": [0.1],
+        "epoch": [2000.0],
+    })
+    right = pl.DataFrame({
+        "ra": [10.002], "dec": [5.0],
+        "ra_error": [0.1], "dec_error": [0.1],
+        "epoch": [2016.0],
+    })
+    src_a = _src("a", ra_err_column="ra_error", dec_err_column="dec_error",
+                  epoch_column="epoch", epoch=2000.0)
+    src_b = _src("b", ra_err_column="ra_error", dec_err_column="dec_error",
+                  epoch_column="epoch", epoch=2016.0)
+
+    spec = MatchSpec(
+        radius_arcsec=2.0, matcher="skyerr", max_error=5.0,
+        target_epoch=2016.0, pm_prior=True,
+    )
+    out = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                    spec, engine="fast").collect()
+    assert "sep_arcsec" in out.columns
+
+
+def test_pm_prior_magnitude_column_scales_dispersion():
+    """Magnitude scaling must change match outcomes: a right star at ~2 arcsec
+    separation should only match when bright magnitudes inflate the drift floor.
+
+    Uses a 116-year epoch baseline (1900\u21922016) so the drift is at least
+    ~1 arcsec for bright stars (mag\u224810, mag_scale\u22483.0).  At this baseline
+    the faint-star drift (~0.1 arcsec) stays below the per-row errors, so
+    the match radius is effectively unchanged.
+
+    * Without pm_prior:           max sep \u2248 0.85\" \u2192 2.0\" star \u2192 NO match
+    * pm_prior + bright (mag=10): max sep \u2248 3.6\"  \u2192 2.0\" star \u2192 MATCH
+    * pm_prior + faint (mag=20):  max sep \u2248 0.85\" \u2192 2.0\" star \u2192 NO match
+    """
+    base_left = pl.DataFrame({
+        "ra": [10.0], "dec": [5.0],
+        "ra_error": [0.1], "dec_error": [0.1],
+        "epoch": [1900.0],
+    })
+    base_right = pl.DataFrame({
+        "ra": [10.00056], "dec": [5.0],
+        "ra_error": [0.1], "dec_error": [0.1],
+        "epoch": [2016.0],
+    })
+    src_a = _src("a", ra_err_column="ra_error", dec_err_column="dec_error",
+                  epoch_column="epoch", epoch=1900.0)
+    src_b = _src("b", ra_err_column="ra_error", dec_err_column="dec_error",
+                  epoch_column="epoch", epoch=2016.0)
+
+    # --- without pm_prior: no match (2.0\" > ~0.85\" max) -------------------
+    spec_no = MatchSpec(
+        radius_arcsec=4.0, matcher="skyerr", max_error=3.0,
+        target_epoch=2016.0,
+    )
+    out_no = sky_match(src_a, src_b, base_left.lazy(), base_right.lazy(),
+                       spec_no, engine="fast").collect()
+    assert out_no.height == 0, (
+        f"Without pm_prior, 2.0\" separation should exceed max sigma; "
+        f"got {out_no.height} matches"
+    )
+
+    # --- pm_prior + bright stars (mag=10): should match -------------------
+    left_bright = base_left.with_columns(pl.Series("mag_g", [10.0]))
+    spec_bright = MatchSpec(
+        radius_arcsec=4.0, matcher="skyerr", max_error=3.0,
+        target_epoch=2016.0, pm_prior=True,
+        pm_prior_magnitude_column="mag_g",
+    )
+    out_bright = sky_match(src_a, src_b, left_bright.lazy(),
+                           base_right.lazy(), spec_bright,
+                           engine="fast").collect()
+    assert out_bright.height == 1, (
+        f"With pm_prior + bright mag, 2.0\" star should match "
+        f"(drift floor inflated ~10\u00d7 by mag_scale=3.0); "
+        f"got {out_bright.height} matches"
+    )
+
+    # --- pm_prior + faint stars (mag=20): no match ------------------------
+    left_faint = base_left.with_columns(pl.Series("mag_g", [20.0]))
+    spec_faint = MatchSpec(
+        radius_arcsec=4.0, matcher="skyerr", max_error=3.0,
+        target_epoch=2016.0, pm_prior=True,
+        pm_prior_magnitude_column="mag_g",
+    )
+    out_faint = sky_match(src_a, src_b, left_faint.lazy(),
+                          base_right.lazy(), spec_faint,
+                          engine="fast").collect()
+    assert out_faint.height == 0, (
+        f"With pm_prior + faint mag, mag_scale=0.3 keeps drift below "
+        f"per-row errors, so 2.0\" should NOT match; "
+        f"got {out_faint.height} matches"
+    )
+
+
+def test_pm_prior_magnitude_column_absent_skips_gracefully():
+    """pm_prior_magnitude_column pointing to a missing column should not crash."""
+    left = pl.DataFrame({
+        "ra": [10.0], "dec": [5.0],
+        "epoch": [2000.0],
+    })
+    right = pl.DataFrame({
+        "ra": [10.00005], "dec": [5.00005],
+        "epoch": [2016.0],
+    })
+    src_a = _src("a", epoch_column="epoch", epoch=2000.0)
+    src_b = _src("b", epoch_column="epoch", epoch=2016.0)
+
+    spec = MatchSpec(
+        radius_arcsec=2.0, matcher="sky", find="best",
+        target_epoch=2016.0, pm_prior=True,
+        pm_prior_magnitude_column="nonexistent",
+    )
+    out = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                    spec, engine="fast").collect()
+    assert out.height >= 1
+    assert "sep_arcsec" in out.columns
+
+
+def test_pm_prior_per_row_drift_added_to_astrometric_errors():
+    """Per-row PM drift should be added in quadrature to per-row astrometric
+    errors, increasing max allowed separation beyond the source-level floor.
+
+    Uses a position near the Galactic plane (ra~282 deg, dec~0 deg) where
+    sigma_mu ~ 10 mas/yr.  With a 116-year baseline, drift ~ 1.16\",
+    pushing max sep from ~0.85\" to ~3.9\" -- enough to match a 2.5\" right star.
+
+    Asymmetry note: the right side's epoch (2016.0) equals target_epoch,
+    so \u0394t=0 on the right \u2014 only the left side (epoch=1900.0) gets drift
+    inflation.  This matches the typical use case of crossmatching an old
+    survey (no PMs) against a modern reference catalogue at the reference
+    epoch.
+    """
+    left = pl.DataFrame({
+        "ra": [282.0], "dec": [0.0],
+        "ra_error": [0.1], "dec_error": [0.1],
+        "epoch": [1900.0],
+    })
+    right = pl.DataFrame({
+        "ra": [282.000694], "dec": [0.0],  # 0.000694 deg * 3600 ~ 2.5\"
+        "ra_error": [0.1], "dec_error": [0.1],
+        "epoch": [2016.0],
+    })
+    src_a = _src("a", ra_err_column="ra_error", dec_err_column="dec_error",
+                  epoch_column="epoch", epoch=1900.0)
+    src_b = _src("b", ra_err_column="ra_error", dec_err_column="dec_error",
+                  epoch_column="epoch", epoch=2016.0)
+
+    # Without pm_prior: per-row errors only \u2192 max sep \u2248 0.85\" \u2192 NO match
+    spec_no = MatchSpec(
+        radius_arcsec=4.0, matcher="skyerr", max_error=3.0,
+        target_epoch=2016.0,
+    )
+    out_no = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                       spec_no, engine="fast").collect()
+    assert out_no.height == 0, (
+        "Without pm_prior, 2.5 arcsec star should NOT match; " f"got {out_no.height}"
+    )
+
+    # With pm_prior: per-row drift added in quadrature \u2192 max sep >> 3.0\"
+    spec_pm = MatchSpec(
+        radius_arcsec=4.0, matcher="skyerr", max_error=3.0,
+        target_epoch=2016.0, pm_prior=True,
+    )
+    out_pm = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                       spec_pm, engine="fast").collect()
+    assert out_pm.height == 1, (
+        "With pm_prior + per-row drift, 2.5 arcsec star SHOULD match; "
+        f"got {out_pm.height}"
+    )
+    assert "sep_arcsec" in out_pm.columns
+    # Verify separation is reasonable (~2.5\")
+    sep = out_pm["sep_arcsec"][0]
+    assert 2.0 < sep < 3.0, f"Expected sep ~2.5 arcsec, got {sep:.3f}"
+
+
+
+
+def test_pm_prior_per_row_gaia_realistic_error_budgets():
+    """Gaia-style end-to-end test: per-row ra_error/dec_error columns plus
+    pm_prior with realistic Gaia/2MASS error budgets and a 16-year epoch
+    baseline.  Verifies that per-row PM drift is computed correctly from
+    position + magnitude and added in quadrature to per-row astrometric
+    errors, end-to-end through sky_match.
+
+    Setup (Galactic plane: RA=282 deg, Dec=0 deg where sigma_mu base
+    = 3 + 7*exp(0) = 10 mas/yr)::
+
+        left  = 2MASS-like  (epoch 2000, sigma=0.1")
+        right = Gaia-like   (epoch 2016 = target_epoch, sigma=0.5 mas)
+
+    Baseline = 16 years; only the left side carries drift because right
+    is at target_epoch (delta_t = 0).
+
+    Two left rows at the same sky position but different magnitudes
+    exercise per-row drift through the magnitude scaling::
+
+        Bright (mag=10): scale clipped to 3.0
+            drift = 10 * 3.0 * 16 = 480 mas = 0.48"
+            sigma_per_row ~ sqrt(0.1^2 + 0.48^2) ~ 0.49"
+        Faint  (mag=20): scale clipped to 0.3
+            drift = 10 * 0.3 * 16 = 48 mas = 0.048"
+            sigma_per_row ~ sqrt(0.1^2 + 0.048^2) ~ 0.111"
+
+    Skyerr matches using ``chord_max = max_error * (np.nanmax(lsig)
+    + np.nanmax(rsig))`` -- i.e. across all left rows in the same query.
+    Because both left rows sit on the same sky position with the same
+    per-row astrometric error, the wide drift on the bright row drives
+    ``chord_max ~ 3 * (0.49 + 0.0007) ~ 1.47"`` and the faint row's
+    tighter budget (chord_max ~ 3 * (0.111 + 0.0007) ~ 0.34" if it
+    alone were in the table) does NOT shrink the joint chord_max.  Both
+    candidates (at 0.5" separation) match in a single query.
+    """
+    offset_deg = 0.5 / 3600.0  # 0.5 arcsec RA offset at Dec=0 (cos 0 = 1)
+    sigma_b = 0.1  # 2MASS-like 100 mas per axis
+    sigma_gaia = 0.0005  # Gaia bright source 0.5 mas per axis
+
+    left = pl.DataFrame({
+        "ra": [282.0, 282.0],
+        "dec": [0.0, 0.0],
+        "ra_error": [sigma_b, sigma_b],
+        "dec_error": [sigma_b, sigma_b],
+        "epoch": [2000.0, 2000.0],
+        # mag_g drives per-row magnitude scaling: bright clipped to 3.0,
+        # faint clipped to 0.3.
+        "mag_g": [10.0, 20.0],
+    })
+    right = pl.DataFrame({
+        "ra": [282.0 + offset_deg, 282.0 + offset_deg],
+        "dec": [0.0, 0.0],
+        "ra_error": [sigma_gaia, sigma_gaia],
+        "dec_error": [sigma_gaia, sigma_gaia],
+        "epoch": [2016.0, 2016.0],
+    })
+
+    src_a = _src(
+        "a", ra_err_column="ra_error", dec_err_column="dec_error",
+        epoch_column="epoch", epoch=2000.0,
+    )
+    src_b = _src(
+        "b", ra_err_column="ra_error", dec_err_column="dec_error",
+        epoch_column="epoch", epoch=2016.0,
+    )
+
+    # Baseline: without pm_prior, no drift on either side; the per-row
+    # error budget alone gives chord_max ~ 3 * (0.141 + 0.0007) ~ 0.426".
+    # Both candidates at 0.5" are too far -> 0 matches.
+    spec_no_pm = MatchSpec(
+        radius_arcsec=2.0, matcher="skyerr", max_error=3.0,
+        target_epoch=2016.0,
+    )
+    out_no_pm = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                          spec_no_pm, engine="fast").collect()
+    assert out_no_pm.height == 0, (
+        "Without pm_prior, chord_max ~0.426\" < 0.5\" offset; "
+        f"got {out_no_pm.height} matches"
+    )
+
+    # With pm_prior + magnitude scaling: per-row drift inflates the
+    # left-side sigma and chord_max rises to ~1.47\", allowing both 0.5\"
+    # candidates to match in a single query.  Round-trip verifies the
+    # injected offset is preserved to within float precision.
+    spec_pm = MatchSpec(
+        radius_arcsec=2.0, matcher="skyerr", max_error=3.0,
+        target_epoch=2016.0, pm_prior=True,
+        pm_prior_magnitude_column="mag_g",
+    )
+    out_pm = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                       spec_pm, engine="fast").collect()
+    # Both rows match because chord_max uses np.nanmax(lsig): the bright
+    # row's wide sigma (drift 0.48") drives the joint budget to ~1.47",
+    # admitting both candidates.  The faint-only check below shows that
+    # the faint row's *own* tight budget (~0.34") would otherwise reject
+    # the 0.5" candidate -- so per-row drift is genuinely computed
+    # differently for the two rows.
+    assert out_pm.height == 2, (
+        "Expected both rows to match: chord_max ~1.47\" (driven by "
+        "bright's per-row wide sigma under np.nanmax) admits both 0.5\" "
+        f"candidates; got {out_pm.height} matches"
+    )
+    assert "sep_arcsec" in out_pm.columns
+    # Tight tolerance: float64 precision at 0.5\" is well below
+    # microarcseconds, so 0.499..0.501 catches anything larger than float
+    # round-off while tolerating sub-milliarcsecond rounding.
+    seps = out_pm["sep_arcsec"].to_numpy()
+    assert all(0.499 < s < 0.501 for s in seps), (
+        f"Expected seps ~0.5 arcsec for both matches; got {seps.tolist()}"
+    )
+
+    # Per-row sigma sanity: the faint row alone (chord_max driven by
+    # faint only) is tight enough to reject at 0.5\".  This verifies
+    # that pm_prior *correctly* produces a SMALL drift on the faint row
+    # (a regression that dropped magnitude scaling would inflate the
+    # faint row and let it through).  Bright-only at the same offset
+    # should match -- confirming pm_prior inflates per-row sigma when
+    # the magnitude scaling demands it.
+    left_bright = left.head(1)
+    left_faint = left.tail(1)
+    out_bright = sky_match(src_a, src_b, left_bright.lazy(), right.lazy(),
+                           spec_pm, engine="fast").collect()
+    out_faint = sky_match(src_a, src_b, left_faint.lazy(), right.lazy(),
+                          spec_pm, engine="fast").collect()
+    assert out_bright.height == 1, (
+        f"Bright row alone at 0.5\" should match; got {out_bright.height}"
+    )
+    assert out_faint.height == 0, (
+        "Faint row alone at 0.5\" should NOT match: per-row chord_max "
+        f"~0.33\" < 0.5\". Got {out_faint.height} matches -- a "
+        "regression that drops magnitude scaling would let it through."
+    )
+
+    # Quadrature-vs-linear-add discrimination.  Bright row alone at
+    # 1.6 arcsec separation.  Under correct quadrature: max sep
+    # = 3 * (0.49 + 0.0007) = 1.47\" -> REJECTED.  Under broken linear
+    # addition (lsig = 0.1 + 0.48 = 0.58\"): max sep = 3 * (0.58 +
+    # 0.0007) = 1.74\" -> ACCEPTED.  height == 0 iff drift is added
+    # in true quadrature.
+    offset_wide_deg = 1.6 / 3600.0
+    right_wide = pl.DataFrame({
+        "ra": [282.0 + offset_wide_deg, 282.0 + offset_wide_deg],
+        "dec": [0.0, 0.0],
+        "ra_error": [sigma_gaia, sigma_gaia],
+        "dec_error": [sigma_gaia, sigma_gaia],
+        "epoch": [2016.0, 2016.0],
+    })
+    out_wide = sky_match(src_a, src_b, left_bright.lazy(),
+                         right_wide.lazy(), spec_pm,
+                         engine="fast").collect()
+    assert out_wide.height == 0, (
+        "1.6 arcsec should NOT match the bright row under quadrature "
+        f"max (1.47 arcsec); got {out_wide.height} matches. Drift may "
+        "be added linearly rather than in quadrature."
+    )
+
+
+def test_pm_prior_both_sides_drift_inflation():
+    """Two-old-survey case (e.g., USNO-B vs 2MASS, neither has PMs):
+    BOTH sides have epochs far from target_epoch so each carries
+    its own per-row drift.  Verifies per-row drift is added in
+    quadrature on BOTH sides independently and that the joint
+    ``chord_max`` (under skyerr) reflects drift from BOTH sides.
+
+    Realistic use case: crossmatching USNO-B (mean epoch ~1980) and
+    2MASS (mean epoch ~2000) at the Gaia DR3 reference epoch (2016).
+    Neither survey has measured PMs, so ``pm_prior`` is the only way
+    to widen the match radius to cover proper-motion drift accumulated
+    between the two surveys.
+
+    Setup at Galactic plane (RA=282 deg, Dec=0 deg => ``sigma_mu`` base
+    = 10 mas/yr, magnitude scaling disabled).
+
+    Per-row drift at ``target_epoch=2016``::
+
+        left  (epoch 1980): dt=36 yr -> drift = 10*36 = 360 mas = 0.36"
+        right (epoch 2000): dt=16 yr -> drift = 10*16 = 160 mas = 0.16"
+
+    Per-row ``lsig``/``rsig`` (per-row error + drift in quadrature,
+    following the formula in ``_pos_sigma_arcsec``)::
+
+        sigma = sqrt(ra_err^2 + dec_err^2 + drift^2)
+
+    Joint chord_max under skyerr = 3 * (lsig + rsig)::
+
+        both sides drift:    3 * (0.387 + 0.214) ~ 1.80"   <- target
+        left drift only:     3 * (0.387 + 0.141) ~ 1.59"
+        right drift only:    3 * (0.141 + 0.214) ~ 1.07"
+        neither side drifts: 3 * (0.141 + 0.141) ~ 0.85"
+
+    Three test separations chosen to isolate each combination:
+
+    1. At sep 1.4" -- minimum-distance gate (chord_max = 1.80):
+
+       * without pm_prior (chord 0.85): 1.4 > 0.85 -> NO MATCH
+       * joint both drift (chord 1.80): 1.4 < 1.80 -> MATCH
+       -> Demonstrates pm_prior inflates the joint chord_max on BOTH
+          sides.  Round-trip seps verify the injected offset.
+
+    2. At sep 1.65" -- above single-side chord_max:
+
+       * left-only drift (right at target_epoch, chord 1.59):
+           1.65 > 1.59 -> NO MATCH
+       * right-only drift (left at target_epoch, chord 1.07):
+           1.65 > 1.07 -> NO MATCH
+       * joint both drift (chord 1.80): 1.65 < 1.80 -> MATCH
+       -> Two rejected + one accepted at the same sep proves BOTH
+          sides' drift contributes to the joint chord_max.
+
+    3. At sep 1.95" -- quadrature vs linear-add regression::
+
+       Quadrature (correct):     lsig 0.387, rsig 0.214, chord 1.80 < 1.95 -> NO MATCH
+       Linear add (regression):  lsig = 0.141+0.36 = 0.50; rsig = 0.141+0.16 = 0.30;
+                                 chord = 3 * (0.50 + 0.30) = 2.41 > 1.95 -> MATCH
+
+       height == 0 iff drift is added in true quadrature on at least
+       one side (regression would surface as a match that should not
+       exist).
+    """
+    offset_deg = 1.4 / 3600.0          # both sides drift, sep ~ joint chord
+    offset_split_deg = 1.65 / 3600.0   # sep above single-side chord, below joint chord
+    offset_wide_deg = 1.95 / 3600.0    # sep above correct chord, below linear-add chord
+    sigma_b = 0.1                      # 100 mas per axis
+
+    def make_lr(epoch_a, epoch_b, off):
+        """Build a (left, right) DataFrame pair at Galactic plane with the
+        given side epochs and a RA offset of ``off`` degrees at Dec=0
+        (where 1 deg = 3600 arcsec exactly since cos(0) = 1)."""
+        return (
+            pl.DataFrame({
+                "ra": [282.0], "dec": [0.0],
+                "ra_error": [sigma_b], "dec_error": [sigma_b],
+                "epoch": [epoch_a],
+            }),
+            pl.DataFrame({
+                "ra": [282.0 + off], "dec": [0.0],
+                "ra_error": [sigma_b], "dec_error": [sigma_b],
+                "epoch": [epoch_b],
+            }),
+        )
+
+    # Catalog-level epochs: per-row epoch column wins when present, so
+    # these default to 1980/2000 but are overridden by DataFrame values
+    # when the per-row epoch is 2016.
+    src_a = _src(
+        "a", ra_err_column="ra_error", dec_err_column="dec_error",
+        epoch_column="epoch", epoch=1980.0,
+    )
+    src_b = _src(
+        "b", ra_err_column="ra_error", dec_err_column="dec_error",
+        epoch_column="epoch", epoch=2000.0,
+    )
+    spec_no_pm = MatchSpec(
+        radius_arcsec=2.0, matcher="skyerr", max_error=3.0,
+        target_epoch=2016.0,
+    )
+    spec_pm = MatchSpec(
+        radius_arcsec=2.0, matcher="skyerr", max_error=3.0,
+        target_epoch=2016.0, pm_prior=True,
+    )
+
+    # --- 1a. baseline: no pm_prior at sep 1.4" -> NO MATCH -----------------
+    left, right = make_lr(1980.0, 2000.0, offset_deg)
+    out = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                    spec_no_pm, engine="fast").collect()
+    assert out.height == 0, (
+        "Without pm_prior at 1.4\" sep, chord_max ~ 3*(0.141+0.141) "
+        f"= 0.85\" < 1.4\"; got {out.height} matches"
+    )
+
+    # --- 1b. joint both drift at sep 1.4" -> MATCH -----------------------
+    # Round-trip the injected separation in the same assertion to verify
+    # sky_match reports the offset accurately under per-row drift.
+    left, right = make_lr(1980.0, 2000.0, offset_deg)
+    out = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                    spec_pm, engine="fast").collect()
+    assert out.height == 1, (
+        "Joint both-drift at 1.4\" sep: chord_max ~ 3*(0.387+0.214) "
+        f"= 1.80\" should match; got {out.height}"
+    )
+    assert "sep_arcsec" in out.columns
+    sep = out["sep_arcsec"][0]
+    assert 1.39 < sep < 1.41, (
+        f"Expected sep ~1.4 arcsec (injected offset); got {sep:.6f}"
+    )
+
+    # --- 2a. left-only drift (right at target_epoch) at sep 1.65" --------
+    # right epoch = target_epoch, so delta_t = 0 -> no drift on right.
+    # chord_max collapses to 3*(lsig_left + rsig_right)
+    #                          = 3*(0.387 + 0.141) ~ 1.59"
+    # 1.65 > 1.59 -> NO MATCH.  Demonstrates that left's drift alone
+    # does not inflate chord enough at this separation.
+    left, right = make_lr(1980.0, 2016.0, offset_split_deg)
+    out = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                    spec_pm, engine="fast").collect()
+    assert out.height == 0, (
+        "Left-only drift at 1.65\" sep: chord ~1.59\" < 1.65\". "
+        f"Right at target_epoch should NOT contribute drift; "
+        f"got {out.height} matches"
+    )
+
+    # --- 2b. right-only drift (left at target_epoch) at sep 1.65" -------
+    # Same sep but mirrored: left epoch = target_epoch.  chord_max
+    # collapses to 3*(0.141 + 0.214) ~ 1.07", so 1.65 > 1.07 -> NO MATCH.
+    left, right = make_lr(2016.0, 2000.0, offset_split_deg)
+    out = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                    spec_pm, engine="fast").collect()
+    assert out.height == 0, (
+        "Right-only drift at 1.65\" sep: chord ~1.07\" < 1.65\". "
+        f"Left at target_epoch should NOT contribute drift; "
+        f"got {out.height} matches"
+    )
+
+    # --- 2c. joint both drift at sep 1.65" -> MATCH ----------------------
+    # Same 1.65" candidate is now accepted because BOTH sides' drift
+    # lifts the joint chord_max to ~1.80".  Mirrored with 2a/2b, this
+    # is the proof that both sides' drift contributes independently.
+    left, right = make_lr(1980.0, 2000.0, offset_split_deg)
+    out = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                    spec_pm, engine="fast").collect()
+    assert out.height == 1, (
+        "Joint both-drift at 1.65\" sep: chord_max ~1.80\" should "
+        f"match (margin 0.151\"); got {out.height}. The same sep "
+        "rejected by left-only and right-only cases above."
+    )
+
+    # --- 3. quadrature-vs-linear-add regression at sep 1.95" ------------
+    # Quadrature correct: chord = 3*(0.387+0.214) = 1.80 < 1.95 -> NO.
+    # Linear-add broken: lsig = 0.141+0.36 = 0.50; rsig = 0.141+0.16 = 0.30;
+    #                    chord = 3*(0.50+0.30) = 2.41 > 1.95 -> YES.
+    # height == 0 iff drift is added in quadrature on at least one side.
+    left, right = make_lr(1980.0, 2000.0, offset_wide_deg)
+    out = sky_match(src_a, src_b, left.lazy(), right.lazy(),
+                    spec_pm, engine="fast").collect()
+    assert out.height == 0, (
+        "Joint both-drift at 1.95\" sep, chord ~1.80\" < 1.95\". "
+        "A non-zero result suggests drift was added linearly instead "
+        f"of in quadrature on at least one side. Got {out.height}"
+    )

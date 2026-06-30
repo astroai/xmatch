@@ -13,12 +13,17 @@ matching strategy.
 
 Internally all catalogue data flows through [polars](https://pola.rs) `LazyFrame`s;
 results stream straight to disk so large matches never need to fit in memory.
+Results can be saved as Parquet, CSV, FITS, or **HATS** (hierarchical tiling)
+for efficient spatial queries on massive catalogues.
 
 ## Features
 
 - One simple command: `xmatch cat1 cat2`.
 - Inputs: local Parquet/CSV/FITS files, polars/pandas frames (Python API), remote
   TAP catalogues, the CDS XMatch service, and HATS catalogues (optional).
+- Outputs: Parquet, CSV, FITS, and **HATS** (hierarchical tiling with
+  configurable row-per-pixel threshold via `--hats-threshold`). Ideal for
+  union catalogues and N-way results that grow into millions of rows.
 - Spatial matching engines (`--engine NAME`, default `auto`):
   - **STILTS** `tmatch2` (`sky`/`skyerr`/`skyellipse`) when a `stilts` command is
     available (`engine=stilts`).
@@ -55,8 +60,11 @@ pip install -e ".[hats]" # optional HATS/LSDB support
 # Two local files (coordinate columns auto-detected); CSV result on stdout
 xmatch a.parquet b.csv
 
-# Write the result to a file (.parquet/.csv/.fits)
+# Write the result to a file (.parquet/.csv/.fits/.hats)
 xmatch a.parquet b.csv -o matches.parquet -r 1.5
+
+# Save a union catalogue as a HATS directory for spatial queries
+xmatch gaia allwise.csv twomass.csv --union -r 1.5 -o master.hats --hats-threshold 50000
 
 # Local file vs a configured remote catalogue (downloaded around the local footprint)
 xmatch my_sources.csv gaia -o my_gaia.parquet -r 2.0
@@ -114,6 +122,35 @@ cm.crossmatch(a, b, id_join=True, id_column_1="id", id_column_2="id",
 `lazy=True`, and `None` when `output_file=` is given (the result is streamed to
 that file). Use `.to_pandas()` if you need a pandas frame.
 
+### Multi-catalogue matching
+
+```python
+# N-catalogue pairwise intersection (cat1 × cat2 → result × cat3 → …)
+result = cm.crossmatch_multi(
+    ["gaia", "allwise.csv", "twomass.csv"],
+    radius_arcsec=1.5,
+    output_file="matches.parquet",
+)
+
+# Union catalogue: full outer join across all catalogues
+# Every row from every catalogue survives — ideal for building
+# a master catalogue of all measurements of all sources on the sky.
+# A `_src_cats` column shows which catalogue(s) contributed (e.g. "1+2+3").
+master = cm.union_match(
+    ["gaia", "allwise.csv", "twomass.csv"],
+    ra=180, dec=-30, radius_deg=0.5, radius_arcsec=1.5,
+)
+print(master["_src_cats"].value_counts())
+
+# Bayesian N-way simultaneous crossmatching (Budavári & Szalay 2008)
+# Scores tuples from ALL catalogues at once, producing a p_match column.
+nway = cm.nway_match(
+    ["gaia", "allwise.csv", "usno_b1.csv"],
+    radius_arcsec=2.0,
+    prior_columns=["phot_g_mean_mag"],
+)
+```
+
 ## Matcher tiers
 
 Spatial sky matching has three tiers, each a drop-in replacement. They all share
@@ -130,6 +167,57 @@ the same result schema (left columns + right columns with collisions suffixed
 The three engines behind `--engine` are mutually exclusive (sky-match engines).
 Tier 3 is orthogonal: pass `--probabilistic --priors g,r` on top of any engine
 to add a probabilistic qualification column.
+
+## HATS output
+
+When the output path ends with `.hats`, xmatch writes the result as a
+**HATS (Hierarchical Adaptive Tiling Scheme) catalogue** — a directory of
+HEALPix-partitioned Parquet files indexed for fast spatial queries. This is
+especially valuable for:
+
+- **Union catalogues** (`--union`) that merge millions of rows via outer joins.
+- **N-way results** from `crossmatch_multi`, `union_match`, or `nway_match`.
+- Any output large enough that you later plan to query it by position.
+
+```bash
+# Build a massive union catalogue, then query it efficiently later
+xmatch gaia allwise_dl twomass_dl --union -r 1.5 -o master.hats --hats-threshold 50000
+```
+
+**Requirements:** HATS output needs the optional `lsdb` package (`pip install lsdb`).
+The `--hats-threshold` flag (default 100 000) controls the maximum rows per
+HEALPix pixel — lower values give finer spatial partitioning at the cost of
+more files.
+
+From Python, any crossmatch method that accepts `output_file=` supports `.hats`:
+
+```python
+# Union catalogue → HATS directory
+cm.union_match(
+    ["gaia", "allwise.csv", "twomass.csv"],
+    output_file="master.hats",
+    hats_threshold=50_000,
+    ra=180, dec=-30, radius_deg=0.5, radius_arcsec=1.5,
+)
+
+# N-way Bayesian match → HATS directory
+cm.nway_match(
+    ["gaia", "allwise.csv", "usno_b1.csv"],
+    output_file="nway_result.hats",
+    radius_arcsec=2.0,
+    prior_columns=["phot_g_mean_mag"],
+    hats_threshold=25_000,
+)
+```
+
+Later, read the HATS catalogue back for spatial queries with LSDB:
+
+```python
+import lsdb
+cat = lsdb.read_hats("master.hats")
+# Crossmatch against a new catalogue
+result = cat.crossmatch(lsdb.read_hats("new_data.hats"), radius_arcsec=1.0)
+```
 
 ## Strategy selection
 

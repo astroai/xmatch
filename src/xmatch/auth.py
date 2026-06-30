@@ -3,13 +3,21 @@ import os
 import sys
 from typing import Any, Dict, Optional
 
-import keyring
 import requests  # HTTP sessions are used for authenticated TAP endpoints.
 
 logger = logging.getLogger(__name__)
 
-# Define known services for which to attempt loading credentials
-# Users should set credentials for these service names using the keyring library
+# Check keyring availability once at module load.
+# Per-service failures are handled at DEBUG level in _load_auth_from_sources().
+_HAS_KEYRING = False
+try:
+    import keyring  # noqa: F401
+
+    _HAS_KEYRING = True
+except ImportError:
+    pass
+
+# Define known services for which to attempt loading credentials.
 KNOWN_SERVICES = {
     "noao_datalab": {
         "urls": ["https://datalab.noirlab.edu/tap"],
@@ -23,119 +31,125 @@ KNOWN_SERVICES = {
         "urls": ["http://tapvizier.cds.unistra.fr/TAPVizieR/tap"],
         "description": "VizieR TAP service",
     },
-    # Add other potential services here
 }
 
 
-# Placeholder for the AuthConfig class
 class AuthConfig:
     """Manages authentication configurations for different services."""
 
     def __init__(self, auth_details: Optional[Dict[str, Any]] = None):
-        """
-        Initializes AuthConfig.
-
-        Args:
-            auth_details: A dictionary where keys are service/archive names
-                          and values are authentication details (e.g., requests.Session).
-                          If None, attempts to load from keyring or other sources.
-        """
         if auth_details is None:
             auth_details = self._load_auth_from_sources()
         self._auth_sessions: Dict[str, Any] = auth_details if auth_details else {}
-        logger.info(f"AuthConfig initialized with sessions for: {list(self._auth_sessions.keys())}")
+        if self._auth_sessions:
+            logger.info(
+                "AuthConfig initialized with sessions for: %s",
+                list(self._auth_sessions.keys()),
+            )
+        else:
+            logger.debug("AuthConfig initialized (no authenticated sessions).")
 
     def _load_auth_from_sources(self) -> Dict[str, Any]:
-        """
-        Placeholder method to load authentication details from keyring or other secure storage.
-        Needs implementation based on how credentials should be stored and retrieved.
-        """
-        logger.debug("Attempting to load authentication details from sources (keyring, etc.)...")
+        """Load authentication details from environment and keyring."""
+        logger.debug("Loading authentication details from environment / keyring...")
         loaded_auth = {}
-        # Example: Try loading credentials for known services from keyring
-        known_services = ["noao_datalab", "gaia_archive", "vizier", "cadc"]  # Add more as needed
+
+        # 1) Environment variables (preferred for CLI/CI usage).
+        known_services = ["noao_datalab", "gaia_archive", "vizier", "cadc"]
         for service_name in known_services:
-            try:
-                # This is a simplified example. Real implementation needs to handle
-                # username/password retrieval and potentially create a requests.Session
-                # with appropriate authentication (e.g., HTTPBasicAuth).
-                username = keyring.get_password(service_name, "username")
-                password = keyring.get_password(service_name, "password")
+            env_prefix = f"XMATCH_{service_name.upper()}"
+            username = os.environ.get(f"{env_prefix}_USER")
+            password = os.environ.get(f"{env_prefix}_PASSWORD")
+            if username and password:
+                logger.info(
+                    "Found credentials for '%s' in environment variables.", service_name
+                )
+                session = requests.Session()
+                session.auth = requests.auth.HTTPBasicAuth(username, password)
+                loaded_auth[service_name] = session
 
-                if username and password:
-                    logger.info(f"Found credentials for service '{service_name}' in keyring.")
-                    # Example: Create a requests session with basic auth
-                    session = requests.Session()
-                    session.auth = requests.auth.HTTPBasicAuth(username, password)
-                    loaded_auth[service_name] = session
-                    # Clear sensitive variables immediately after use if possible
-                    del username
-                    del password
-                else:
+        # 2) Keyring (fallback for desktop users).
+        if _HAS_KEYRING:
+            import keyring
+
+            for service_name in known_services:
+                if service_name in loaded_auth:
+                    continue  # env var already provided it
+                try:
+                    username = keyring.get_password(service_name, "username")
+                    password = keyring.get_password(service_name, "password")
+                    if username and password:
+                        logger.info(
+                            "Found credentials for '%s' in keyring.", service_name
+                        )
+                        session = requests.Session()
+                        session.auth = requests.auth.HTTPBasicAuth(username, password)
+                        loaded_auth[service_name] = session
+                    else:
+                        logger.debug(
+                            "No keyring credentials for '%s'.", service_name
+                        )
+                except Exception:
+                    # Expected on headless/CI — no working keyring backend.
                     logger.debug(
-                        f"Credentials for service '{service_name}' not found or incomplete in keyring."
+                        "Keyring unavailable for '%s' (no backend).", service_name
                     )
-
-            except Exception as e:
-                logger.warning(f"Error accessing keyring for service '{service_name}': {e}")
 
         return loaded_auth
 
     def get_auth_session(self, service_name: str) -> Optional[Any]:
-        """
-        Retrieves the authentication session/details for a given service name.
-
-        Args:
-            service_name: The name of the service/archive (e.g., 'gaia_archive', 'cds').
-
-        Returns:
-            The authentication object (e.g., requests.Session) or None if not found.
-        """
+        """Return the authenticated session for *service_name*, or None."""
         session = self._auth_sessions.get(service_name)
         if session:
-            logger.debug(f"Retrieved auth session for service '{service_name}'.")
+            logger.debug("Retrieved auth session for '%s'.", service_name)
         else:
-            logger.debug(f"No pre-configured auth session found for service '{service_name}'.")
+            logger.debug("No auth session for '%s'.", service_name)
         return session
 
-    def add_auth_session(self, service_name: str, session: Any):
-        """Adds or updates an authentication session."""
+    def add_auth_session(self, service_name: str, session: Any) -> None:
+        """Register a new authenticated session."""
         self._auth_sessions[service_name] = session
-        logger.info(f"Added/Updated auth session for service '{service_name}'.")
+        logger.info("Added auth session for '%s'.", service_name)
 
 
-# Function to load the auth config (called from CrossMatch.__init__)
+# --------------------------------------------------------------------------- #
+# Public helpers
+# --------------------------------------------------------------------------- #
+
 def load_auth_config() -> AuthConfig:
-    """Loads and returns an AuthConfig instance."""
-    # In a real scenario, this might load details from a file or environment
-    # and pass them to the AuthConfig constructor.
-    # For now, it relies on the AuthConfig constructor to load from keyring.
+    """Load and return an AuthConfig instance."""
     return AuthConfig()
 
 
-# Add environment variable support for authentication
 def get_credentials_from_env(service_name: str) -> Dict[str, str]:
-    """Get credentials from environment variables if available."""
+    """Read credentials from XMATCH_<SERVICE>_USER / _PASSWORD env vars."""
     env_prefix = f"XMATCH_{service_name.upper()}"
     username = os.environ.get(f"{env_prefix}_USER")
     password = os.environ.get(f"{env_prefix}_PASSWORD")
-
     if username and password:
-        logger.info(f"Using credentials from environment variables for {service_name}")
+        logger.info("Using credentials from environment for '%s'.", service_name)
         return {"user": username, "password": password}
-
     return {}
 
 
-# Add function to set credentials interactively
 def set_credentials_interactive(service_name: str) -> bool:
-    """Set credentials interactively for a service."""
+    """Set credentials interactively for a service via keyring prompt."""
     import getpass
 
+    if not _HAS_KEYRING:
+        print(
+            "keyring is not available. Use environment variables instead:\n"
+            f"  export XMATCH_{service_name.upper()}_USER=<username>\n"
+            f"  export XMATCH_{service_name.upper()}_PASSWORD=<password>",
+            file=sys.stderr,
+        )
+        return False
+
+    import keyring
+
     print(f"\nSetting credentials for {service_name}")
-    print(
-        f"Description: {KNOWN_SERVICES.get(service_name, {}).get('description', 'Custom service')}"
-    )
+    desc = KNOWN_SERVICES.get(service_name, {}).get("description", "Custom service")
+    print(f"Description: {desc}")
 
     username = input("Username: ").strip()
     if not username:
@@ -155,14 +169,3 @@ def set_credentials_interactive(service_name: str) -> bool:
     except Exception as e:
         print(f"Error saving credentials: {e}", file=sys.stderr)
         return False
-
-
-# Example usage (optional, for testing)
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
-    auth_config = load_auth_config()
-    gaia_session = auth_config.get_auth_session("gaia_archive")
-    print(f"Gaia Session: {gaia_session}")
-    # Example of adding a session manually (if needed)
-    # custom_session = requests.Session()
-    # auth_config.add_auth_session('my_custom_service', custom_session)
