@@ -21,3 +21,11 @@
 ## 2024-06-18 - NumPy Unique Vectorization Over Python Sets
 **Learning:** When performing duplicate filtering in large array operations (such as finding the best astropy matches), using a native Python `for` loop with a `set` for lookup incurs significant overhead due to Python's variable tracking and dynamic typing.
 **Action:** Prefer vectorized NumPy operations like `np.unique(array, return_index=True)` followed by `np.sort` on the indices. This pushes the loop down to the fast C backend, providing a substantial speedup for massive astronomical arrays.
+
+## 2024-05-18 - Fast Boolean Array Construction from Polars Series Indices
+**Learning:** In astronomical data processing with massive arrays, using `set(int(r) for r in series.to_list())` and list comprehensions to construct a boolean mask array introduces immense Python variable tracking overhead, turning an O(1) vectorized operation into a slow O(N) bottleneck.
+**Action:** Always construct boolean arrays by instantiating empty arrays with `np.zeros(size, dtype=bool)` and use NumPy vectorized indexing (e.g. `keep[series.to_numpy()] = True`) to populate truthy values, yielding orders of magnitude speedups.
+
+## 2024-05-18 - Vectorized Pandas Column Identification
+**Learning:** `df.select_dtypes(include=['object'])` and `df['col'].iloc[0]` add surprisingly large overhead and trigger deprecation warnings in newer Pandas versions.
+**Action:** Use fast boolean indexing over column attributes: `df.columns[df.dtypes == "object"]`, and `df[col].to_numpy()[0]` instead of `.iloc[0]` for quick element peeks.
