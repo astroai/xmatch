@@ -153,6 +153,14 @@ classified the remaining `bolt-`/`palette-` branches.
 
 ## Tier 3 — remote cleanup
 
+**Tier 3 status — DONE 2026-06-30 (runbook + script-fix land via 7376c04, 31663df).**
+The automation surface (`.github/workflows/q3-review-reminder.yml` + the
+reusable checklist at `docs/audits/quarterly-review.md`) was added in
+commit `f521946` on top of `9b807b8`; the underlying stale-PR script fix
+landed in `31663df` and the runbook in `7376c04`. The prose below is
+preserved verbatim so the 2026 Q3 review can lean on this section as the
+audit-of-record for what was done.
+
 The remote has **20 open PRs** and **20 stale feature branches**, all from
 `bolt-…` and `palette-…` AI-agent flows.
 
