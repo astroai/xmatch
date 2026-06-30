@@ -78,6 +78,45 @@ def test_bytes_columns_decode_to_utf8():
     assert df["src"].to_list() == ["GDR3", "Gaia"]
 
 
+def test_decode_pandas_bytes_columns_skips_non_object_columns():
+    """Vectorised byte-column decode skips non-object columns up-front."""
+    import pandas as pd
+
+    pdf = pd.DataFrame({
+        "id": [1, 2, 3],                          # int64 — skipped
+        "mag": [10.5, 12.0, 14.2],                # float64 — skipped
+        "src": [b"GDR3", b"Gaia", b"DESI"],       # object bytes — decoded
+        "label": ["alpha", "beta", "gamma"],     # object str — left alone
+        "epoch": pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"]),  # datetime — skipped
+    })
+    out = io_utils._decode_pandas_bytes_columns(pdf.copy())
+    assert out["src"].tolist() == ["GDR3", "Gaia", "DESI"]
+    assert out["label"].tolist() == ["alpha", "beta", "gamma"]
+    # Non-object columns must be unchanged.
+    assert out["id"].dtype == pdf["id"].dtype
+    assert out["mag"].dtype == pdf["mag"].dtype
+    assert out["epoch"].dtype == pdf["epoch"].dtype
+
+
+def test_decode_pandas_bytes_columns_empty_dataframe():
+    """Empty DataFrame with object columns does not raise."""
+    import pandas as pd
+
+    pdf = pd.DataFrame({"src": pd.Series([], dtype=object)})
+    out = io_utils._decode_pandas_bytes_columns(pdf)
+    assert out["src"].tolist() == []
+
+
+def test_decode_pandas_bytes_columns_all_non_bytes_objects():
+    """Object columns that contain only strings skip decode cleanly."""
+    import pandas as pd
+
+    pdf = pd.DataFrame({"label": ["a", "b", "c"], "name": ["x", "y", "z"]})
+    out = io_utils._decode_pandas_bytes_columns(pdf.copy())
+    assert out["label"].tolist() == ["a", "b", "c"]
+    assert out["name"].tolist() == ["x", "y", "z"]
+
+
 def test_multi_d_columns_are_dropped():
     """Multi-dimensional columns are skipped entirely."""
     import numpy as np
