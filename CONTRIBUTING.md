@@ -153,6 +153,15 @@ a failing state on intermediate SHAs that CI will flag.
 
 ## Quarterly maintenance: stale AI-agent PR cleanup
 
+> A reusable, automation-aware variant of this runbook lives at
+> [`docs/audits/quarterly-review.md`](docs/audits/quarterly-review.md).
+> The GitHub Actions workflow
+> [`.github/workflows/q3-review-reminder.yml`](.github/workflows/q3-review-reminder.yml)
+> runs the dry-run scan (`--json`) automatically on the 1st of each
+> quarter and posts a triage issue when matches are non-empty. The
+> destructive close + branch delete (`--apply`) step is **always run
+> manually** by a maintainer, never unattended.
+
 AI-agent flows in this repo historically shipped their work as
 ``bolt-*`` / ``palette-*`` / ``ux-*`` / ``jules-*`` / ``integrate-*`` /
 ``perf-*`` branches with corresponding PRs.  When the v0.3 audit
