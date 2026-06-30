@@ -89,16 +89,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Use the unique label this workflow stamps on triage issues
-          # (`automated`) as the discriminator, not fuzzy `--search` text
-          # matching (which would also pick up human-authored issues that
-          # happen to mention the same phrase).
+          # Use the repo-specific label `q3-review` from the set stamped on
+          # triage issues (the create-side stamps `audit,q3-review,automated`)
+          # as the discriminator, not fuzzy `--search` text matching (which
+          # would also pick up human-authored issues that happen to mention
+          # the same phrase). `q3-review` avoids collision with any future
+          # automated workflow that might choose a generic label like
+          # `automated`; do not remove it from the create-side without
+          # updating this lookup accordingly.
           existing=$(gh issue list \
-            --label automated \
+            --label q3-review \
             --state open \
             --search "Quarterly AI-agent PR cleanup in:title" \
             --limit 1 --json number,title | jq 'length')
-          echo "Open automated triage issues already: ${existing}"
+          echo "${existing} q3-review triage issue(s) already open"
           echo "skip=${existing}" >> "$GITHUB_OUTPUT"
 
       - name: Upload scan.json as workflow artifact
