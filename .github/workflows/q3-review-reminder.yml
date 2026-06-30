@@ -30,16 +30,18 @@ on:
         type: string
 
 permissions:
-  # Two permissions only:
-  #   contents: read  - `actions/checkout@v4` clones the repo. Note that
-  #                    specifying ANY `permissions:` block REMOVES the
-  #                    default GITHUB_TOKEN implicit scopes; an explicit
-  #                    `contents: read` is required (a plain `default`
-  #                    workflow wouldn't need this).
-  #   issues: write   - gh issue create for the triage issue.
-  # pull-requests: read is unused; the script reads via gh under the same
-  # token's repo scope.
+  # Three permissions required for the GH ops this workflow runs:
+  #   contents: read       - actions/checkout@v4 clones the repo. Note
+  #                         that specifying ANY permissions block REMOVES
+  #                         the default GITHUB_TOKEN implicit scopes; an
+  #                         explicit contents: read is required.
+  #   pull-requests: read  - `gh pr list` from scripts/cleanup-stale-prs.py
+  #                         reads the open PR list. Without this scope the
+  #                         gh CLI exits 1 (Resource not accessible by
+  #                         integration).
+  #   issues: write        - gh issue create for the triage issue.
   contents: read
+  pull-requests: read
   issues: write
 
 # Avoid racing scheduled and manual runs on the same quarter. With
@@ -54,6 +56,15 @@ jobs:
     name: Dry-run scan + triage issue
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      # gh CLI auth: every step that touches `gh` (Dry-run scan, lookup,
+      # Open triage issue) needs this. Hoisted from per-step env blocks
+      # so we only map the secret once. gh CLI 2.46+ prefers GH_TOKEN
+      # over GITHUB_TOKEN; mapping here keeps every supported version
+      # happy. With the permissions block listing pull-requests: read,
+      # `gh pr list` succeeds; without it, exits 1 (Resource not
+      # accessible by integration).
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,13 +80,6 @@ jobs:
 
       - name: Dry-run scan (--json only)
         id: scan
-        env:
-          # gh CLI auth: the script calls `gh pr list` via subprocess and
-          # relies on the env. While Actions sets GITHUB_TOKEN automatically,
-          # gh CLI 2.46+ prefers GH_TOKEN; mapping both here keeps every
-          # gh version we care about happy. Without this the call exits 4
-          # (authentication failure) and the script aborts.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pixi run python scripts/cleanup-stale-prs.py --json > /tmp/scan.json || {
             echo "Scan failed; aborting." >&2; exit 1; }
@@ -99,8 +103,6 @@ jobs:
       - name: Idempotency lookup (skip if open triage issue exists)
         id: lookup
         if: steps.scan.outputs.total != '0'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Use the repo-specific label `q3-review` from the set stamped on
           # triage issues (the create-side stamps `audit,q3-review,automated`)
@@ -128,8 +130,6 @@ jobs:
 
       - name: Open triage issue
         if: steps.scan.outputs.total != '0' && steps.lookup.outputs.skip == '0'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           total="${{ steps.scan.outputs.total }}"
           quarter_label="${{ inputs.quarter }}"
