@@ -58,7 +58,11 @@ def _decode_pandas_bytes_columns(pdf) -> Any:
     ``pdf[col].dtype == object`` check (the gating check now runs only
     on object columns), with identical semantics to the prior version.
     """
-    for col in pdf.select_dtypes(include=["object"]).columns:
+    # pandas >= 3 warns when ``include="object"`` silently includes ``str``
+    # dtypes for backward compatibility.  Bytes-only payloads live in
+    # ``object`` columns, never in ``str``, so explicitly excluding ``str``
+    # both matches our intent and silences the deprecation warning.
+    for col in pdf.select_dtypes(include="object", exclude="str").columns:
         if len(pdf) and isinstance(pdf[col].iloc[0], bytes):
             pdf[col] = pdf[col].str.decode("utf-8", errors="replace")
     return pdf

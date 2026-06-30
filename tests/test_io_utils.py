@@ -117,6 +117,32 @@ def test_decode_pandas_bytes_columns_all_non_bytes_objects():
     assert out["name"].tolist() == ["x", "y", "z"]
 
 
+def test_decode_pandas_bytes_columns_skips_string_dtype():
+    """``exclude='str'`` skips pandas ``StringDtype`` columns cleanly.
+
+    Pins the contract introduced by the pandas 4 migration fix: a column
+    with dtype ``string`` (modern ``pd.StringDtype``) never carries bytes,
+    so it is filtered out up-front and ``_decode_pandas_bytes_columns``
+    leaves it untouched.
+
+    Regression guard: a future pandas that narrows or widens what
+    ``select_dtypes(exclude='str')`` matches will trip this test instead
+    of silently decoding (or silently breaking) ``StringDtype`` columns.
+    """
+    import pandas as pd
+
+    pdf = pd.DataFrame({
+        "src": [b"GDR3", b"Gaia"],                              # object bytes — decoded
+        "tag": pd.array(["x", "y"], dtype="string"),            # str — skipped
+        "label": ["a", "b"],                                    # object str — left alone
+    })
+    out = io_utils._decode_pandas_bytes_columns(pdf.copy())
+    assert out["src"].tolist() == ["GDR3", "Gaia"]
+    assert out["tag"].tolist() == ["x", "y"]                    # untouched
+    assert str(out["tag"].dtype) == "string"
+    assert out["label"].tolist() == ["a", "b"]
+
+
 def test_multi_d_columns_are_dropped():
     """Multi-dimensional columns are skipped entirely."""
     import numpy as np
