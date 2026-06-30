@@ -133,6 +133,22 @@ parquet snapshot under `tests/data/`) would:
 
 The benchmark should be optional (skipped unless `XMATCH_BENCH=1`).
 
+**Tier 2 closure status — DONE 2026-06-30.** Both Tier 2 items (#10, #11) are
+closed as part of the v0.4 AUDIT Tier 1-3 consolidation pass that landed on
+`origin/main`. The six commits that together constitute the closure record:
+
+- `17b9366` — docs: add CI smoke guard workflow + algorithms doc
+- `fa81f18` — feat: consolidate AUDIT Tier 1-3 prior work
+- `4ddce50` — perf(io): vectorize pandas byte-column decode (port #113)
+- `be75e0f` — fix(crossmatch): case-insensitive fuzzy suggest (port #114)
+- `7376c04` — docs(contributing): add quarterly stale-PR cleanup runbook
+- `31663df` — fix(cleanup-stale-prs): make `--apply --json` compositional + route progress to stderr
+
+The `cleanup-stale-prs.py` round-trip (runbook + bug fix) is captured under
+`7376c04` and `31663df`. Tier-3 prose below is preserved verbatim — the next
+quarterly review (2026 Q3) can re-open it once the contributor team has
+classified the remaining `bolt-`/`palette-` branches.
+
 ---
 
 ## Tier 3 — remote cleanup
