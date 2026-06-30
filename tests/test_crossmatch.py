@@ -183,6 +183,59 @@ def test_suggest_lowercases_argument(cm):
     assert "gaia_esa" in cm.suggest("GaiaEsa")
 
 
+def test_suggest_preserves_original_case_with_mixed_case_pool():
+    """Regression for palette/case-insensitive-fuzzy-matching-*.
+    suggest() must tolerate mixed-case pool entries (e.g. ``Gaia_DR3``) and
+    return suggestions in their **original** casing rather than the
+    lowercased form picked up for matching.
+    """
+    from unittest import mock
+
+    cm = CrossMatch()
+    # Simulate a YAML edit that used mixed-case catalogue names; pool now
+    # contains both the bundled lowercase names and a few mixed-case extras.
+    mixed_pool = {
+        "Gaia_DR3": "fake_config",
+        "twoMASS_psc": "fake_config",
+        "allWISE_src": "fake_config",
+    }
+    with mock.patch.object(cm, "catalogues_config", mixed_pool), \
+         mock.patch.object(cm, "aliases_config", {}):
+        # Mixed-case input: should still match and return ORIGINAL casing.
+        out_upper = cm.suggest("GAIA_DR3")
+        assert "Gaia_DR3" in out_upper
+        # And should NOT echo the lowercase form.
+        assert "gaia_dr3" not in out_upper
+
+        out_mixed = cm.suggest("Gaia_dr3")
+        assert "Gaia_DR3" in out_mixed
+
+        out_close = cm.suggest("twomass_psc")
+        assert "twoMASS_psc" in out_close
+
+
+def test_suggest_empty_pool_returns_empty():
+    """suggest() against an empty pool must return [], not raise."""
+    from unittest import mock
+
+    cm = CrossMatch()
+    with mock.patch.object(cm, "catalogues_config", {}), \
+         mock.patch.object(cm, "aliases_config", {}):
+        assert cm.suggest("anything") == []
+        assert cm.suggest("") == []
+
+
+def test_suggest_case_insensitive_aliases(cm):
+    """Aliases pool entries are matched case-insensitively too."""
+    from unittest import mock
+
+    aliases_mixed = {"DECaLS_DR10": "decals", "ls_DR10_Extra": "decals"}
+    with mock.patch.object(cm, "aliases_config", aliases_mixed), \
+         mock.patch.dict(cm.catalogues_config, {}, clear=True):
+        out = cm.suggest("decals_dr10_extra")
+        assert "ls_DR10_Extra" in out
+
+
 def test_input_error_carries_source(cm):
     """InputError raised from resolve_source carries the user input as `.source`."""
     from xmatch.exceptions import InputError

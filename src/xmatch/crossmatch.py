@@ -171,17 +171,38 @@ class CrossMatch:
     def suggest(self, name: str, *, n: int = 3, cutoff: float = 0.4) -> List[str]:
         """Return catalogue or alias names similar to ``name`` for hinting.
 
-        Compares ``name`` (case-insensitively) against the union of
-        ``catalogues_config`` and ``aliases_config`` using :mod:`difflib`. The
-        default ``cutoff=0.4`` is intentionally permissive; lower it if you
-        see noise, raise it if you'd rather the helper stay silent on sloppy
-        typos.
+        Compares ``name`` against the union of ``catalogues_config`` and
+        ``aliases_config`` using :mod:`difflib`, **case-insensitively**,
+        while preserving the original (display) casing of matched
+        candidates in the returned list.
 
-        Returns an empty list when nothing is close enough — callers can simply
-        elide the "did you mean?" suffix in that case.
+        Implementation: build a ``lowercase -> original`` dict from the
+        pool (``catalogues_config`` + ``aliases_config``), match the
+        caller's ``name.lower()`` against the lowercase keys, and map the
+        matched lowercase keys back to their original casing.  This makes
+        the helper robust to YAML configs that use mixed-case catalogue
+        names (e.g. ``Gaia_DR3``) rather than the project's default
+        lowercase convention.
+
+        Note: when the pool contains two entries differing only in case
+        (e.g. ``Gaia_DR3`` and ``gaia_dr3``), the dict collapses them
+        and the first-listed entry wins — this is intentional; configs
+        shouldn't ship case-only duplicates.
+
+        The default ``cutoff=0.4`` is intentionally permissive; lower it
+        if you see noise, raise it if you'd rather the helper stay silent
+        on sloppy typos.  Returns an empty list when nothing is close
+        enough — callers can simply elide the "did you mean?" suffix in
+        that case.
         """
         pool = list(self.catalogues_config) + list(self.aliases_config)
-        return difflib.get_close_matches(name.lower(), pool, n=n, cutoff=cutoff)
+        if not pool:
+            return []
+        lower_to_orig = {name.lower(): name for name in pool}
+        matches = difflib.get_close_matches(
+            name.lower(), list(lower_to_orig), n=n, cutoff=cutoff,
+        )
+        return [lower_to_orig[m] for m in matches]      
 
     # ----------------------------------------------------------------- sources
     def resolve_source(self, value: FrameInput, overrides: Dict[str, Any]) -> CatalogueSource:
