@@ -1,6 +1,7 @@
 """Command-line interface: ``xmatch CAT1 CAT2``."""
 
 import argparse
+import difflib
 import logging
 import sys
 from typing import List, Optional
@@ -300,6 +301,29 @@ def _suggest(cm: CrossMatch, name: str, *, n: int = 3) -> str:
     return f"Did you mean: {', '.join(matches)}?" if matches else ""
 
 
+
+def _suggest_endpoint(endpoint: str, cm: CrossMatch, *, n: int = 3, cutoff: float = 0.4) -> str:
+    """Format the closest known endpoint names to ``endpoint`` for hinting."""
+    from .discovery import get_public_endpoints
+
+    endpoints = get_public_endpoints()
+    pool = list(endpoints.keys())
+    for archive_key, archive in cm.archives_config.items():
+        pool.append(archive_key)
+        for svc_key, svc in archive.items():
+            if isinstance(svc, dict) and "access_url" in svc:
+                pool.append(svc_key)
+
+    if not pool:
+        return ""
+
+    lower_to_orig = {name.lower(): name for name in pool}
+    matches = difflib.get_close_matches(
+        endpoint.lower(), list(lower_to_orig), n=n, cutoff=cutoff,
+    )
+    return f" Did you mean: {', '.join(lower_to_orig[m] for m in matches)}?" if matches else ""
+
+
 def _resolve_discovery_endpoint(name: str, cm: CrossMatch) -> str:
     """Resolve a short endpoint name (e.g. 'vizier') to a full TAP URL."""
     from .discovery import get_public_endpoints
@@ -381,11 +405,12 @@ def handle_search(cm: CrossMatch, pattern: str) -> int:
 
 def handle_discover(cm: CrossMatch, endpoint: str, schema_table: Optional[str] = None) -> int:
     """Discover tables and optionally column schema on a remote TAP endpoint."""
-    from .discovery import discover_tables, get_table_schema, get_public_endpoints
+    from .discovery import discover_tables, get_public_endpoints, get_table_schema
 
     url = _resolve_discovery_endpoint(endpoint, cm)
     if not url:
-        print(f"Unknown endpoint '{endpoint}'.", file=sys.stderr)
+        suggestion = _suggest_endpoint(endpoint, cm)
+        print(f"Unknown endpoint '{endpoint}'.{suggestion}", file=sys.stderr)
         print("Known endpoints:", file=sys.stderr)
         for name, info in sorted(get_public_endpoints().items()):
             print(f"  {name:<12} {info['description']}", file=sys.stderr)
@@ -430,10 +455,10 @@ def handle_discover(cm: CrossMatch, endpoint: str, schema_table: Optional[str] =
         dec_err_guess = next((c for c in err_candidates if "dec" in c.lower() or "de" in c.lower()), None)
 
         short_name = schema_table.rsplit(".", 1)[-1] if "." in schema_table else schema_table
-        print(f"\n# --- Suggested xmatch.yaml entry (copy into your config) ---")
+        print("\n# --- Suggested xmatch.yaml entry (copy into your config) ---")
         print(f"  {short_name}:")
-        print(f"    archive: <archive_name>")
-        print(f"    service_id: <service_id>")
+        print("    archive: <archive_name>")
+        print("    service_id: <service_id>")
         print(f"    description: \"{schema_table}\"")
         print(f"    access_identifier: \"{schema_table}\"")
         if ra_guess:
