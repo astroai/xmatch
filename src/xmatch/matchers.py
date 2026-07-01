@@ -61,7 +61,9 @@ _UNIT_TO_ARCSEC = {"arcsec": 1.0, "mas": 1e-3, "deg": 3600.0, "arcmin": 60.0}
 @dataclass
 class MatchSpec:
     radius_arcsec: float = 1.0
-    matcher: str = "sky"  # "sky" | "skyerr" | "skyellipse" | "lr" | "ml" | "xgb" | "auf" | "macauff"
+    matcher: str = (
+        "sky"  # "sky" | "skyerr" | "skyellipse" | "lr" | "ml" | "xgb" | "auf" | "macauff"
+    )
     max_error: float = 3.0  # N-sigma for skyerr/skyellipse
     # Magnitude column for Likelihood Ratio matcher (Sutherland & Saunders 1992).
     # Used to estimate the true-counterpart magnitude distribution q(m) and
@@ -176,7 +178,9 @@ def _build_result(
     if lr is not None and lr.size == matched.height:
         matched = matched.hstack(pl.DataFrame({"lr": np.asarray(lr, dtype=float)}))
     if reliability is not None and reliability.size == matched.height:
-        matched = matched.hstack(pl.DataFrame({"reliability": np.asarray(reliability, dtype=float)}))
+        matched = matched.hstack(
+            pl.DataFrame({"reliability": np.asarray(reliability, dtype=float)})
+        )
     if ml_score is not None and ml_score.size == matched.height:
         matched = matched.hstack(pl.DataFrame({"ml_score": np.asarray(ml_score, dtype=float)}))
     if xgb_score is not None and xgb_score.size == matched.height:
@@ -184,7 +188,9 @@ def _build_result(
     if auf_prob is not None and auf_prob.size == matched.height:
         matched = matched.hstack(pl.DataFrame({"auf_prob": np.asarray(auf_prob, dtype=float)}))
     if macauff_prob is not None and macauff_prob.size == matched.height:
-        matched = matched.hstack(pl.DataFrame({"macauff_prob": np.asarray(macauff_prob, dtype=float)}))
+        matched = matched.hstack(
+            pl.DataFrame({"macauff_prob": np.asarray(macauff_prob, dtype=float)})
+        )
 
     # Drop internal per-row PM drift column from output (if present).
     drift_cols = [c for c in matched.columns if c.startswith(_PM_DRIFT_COLUMN)]
@@ -261,7 +267,8 @@ def _pos_sigma_arcsec(df: pl.DataFrame, src: CatalogueSource) -> Optional[np.nda
 
 
 def _pos_covariance(
-    df: pl.DataFrame, src: CatalogueSource,
+    df: pl.DataFrame,
+    src: CatalogueSource,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Per-row positional covariance parameters for skyellipse.
 
@@ -275,16 +282,14 @@ def _pos_covariance(
     information is available on this side.
     """
     factor = _UNIT_TO_ARCSEC.get((src.pos_err_units or "arcsec").lower(), 1.0)
-    factor_sq = factor * factor
+    factor * factor
     floor = (
-        float(src.default_pos_error_arcsec)
-        if src.default_pos_error_arcsec is not None
-        else None
+        float(src.default_pos_error_arcsec) if src.default_pos_error_arcsec is not None else None
     )
     # Per-row PM drift: added in quadrature regardless of error-column path.
     drift_sq = None
     if _PM_DRIFT_COLUMN in df.columns:
-        drift_sq = np.nan_to_num(df[_PM_DRIFT_COLUMN].to_numpy().astype(float), nan=0.0)**2
+        drift_sq = np.nan_to_num(df[_PM_DRIFT_COLUMN].to_numpy().astype(float), nan=0.0) ** 2
 
     if src.ra_err_column in df.columns and src.dec_err_column in df.columns:
         ra_e = df[src.ra_err_column].to_numpy().astype(float) * factor
@@ -301,7 +306,8 @@ def _pos_covariance(
         if src.corr_column and src.corr_column in df.columns:
             rho = np.clip(
                 np.nan_to_num(df[src.corr_column].to_numpy().astype(float), nan=0.0),
-                -1.0, 1.0,
+                -1.0,
+                1.0,
             )
         else:
             rho = np.zeros(df.height, dtype=float)
@@ -424,20 +430,20 @@ def _apply_proper_motion(
     from .astro_utils import propagate_proper_motion
 
     has_left_pm = bool(
-        left_src.pm_ra_column and left_src.pm_dec_column
+        left_src.pm_ra_column
+        and left_src.pm_dec_column
         and (left_src.epoch_column or left_src.epoch is not None)
     )
     has_right_pm = bool(
-        right_src.pm_ra_column and right_src.pm_dec_column
+        right_src.pm_ra_column
+        and right_src.pm_dec_column
         and (right_src.epoch_column or right_src.epoch is not None)
     )
     if not has_left_pm and not has_right_pm:
         logger.debug("No PM+epoch info on either side; skipping PM propagation.")
         return left, right
 
-    def _propagate_side(
-        df: pl.DataFrame, src: CatalogueSource, label: str
-    ) -> pl.DataFrame:
+    def _propagate_side(df: pl.DataFrame, src: CatalogueSource, label: str) -> pl.DataFrame:
         if not (src.pm_ra_column and src.pm_dec_column):
             logger.debug("No PM columns on %s side; skipping.", label)
             return df
@@ -459,7 +465,12 @@ def _apply_proper_motion(
         pmde = df[src.pm_dec_column].to_numpy().astype(float)
 
         new_ra, new_dec = propagate_proper_motion(
-            ra_arr, dec_arr, pmra, pmde, epoch_arr, target_epoch,
+            ra_arr,
+            dec_arr,
+            pmra,
+            pmde,
+            epoch_arr,
+            target_epoch,
         )
         logger.info(
             "PM propagation %s: max ΔRA=%.4f arcsec, max ΔDec=%.4f arcsec",
@@ -510,14 +521,14 @@ def _apply_pm_drift_prior(
     a ``_pm_drift_arcsec`` column, sources may have inflated
     ``default_pos_error_arcsec``.
     """
-    import dataclasses
 
     def _inflate_side(
         src: CatalogueSource, df: pl.DataFrame, label: str
     ) -> Tuple[pl.DataFrame, CatalogueSource]:
         # Skip if this side already has measured PM columns.
         has_pm = bool(
-            src.pm_ra_column and src.pm_dec_column
+            src.pm_ra_column
+            and src.pm_dec_column
             and src.pm_ra_column in df.columns
             and src.pm_dec_column in df.columns
         )
@@ -554,7 +565,8 @@ def _apply_pm_drift_prior(
         # σ_μ ∝ 10^{-0.2 (m - 15)} — a distance-proxy from the distance modulus.
         if magnitude_column and magnitude_column in df.columns:
             mag = np.nan_to_num(
-                df[magnitude_column].to_numpy().astype(float), nan=15.0,
+                df[magnitude_column].to_numpy().astype(float),
+                nan=15.0,
             )
             mag_scale = 10.0 ** (-0.2 * (mag - 15.0))
             mag_scale = np.clip(mag_scale, 0.3, 3.0)
@@ -568,8 +580,7 @@ def _apply_pm_drift_prior(
         # No need to inflate default_pos_error_arcsec — per-row drift is
         # more precise and avoids double-counting the median drift.
         logger.info(
-            "pm_prior %s: median σ_μ=%.1f mas/yr, median Δt=%.0f yr, "
-            "median drift=%.3f arcsec.",
+            "pm_prior %s: median σ_μ=%.1f mas/yr, median Δt=%.0f yr, median drift=%.3f arcsec.",
             label,
             float(np.median(sigma_mu_mas_yr)),
             float(np.median(delta_t)),
@@ -595,9 +606,8 @@ def _galactic_latitude(ra_deg: np.ndarray, dec_deg: np.ndarray) -> np.ndarray:
     dec_rad = np.radians(dec_deg)
     ngp_ra = np.radians(192.85948)
     ngp_dec = np.radians(27.12825)
-    sin_b = (
-        np.sin(dec_rad) * np.sin(ngp_dec)
-        + np.cos(dec_rad) * np.cos(ngp_dec) * np.cos(ra_rad - ngp_ra)
+    sin_b = np.sin(dec_rad) * np.sin(ngp_dec) + np.cos(dec_rad) * np.cos(ngp_dec) * np.cos(
+        ra_rad - ngp_ra
     )
     return np.degrees(np.arcsin(np.clip(sin_b, -1.0, 1.0)))
 
@@ -676,15 +686,15 @@ def _apply_match_filter(
 
     try:
         ctx = pl.SQLContext(tmp=tmp)
-        filtered = ctx.execute(
-            f"SELECT _row_id FROM tmp WHERE {filter_expr}"
-        ).collect()
-        keep_rows = set(int(r) for r in filtered["_row_id"].to_list())
-        keep = np.array([i in keep_rows for i in range(tmp.height)], dtype=bool)
+        filtered = ctx.execute(f"SELECT _row_id FROM tmp WHERE {filter_expr}").collect()
+        # Vectorized Numpy mask generation instead of slow list comprehension
+        keep = np.zeros(tmp.height, dtype=bool)
+        keep[filtered["_row_id"].to_numpy()] = True
     except Exception as exc:
         logger.warning(
             "Filter expression '%s' failed (%s); keeping all pairs.",
-            filter_expr, exc,
+            filter_expr,
+            exc,
         )
         return left_idx, right_idx, seps
 
@@ -758,8 +768,16 @@ def _scipy_match(
     # --- N-dimensional ranking (only affects find="best") ------------------
     if spec.extra_distance_cols and spec.find == "best":
         return _scipy_match_nd(
-            l_xyz, r_xyz, l_ra, l_dec, r_ra, r_dec,
-            left, right, chord_max, spec,
+            l_xyz,
+            r_xyz,
+            l_ra,
+            l_dec,
+            r_ra,
+            r_dec,
+            left,
+            right,
+            chord_max,
+            spec,
         )
 
     tree = cKDTree(r_xyz)
@@ -785,13 +803,15 @@ def _scipy_match(
         if spec.matcher == "skyellipse":
             k_candidates = min(max(10, int(spec.max_error * 2)), r_xyz.shape[0])
             dist_sp, idx_sp = tree.query(
-                l_xyz, k=min(k_candidates, r_xyz.shape[0]),
-                distance_upper_bound=chord_max, workers=-1,
+                l_xyz,
+                k=min(k_candidates, r_xyz.shape[0]),
+                distance_upper_bound=chord_max,
+                workers=-1,
             )
             if k_candidates == 1:
                 dist_sp = dist_sp[:, None]
                 idx_sp = idx_sp[:, None]
-            k_actual = idx_sp.shape[1]
+            idx_sp.shape[1]
 
             sra2_l, sde2_l, rho_l = cov_l
             sra2_r, sde2_r, rho_r = cov_r
@@ -808,7 +828,8 @@ def _scipy_match(
                 delta_ra = (l_ra[i] - r_ra[candidates]) * 3600.0 * cos_dec
                 delta_dec = (l_dec[i] - r_dec[candidates]) * 3600.0
                 d2 = _mahalanobis_pairwise(
-                    delta_ra, delta_dec,
+                    delta_ra,
+                    delta_dec,
                     np.full(candidates.size, sra2_l[i]),
                     np.full(candidates.size, sde2_l[i]),
                     np.full(candidates.size, rho_l[i]),
@@ -822,10 +843,12 @@ def _scipy_match(
                     best_r = candidates[best_j]
                     l_idx_parts.append(np.array([i], dtype=np.int64))
                     r_idx_parts.append(np.array([best_r], dtype=np.int64))
-                    sep_parts.append(np.array(
-                        [_chord_to_arcsec(float(dist_sp[i][valid_k][best_j]))],
-                        dtype=float,
-                    ))
+                    sep_parts.append(
+                        np.array(
+                            [_chord_to_arcsec(float(dist_sp[i][valid_k][best_j]))],
+                            dtype=float,
+                        )
+                    )
 
             if not l_idx_parts:
                 return empty
@@ -867,9 +890,14 @@ def _scipy_match(
         delta_ra = (l_ra[left_idx] - r_ra[right_idx]) * 3600.0 * cos_dec
         delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
         d2 = _mahalanobis_pairwise(
-            delta_ra, delta_dec,
-            sra2_l[left_idx], sde2_l[left_idx], rho_l[left_idx],
-            sra2_r[right_idx], sde2_r[right_idx], rho_r[right_idx],
+            delta_ra,
+            delta_dec,
+            sra2_l[left_idx],
+            sde2_l[left_idx],
+            rho_l[left_idx],
+            sra2_r[right_idx],
+            sde2_r[right_idx],
+            rho_r[right_idx],
         )
         keep = d2 <= spec.max_error**2
         left_idx, right_idx, sep = left_idx[keep], right_idx[keep], sep[keep]
@@ -915,13 +943,15 @@ def _scipy_match_nd(
     k_candidates = min(max(10, int(spec.radius_arcsec * 2)), n_right)
     spatial_tree = cKDTree(r_xyz)
     dist_sp, idx_sp = spatial_tree.query(
-        l_xyz, k=min(k_candidates, n_right),
-        distance_upper_bound=chord_max, workers=-1,
+        l_xyz,
+        k=min(k_candidates, n_right),
+        distance_upper_bound=chord_max,
+        workers=-1,
     )
     if k_candidates == 1:
         dist_sp = dist_sp[:, None]
         idx_sp = idx_sp[:, None]
-    k = idx_sp.shape[1]  # actual k used
+    idx_sp.shape[1]  # actual k used
 
     # Step 2: build N-d features once per side.
     l_feat, stats = _build_nd_features(l_ra, l_dec, left, spec.extra_distance_cols)
@@ -941,14 +971,12 @@ def _scipy_match_nd(
             continue
 
         idx_safe = np.where(valid_chunk, idx_sp[sl], 0).astype(np.int64)
-        r_candidates = r_feat[idx_safe]                 # (chunk, k, ndim)
-        l_expanded = l_feat[sl, None, :]                 # (chunk, 1, ndim)
-        nd_dists = np.linalg.norm(
-            r_candidates - l_expanded, axis=-1
-        )                                                # (chunk, k)
+        r_candidates = r_feat[idx_safe]  # (chunk, k, ndim)
+        l_expanded = l_feat[sl, None, :]  # (chunk, 1, ndim)
+        nd_dists = np.linalg.norm(r_candidates - l_expanded, axis=-1)  # (chunk, k)
         nd_dists[~valid_chunk] = np.inf
 
-        best_k = np.argmin(nd_dists, axis=-1)            # (chunk,)
+        best_k = np.argmin(nd_dists, axis=-1)  # (chunk,)
         has_match = np.isfinite(nd_dists[np.arange(chunk_size), best_k])
         if not np.any(has_match):
             continue
@@ -1007,8 +1035,11 @@ def _likelihood_ratio_scoring(
     survive, all arrays are empty.
     """
     empty = (
-        np.array([], int), np.array([], int),
-        np.array([], float), np.array([], float), np.array([], float),
+        np.array([], int),
+        np.array([], int),
+        np.array([], float),
+        np.array([], float),
+        np.array([], float),
     )
     if left_idx.size == 0:
         return empty
@@ -1016,11 +1047,13 @@ def _likelihood_ratio_scoring(
     mag_col = spec.lr_magnitude_column
     if mag_col is None or mag_col not in right.columns:
         logger.warning(
-            "lr_magnitude_column='%s' missing from right catalogue; "
-            "falling back to sky match.", mag_col,
+            "lr_magnitude_column='%s' missing from right catalogue; falling back to sky match.",
+            mag_col,
         )
         return (
-            left_idx, right_idx, seps,
+            left_idx,
+            right_idx,
+            seps,
             np.ones(left_idx.size, dtype=float),
             np.ones(left_idx.size, dtype=float),
         )
@@ -1040,7 +1073,7 @@ def _likelihood_ratio_scoring(
 
     # f(r) = r / σ² * exp(-r² / (2σ²)) — the Rayleigh radial PDF.
     sigma_sq = sigma_combined**2
-    f_r = (seps / sigma_sq) * np.exp(-seps**2 / (2.0 * sigma_sq))
+    f_r = (seps / sigma_sq) * np.exp(-(seps**2) / (2.0 * sigma_sq))
     f_r = np.maximum(f_r, 1e-300)
 
     # --- n(m): background surface density per unit area per magnitude --------
@@ -1049,7 +1082,9 @@ def _likelihood_ratio_scoring(
     if right_mags.size < 10:
         logger.warning("Too few valid magnitudes in right catalogue for LR; falling back.")
         return (
-            left_idx, right_idx, seps,
+            left_idx,
+            right_idx,
+            seps,
             np.ones(left_idx.size, dtype=float),
             np.ones(left_idx.size, dtype=float),
         )
@@ -1059,7 +1094,7 @@ def _likelihood_ratio_scoring(
     if mag_max - mag_min < 1e-6:
         mag_max = mag_min + 1.0
     mag_edges = np.linspace(mag_min, mag_max, n_bins + 1)
-    mag_centres = 0.5 * (mag_edges[:-1] + mag_edges[1:])
+    0.5 * (mag_edges[:-1] + mag_edges[1:])
     bin_width = mag_edges[1] - mag_edges[0]
 
     # Background counts per magnitude bin (from full right catalogue).
@@ -1075,16 +1110,17 @@ def _likelihood_ratio_scoring(
         sky_area_deg2 = math.pi * extent["radius_deg"] ** 2
     else:
         sky_area_deg2 = 1.0  # fallback: 1 sq deg
-    sky_area_arcsec2 = sky_area_deg2 * (3600.0 ** 2)
+    sky_area_arcsec2 = sky_area_deg2 * (3600.0**2)
 
     # n(m) in units of sources per arcsec² per magnitude.
     n_m = np.maximum(bg_counts.astype(float) / (sky_area_arcsec2 * bin_width), 1e-300)
 
     # --- q(m): true-counterpart magnitude distribution ----------------------
-    search_area_arcsec2 = math.pi * spec.radius_arcsec ** 2
+    search_area_arcsec2 = math.pi * spec.radius_arcsec**2
     cand_mags_arr = right[mag_col].to_numpy().astype(float)[right_idx]
     cand_counts, _ = np.histogram(
-        cand_mags_arr[np.isfinite(cand_mags_arr)], bins=mag_edges,
+        cand_mags_arr[np.isfinite(cand_mags_arr)],
+        bins=mag_edges,
     )
 
     # Expected background in the search area: n(m) × search_area × N_primary.
@@ -1101,7 +1137,8 @@ def _likelihood_ratio_scoring(
     # Map each candidate's magnitude to the appropriate bin.
     mag_bin_indices = np.clip(
         np.searchsorted(mag_edges, cand_mags_arr, side="right") - 1,
-        0, n_bins - 1,
+        0,
+        n_bins - 1,
     )
     # Clip non-finite magnitudes to bin 0 (their LR will be negligible).
     mag_bin_indices[~np.isfinite(cand_mags_arr)] = 0
@@ -1116,7 +1153,9 @@ def _likelihood_ratio_scoring(
     # --- reliability per primary source ------------------------------------
     # Group LR values by primary source (left_idx).
     unique_left, inverse, counts = np.unique(
-        left_idx, return_inverse=True, return_counts=True,
+        left_idx,
+        return_inverse=True,
+        return_counts=True,
     )
     # Sum of LR per primary source.
     lr_sum = np.bincount(inverse, weights=lr, minlength=len(unique_left))
@@ -1130,9 +1169,10 @@ def _likelihood_ratio_scoring(
     reliability = np.clip(reliability, 0.0, 1.0)
 
     logger.info(
-        "LR match: %d candidates → %d unique primary sources, "
-        "median reliability=%.3f.",
-        len(left_idx), len(unique_left), float(np.median(reliability)),
+        "LR match: %d candidates → %d unique primary sources, median reliability=%.3f.",
+        len(left_idx),
+        len(unique_left),
+        float(np.median(reliability)),
     )
 
     # --- select best per primary source if find="best" ---------------------
@@ -1150,8 +1190,11 @@ def _likelihood_ratio_scoring(
             best_pos = np.where(group_mask)[0][order[0]]
             best_mask[best_pos] = True
         return (
-            left_idx[best_mask], right_idx[best_mask], seps[best_mask],
-            lr[best_mask], reliability[best_mask],
+            left_idx[best_mask],
+            right_idx[best_mask],
+            seps[best_mask],
+            lr[best_mask],
+            reliability[best_mask],
         )
 
     return left_idx, right_idx, seps, lr, reliability
@@ -1198,15 +1241,16 @@ def _engineer_ml_features_and_labels(
     from scipy.spatial import cKDTree
 
     empty_result = (
-        np.zeros((0, 1), dtype=float), np.zeros(0, dtype=int),
-        0, 0, [], np.array([], dtype=np.int64),
+        np.zeros((0, 1), dtype=float),
+        np.zeros(0, dtype=int),
+        0,
+        0,
+        [],
+        np.array([], dtype=np.int64),
     )
 
-    colour_cols = (spec.ml_color_columns or [])
-    available_cols = [
-        c for c in colour_cols
-        if c in left.columns and c in right.columns
-    ]
+    colour_cols = spec.ml_color_columns or []
+    available_cols = [c for c in colour_cols if c in left.columns and c in right.columns]
     if not available_cols:
         return empty_result
 
@@ -1222,7 +1266,8 @@ def _engineer_ml_features_and_labels(
     if rsig is None:
         rsig = np.full(right.height, 0.5, dtype=float)
     sigma_combined = np.maximum(
-        np.sqrt(lsig[left_idx]**2 + rsig[right_idx]**2), 1e-6,
+        np.sqrt(lsig[left_idx] ** 2 + rsig[right_idx] ** 2),
+        1e-6,
     )
     X[:, 0] = seps / sigma_combined
 
@@ -1282,7 +1327,8 @@ def _engineer_ml_features_and_labels(
             if neg_l_idx.size > 0:
                 neg_X = np.zeros((neg_l_idx.size, n_features), dtype=float)
                 neg_sigma = np.maximum(
-                    np.sqrt(lsig[neg_l_idx]**2 + rsig[neg_r_idx]**2), 1e-6,
+                    np.sqrt(lsig[neg_l_idx] ** 2 + rsig[neg_r_idx] ** 2),
+                    1e-6,
                 )
                 neg_X[:, 0] = _chord_to_arcsec(neg_chords[far_mask]) / neg_sigma
                 for k, col in enumerate(available_cols):
@@ -1299,7 +1345,10 @@ def _engineer_ml_features_and_labels(
 
     logger.debug(
         "%s: %d features from %d candidate pairs (%d unique sources).",
-        matcher_name, n_features, n_pairs, len(unique_left),
+        matcher_name,
+        n_features,
+        n_pairs,
+        len(unique_left),
     )
     return X, y_pseudo, n_pairs, n_features, available_cols, unique_left
 
@@ -1337,17 +1386,16 @@ def _ml_rf_score(
     primary source (``find="best"``) or all candidates (``find="all"``).
     """
     empty4 = (
-        np.array([], int), np.array([], int),
-        np.array([], float), np.array([], float),
+        np.array([], int),
+        np.array([], int),
+        np.array([], float),
+        np.array([], float),
     )
     if left_idx.size == 0:
         return empty4
 
     colour_cols = spec.ml_color_columns or []
-    available_cols = [
-        c for c in colour_cols
-        if c in left.columns and c in right.columns
-    ]
+    available_cols = [c for c in colour_cols if c in left.columns and c in right.columns]
     if not available_cols:
         logger.warning(
             "matcher='ml' but no ml_color_columns available on both sides; "
@@ -1358,11 +1406,21 @@ def _ml_rf_score(
 
     # --- engineer features & pseudo-labels (shared with xgb) --------------
     (
-        X, y_pseudo, n_pairs, n_features,
-        _available_cols, unique_left,
+        X,
+        y_pseudo,
+        n_pairs,
+        n_features,
+        _available_cols,
+        unique_left,
     ) = _engineer_ml_features_and_labels(
-        left, right, left_src, right_src,
-        left_idx, right_idx, seps, spec,
+        left,
+        right,
+        left_src,
+        right_src,
+        left_idx,
+        right_idx,
+        seps,
+        spec,
         matcher_name="ML",
         add_synthetic_negatives=True,
     )
@@ -1372,6 +1430,7 @@ def _ml_rf_score(
     # --- train Random Forest on-the-fly -----------------------------------
     try:
         from sklearn.ensemble import RandomForestClassifier
+
         _HAS_SKLEARN = True
     except ImportError:
         _HAS_SKLEARN = False
@@ -1380,11 +1439,13 @@ def _ml_rf_score(
 
     if _HAS_SKLEARN and model_path is not None:
         from pathlib import Path
+
         model_file = Path(model_path)
         if model_file.is_file():
             # Load pre-trained model and skip training / pseudo-labels.
             try:
                 import joblib
+
                 rf = joblib.load(str(model_file))
                 if not hasattr(rf, "predict_proba"):
                     raise ValueError("Loaded object is not a classifier")
@@ -1392,8 +1453,11 @@ def _ml_rf_score(
                 logger.info(
                     "ML match (loaded model %s): %d candidates from %d sources, "
                     "%d features, median prob=%.3f.",
-                    model_file, n_pairs, len(unique_left),
-                    n_features, float(np.median(probs)),
+                    model_file,
+                    n_pairs,
+                    len(unique_left),
+                    n_features,
+                    float(np.median(probs)),
                 )
                 # Skip to best-per-primary selection.
                 if spec.find == "best":
@@ -1401,8 +1465,9 @@ def _ml_rf_score(
                 return left_idx, right_idx, seps, probs
             except Exception as exc:
                 logger.warning(
-                    "Failed to load ML model from '%s' (%s); "
-                    "will train a new one.", model_path, exc,
+                    "Failed to load ML model from '%s' (%s); will train a new one.",
+                    model_path,
+                    exc,
                 )
 
     if _HAS_SKLEARN:
@@ -1410,10 +1475,13 @@ def _ml_rf_score(
         if n_pos < 2:
             logger.warning(
                 "matcher='ml': too few positive pseudo-labels (%d); "
-                "falling back to separation heuristic.", n_pos,
+                "falling back to separation heuristic.",
+                n_pos,
             )
             if spec.find == "best":
-                return _ml_fallback_best_by_sep(left_idx[:n_pairs], right_idx[:n_pairs], seps[:n_pairs], spec)
+                return _ml_fallback_best_by_sep(
+                    left_idx[:n_pairs], right_idx[:n_pairs], seps[:n_pairs], spec
+                )
             # find="all": keep all candidates with simple separation scores.
             fallback_scores = np.clip(1.0 / (1.0 + seps[:n_pairs]), 0.0, 1.0)
             return left_idx[:n_pairs], right_idx[:n_pairs], seps[:n_pairs], fallback_scores
@@ -1430,6 +1498,7 @@ def _ml_rf_score(
         if model_path is not None:
             try:
                 import joblib
+
                 joblib.dump(rf, model_path)
                 logger.info("ML model saved to '%s'.", model_path)
             except Exception as exc:
@@ -1439,7 +1508,10 @@ def _ml_rf_score(
         logger.info(
             "ML match: %d candidates from %d primary sources, "
             "%d features, median probability=%.3f.",
-            n_pairs, len(unique_left), n_features, float(np.median(probs)),
+            n_pairs,
+            len(unique_left),
+            n_features,
+            float(np.median(probs)),
         )
     else:
         # No sklearn: weighted heuristic.
@@ -1483,17 +1555,16 @@ def _xgb_score(
     weighted heuristic.
     """
     empty4 = (
-        np.array([], int), np.array([], int),
-        np.array([], float), np.array([], float),
+        np.array([], int),
+        np.array([], int),
+        np.array([], float),
+        np.array([], float),
     )
     if left_idx.size == 0:
         return empty4
 
     colour_cols = spec.ml_color_columns or []
-    available_cols = [
-        c for c in colour_cols
-        if c in left.columns and c in right.columns
-    ]
+    available_cols = [c for c in colour_cols if c in left.columns and c in right.columns]
     if not available_cols:
         logger.warning(
             "matcher='xgb' but no ml_color_columns available; "
@@ -1503,11 +1574,21 @@ def _xgb_score(
 
     # --- engineer features & pseudo-labels (shared with ml) ---------------
     (
-        X, y_pseudo, n_pairs, n_features,
-        _available_cols, unique_left,
+        X,
+        y_pseudo,
+        n_pairs,
+        n_features,
+        _available_cols,
+        unique_left,
     ) = _engineer_ml_features_and_labels(
-        left, right, left_src, right_src,
-        left_idx, right_idx, seps, spec,
+        left,
+        right,
+        left_src,
+        right_src,
+        left_idx,
+        right_idx,
+        seps,
+        spec,
         matcher_name="XGB",
         add_synthetic_negatives=True,
     )
@@ -1527,10 +1608,12 @@ def _xgb_score(
     model_path = spec.xgb_model_path
     if model_path is not None:
         from pathlib import Path
+
         model_file = Path(model_path)
         if model_file.is_file():
             try:
                 import joblib
+
                 clf = joblib.load(str(model_file))
                 if not hasattr(clf, "predict_proba"):
                     raise ValueError("Loaded object is not a classifier")
@@ -1538,22 +1621,27 @@ def _xgb_score(
                 logger.info(
                     "XGB match (loaded model %s): %d candidates from %d sources, "
                     "%d features, median prob=%.3f.",
-                    model_file, n_pairs, len(unique_left),
-                    n_features, float(np.median(probs)),
+                    model_file,
+                    n_pairs,
+                    len(unique_left),
+                    n_features,
+                    float(np.median(probs)),
                 )
                 if spec.find == "best":
                     return _pick_best_per_primary(left_idx, right_idx, seps, probs)
                 return left_idx, right_idx, seps, probs
             except Exception as exc:
                 logger.warning(
-                    "Failed to load XGB model from '%s' (%s); "
-                    "will train a new one.", model_path, exc,
+                    "Failed to load XGB model from '%s' (%s); will train a new one.",
+                    model_path,
+                    exc,
                 )
 
     # Try XGBoost → LightGBM → sklearn GradientBoosting.
     classifier = None
     try:
         from xgboost import XGBClassifier
+
         classifier = XGBClassifier(
             n_estimators=min(100, max(10, n_pairs // 5)),
             max_depth=min(5, max(2, int(np.log2(n_features + 1)))),
@@ -1567,6 +1655,7 @@ def _xgb_score(
     if classifier is None:
         try:
             from lightgbm import LGBMClassifier
+
             classifier = LGBMClassifier(
                 n_estimators=min(100, max(10, n_pairs // 5)),
                 max_depth=min(5, max(2, int(np.log2(n_features + 1)))),
@@ -1580,6 +1669,7 @@ def _xgb_score(
     if classifier is None:
         try:
             from sklearn.ensemble import GradientBoostingClassifier
+
             classifier = GradientBoostingClassifier(
                 n_estimators=min(100, max(10, n_pairs // 5)),
                 max_depth=min(5, max(2, int(np.log2(n_features + 1)))),
@@ -1596,6 +1686,7 @@ def _xgb_score(
         if model_path is not None:
             try:
                 import joblib
+
                 joblib.dump(classifier, model_path)
                 logger.info("XGB model saved to '%s'.", model_path)
             except Exception as exc:
@@ -1603,14 +1694,15 @@ def _xgb_score(
 
         probs = classifier.predict_proba(X[:n_pairs])[:, 1]
         logger.info(
-            "XGB match: %d candidates from %d sources, "
-            "%d features, median prob=%.3f.",
-            n_pairs, len(unique_left), n_features, float(np.median(probs)),
+            "XGB match: %d candidates from %d sources, %d features, median prob=%.3f.",
+            n_pairs,
+            len(unique_left),
+            n_features,
+            float(np.median(probs)),
         )
     else:
         logger.info(
-            "matcher='xgb': no gradient-boosting library available; "
-            "using weighted heuristic."
+            "matcher='xgb': no gradient-boosting library available; using weighted heuristic."
         )
         weights = np.ones(n_features, dtype=float)
         weights[0] = 2.0
@@ -1662,7 +1754,7 @@ def _compute_auf_probabilities(
         sky_area_deg2 = math.pi * extent["radius_deg"] ** 2
     else:
         sky_area_deg2 = 1.0
-    sky_area_arcsec2 = sky_area_deg2 * (3600.0 ** 2)
+    sky_area_arcsec2 = sky_area_deg2 * (3600.0**2)
     n_bg = right.height / max(sky_area_arcsec2, 1.0)
     n_primary = left.height
 
@@ -1747,16 +1839,24 @@ def _auf_score(
     Reference: Wilson, T. J. & Naylor, T. 2017, MNRAS 468, 2517.
     """
     empty4 = (
-        np.array([], int), np.array([], int),
-        np.array([], float), np.array([], float),
+        np.array([], int),
+        np.array([], int),
+        np.array([], float),
+        np.array([], float),
     )
     if left_idx.size == 0:
         return empty4
 
     # --- compute AUF positional probabilities (shared helper) --------------
     auf_prob, n_bg, f_sum = _compute_auf_probabilities(
-        left, right, left_src, right_src,
-        left_idx, right_idx, seps, spec,
+        left,
+        right,
+        left_src,
+        right_src,
+        left_idx,
+        right_idx,
+        seps,
+        spec,
     )
     if auf_prob is None:
         logger.warning(
@@ -1768,7 +1868,10 @@ def _auf_score(
     logger.info(
         "AUF match: %d candidates from %d perturbation points, "
         "n_bg=%.3e arcsec⁻², median prob=%.3f.",
-        len(left_idx), f_sum, n_bg, float(np.median(auf_prob)),
+        len(left_idx),
+        f_sum,
+        n_bg,
+        float(np.median(auf_prob)),
     )
 
     # --- select best per primary source if find="best" ---------------------
@@ -1819,16 +1922,24 @@ def _macauff_score(
     Reference: Wilson, T. J. & Naylor, T. 2017/2018, macauff.
     """
     empty4 = (
-        np.array([], int), np.array([], int),
-        np.array([], float), np.array([], float),
+        np.array([], int),
+        np.array([], int),
+        np.array([], float),
+        np.array([], float),
     )
     if left_idx.size == 0:
         return empty4
 
     # --- compute AUF positional probabilities (shared helper) --------------
     auf_prob, n_bg, f_sum = _compute_auf_probabilities(
-        left, right, left_src, right_src,
-        left_idx, right_idx, seps, spec,
+        left,
+        right,
+        left_src,
+        right_src,
+        left_idx,
+        right_idx,
+        seps,
+        spec,
     )
     if auf_prob is None:
         logger.warning(
@@ -1839,15 +1950,10 @@ def _macauff_score(
 
     # --- flux/magnitude likelihood ratios ----------------------------------
     flux_cols = spec.macauff_flux_columns or []
-    available_flux_cols = [
-        c for c in flux_cols
-        if c in left.columns and c in right.columns
-    ]
+    available_flux_cols = [c for c in flux_cols if c in left.columns and c in right.columns]
     # If no flux columns, return pure AUF probability.
     if not available_flux_cols:
-        logger.info(
-            "macauff: no flux columns available; using pure AUF scoring."
-        )
+        logger.info("macauff: no flux columns available; using pure AUF scoring.")
         if spec.find == "best":
             return _pick_best_per_primary(left_idx, right_idx, seps, auf_prob)
         return left_idx, right_idx, seps, auf_prob
@@ -1869,18 +1975,21 @@ def _macauff_score(
         err_col_r = f"{col}_err"
         if err_col_l in left.columns and err_col_r in right.columns:
             err_l = np.nan_to_num(
-                left[err_col_l].to_numpy().astype(float)[left_idx], nan=sigma_phot,
+                left[err_col_l].to_numpy().astype(float)[left_idx],
+                nan=sigma_phot,
             )
             err_r = np.nan_to_num(
-                right[err_col_r].to_numpy().astype(float)[right_idx], nan=sigma_phot,
+                right[err_col_r].to_numpy().astype(float)[right_idx],
+                nan=sigma_phot,
             )
             sigma_per_pair = np.maximum(
-                np.sqrt(err_l**2 + err_r**2), 1e-4,
+                np.sqrt(err_l**2 + err_r**2),
+                1e-4,
             )
         else:
             sigma_per_pair = np.full(left_idx.size, sigma_phot, dtype=float)
 
-        p_match_flux = np.exp(-0.5 * (dm / sigma_per_pair)**2) / (
+        p_match_flux = np.exp(-0.5 * (dm / sigma_per_pair) ** 2) / (
             sigma_per_pair * np.sqrt(2.0 * math.pi)
         )
         p_match_flux = np.maximum(p_match_flux, 1e-300)
@@ -1901,7 +2010,8 @@ def _macauff_score(
         hist_bins = np.linspace(0, dm_max_rand, min(100, max(20, int(np.sqrt(n_rand)))) + 1)
         hist_counts, _ = np.histogram(rand_dm, bins=hist_bins)
         hist_density = np.maximum(
-            hist_counts.astype(float) / (n_rand * (hist_bins[1] - hist_bins[0])), 1e-300,
+            hist_counts.astype(float) / (n_rand * (hist_bins[1] - hist_bins[0])),
+            1e-300,
         )
         hist_centres = 0.5 * (hist_bins[:-1] + hist_bins[1:])
 
@@ -1923,9 +2033,9 @@ def _macauff_score(
     macauff_prob = np.clip(macauff_prob, 0.0, 1.0)
 
     logger.info(
-        "macauff: %d candidates, AUF median=%.3f, flux LR medians=%s, "
-        "combined median=%.3f.",
-        len(left_idx), float(np.median(auf_prob)),
+        "macauff: %d candidates, AUF median=%.3f, flux LR medians=%s, combined median=%.3f.",
+        len(left_idx),
+        float(np.median(auf_prob)),
         [f"{v:.2f}" for v in flux_lr_parts],
         float(np.median(macauff_prob)),
     )
@@ -2001,9 +2111,7 @@ def _zone_match(
     since the N-d ranking loop is simpler without pixel sharding.
     """
     if spec.extra_distance_cols or spec.matcher in ("lr", "ml", "xgb", "auf", "macauff"):
-        logger.info(
-            "extra_distance_cols/LR/ML/AUF/macauff set; using Tier 1 cKDTree for matching."
-        )
+        logger.info("extra_distance_cols/LR/ML/AUF/macauff set; using Tier 1 cKDTree for matching.")
         return _scipy_match(left, right, left_src, right_src, spec)
     try:
         import cdshealpix as hp  # noqa: F401
@@ -2049,11 +2157,7 @@ def _zone_match_healpix(
             )
             return empty
         chord_max = _skyellipse_search_chord_max(cov_l, cov_r, spec.max_error)
-        radius_deg = (
-            math.degrees(2.0 * math.asin(chord_max * 0.5))
-            if chord_max < 2.0
-            else 180.0
-        )
+        radius_deg = math.degrees(2.0 * math.asin(chord_max * 0.5)) if chord_max < 2.0 else 180.0
     else:
         lsig = _pos_sigma_arcsec(left, left_src)
         rsig = _pos_sigma_arcsec(right, right_src)
@@ -2093,13 +2197,13 @@ def _zone_match_healpix(
         l_by_pix.setdefault(int(pix), []).append(i)
 
     # Pre-compute per-right-pixel global-index arrays for fast margin merging.
-    r_global_by_pix: dict[int, np.ndarray] = {
-        int(pix): r_groups[int(pix)] for pix in unique_pix
-    }
+    r_global_by_pix: dict[int, np.ndarray] = {int(pix): r_groups[int(pix)] for pix in unique_pix}
 
     # Sort left pixel groups largest-first so batches are balanced.
     pixel_items = sorted(
-        l_by_pix.items(), key=lambda kv: len(kv[1]), reverse=True,
+        l_by_pix.items(),
+        key=lambda kv: len(kv[1]),
+        reverse=True,
     )
     batch_size = spec.batch_size or len(pixel_items)
 
@@ -2110,7 +2214,7 @@ def _zone_match_healpix(
         batch_r = []
         batch_s = []
 
-        for l_pix_int, left_indices in batch_pixels:
+        for _l_pix_int, left_indices in batch_pixels:
             indices_arr = np.asarray(left_indices, dtype=np.int64)
             # Cone search once per pixel (same for all points in pixel).
             mid = len(left_indices) // 2
@@ -2144,7 +2248,10 @@ def _zone_match_healpix(
 
             if spec.find == "best":
                 dist, local_idx = margin_tree.query(
-                    batch_xyz, k=1, distance_upper_bound=chord_max, workers=-1,
+                    batch_xyz,
+                    k=1,
+                    distance_upper_bound=chord_max,
+                    workers=-1,
                 )
                 valid = np.isfinite(dist) & (local_idx < margin_tree.n)
                 for k in np.nonzero(valid)[0]:
@@ -2156,7 +2263,9 @@ def _zone_match_healpix(
                     batch_s.append(np.array([sep_arcsec], dtype=float))
             else:
                 idx_lists = margin_tree.query_ball_point(
-                    batch_xyz, r=chord_max, workers=-1,
+                    batch_xyz,
+                    r=chord_max,
+                    workers=-1,
                 )
                 for k, neighbors in enumerate(idx_lists):
                     if not neighbors:
@@ -2165,7 +2274,8 @@ def _zone_match_healpix(
                     nb = np.asarray(neighbors, dtype=np.int64)
                     global_r = margin_global[nb].astype(np.int64)
                     chords = np.linalg.norm(
-                        margin_xyz[nb] - batch_xyz[k], axis=-1,
+                        margin_xyz[nb] - batch_xyz[k],
+                        axis=-1,
                     )
                     seps = _chord_to_arcsec(chords)
                     batch_l.append(np.full(len(neighbors), k_idx, dtype=np.int64))
@@ -2200,9 +2310,14 @@ def _zone_match_healpix(
         delta_ra = (l_ra[left_idx] - r_ra[right_idx]) * 3600.0 * cos_dec
         delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
         d2 = _mahalanobis_pairwise(
-            delta_ra, delta_dec,
-            sra2_l[left_idx], sde2_l[left_idx], rho_l[left_idx],
-            sra2_r[right_idx], sde2_r[right_idx], rho_r[right_idx],
+            delta_ra,
+            delta_dec,
+            sra2_l[left_idx],
+            sde2_l[left_idx],
+            rho_l[left_idx],
+            sra2_r[right_idx],
+            sde2_r[right_idx],
+            rho_r[right_idx],
         )
         keep = d2 <= spec.max_error**2
         left_idx, right_idx, seps = left_idx[keep], right_idx[keep], seps[keep]
@@ -2264,7 +2379,9 @@ def _astropy_match(
         if search_radius_arcsec <= 0:
             return empty
         left_idx, right_idx, sep2d, _ = search_around_sky(
-            lcoord, rcoord, search_radius_arcsec * u.arcsec,
+            lcoord,
+            rcoord,
+            search_radius_arcsec * u.arcsec,
         )
         seps = sep2d.arcsec
         # Mahalanobis post-filter.
@@ -2272,19 +2389,28 @@ def _astropy_match(
             sra2_l, sde2_l, rho_l = cov_l
             sra2_r, sde2_r, rho_r = cov_r
             delta_ra = (
-                left[left_src.ra_column].to_numpy()[left_idx]
-                - right[right_src.ra_column].to_numpy()[right_idx]
-            ) * 3600.0 * math.cos(math.radians(
-                float(np.nanmean(left[left_src.dec_column].to_numpy()[left_idx]))
-            ))
+                (
+                    left[left_src.ra_column].to_numpy()[left_idx]
+                    - right[right_src.ra_column].to_numpy()[right_idx]
+                )
+                * 3600.0
+                * math.cos(
+                    math.radians(float(np.nanmean(left[left_src.dec_column].to_numpy()[left_idx])))
+                )
+            )
             delta_dec = (
                 left[left_src.dec_column].to_numpy()[left_idx]
                 - right[right_src.dec_column].to_numpy()[right_idx]
             ) * 3600.0
             d2 = _mahalanobis_pairwise(
-                delta_ra, delta_dec,
-                sra2_l[left_idx], sde2_l[left_idx], rho_l[left_idx],
-                sra2_r[right_idx], sde2_r[right_idx], rho_r[right_idx],
+                delta_ra,
+                delta_dec,
+                sra2_l[left_idx],
+                sde2_l[left_idx],
+                rho_l[left_idx],
+                sra2_r[right_idx],
+                sde2_r[right_idx],
+                rho_r[right_idx],
             )
             keep = d2 <= spec.max_error**2
             left_idx, right_idx, seps = left_idx[keep], right_idx[keep], seps[keep]
@@ -2300,17 +2426,26 @@ def _astropy_match(
             )
             cos_dec2 = np.cos(np.radians(mean_dec2))
             delta_ra2 = (
-                left[left_src.ra_column].to_numpy()[left_idx]
-                - right[right_src.ra_column].to_numpy()[right_idx]
-            ) * 3600.0 * cos_dec2
+                (
+                    left[left_src.ra_column].to_numpy()[left_idx]
+                    - right[right_src.ra_column].to_numpy()[right_idx]
+                )
+                * 3600.0
+                * cos_dec2
+            )
             delta_dec2 = (
                 left[left_src.dec_column].to_numpy()[left_idx]
                 - right[right_src.dec_column].to_numpy()[right_idx]
             ) * 3600.0
             d2 = _mahalanobis_pairwise(
-                delta_ra2, delta_dec2,
-                sra2_l2[left_idx], sde2_l2[left_idx], rho_l2[left_idx],
-                sra2_r2[right_idx], sde2_r2[right_idx], rho_r2[right_idx],
+                delta_ra2,
+                delta_dec2,
+                sra2_l2[left_idx],
+                sde2_l2[left_idx],
+                rho_l2[left_idx],
+                sra2_r2[right_idx],
+                sde2_r2[right_idx],
+                rho_r2[right_idx],
             )
             order = np.argsort(d2)
             _, first_idx = np.unique(left_idx[order], return_index=True)
@@ -2486,12 +2621,19 @@ def sky_match(
         left_eager = left_lf.collect()
         right_eager = right_lf.collect()
         left_eager, right_eager = _apply_proper_motion(
-            left_eager, right_eager, left_src, right_src, float(spec.target_epoch),
+            left_eager,
+            right_eager,
+            left_src,
+            right_src,
+            float(spec.target_epoch),
         )
         # PM drift prior: inflate errors for sides without measured PMs.
         if spec.pm_prior:
             left_eager, right_eager, left_src, right_src = _apply_pm_drift_prior(
-                left_src, right_src, left_eager, right_eager,
+                left_src,
+                right_src,
+                left_eager,
+                right_eager,
                 float(spec.target_epoch),
                 magnitude_column=spec.pm_prior_magnitude_column,
             )
@@ -2563,53 +2705,95 @@ def sky_match(
     reliability_arr: Optional[np.ndarray] = None
     if spec.matcher == "lr" and l_idx.size > 0:
         l_idx, r_idx, seps, lr_arr, reliability_arr = _likelihood_ratio_scoring(
-            left, right, left_src, right_src,
-            l_idx, r_idx, seps, spec,
+            left,
+            right,
+            left_src,
+            right_src,
+            l_idx,
+            r_idx,
+            seps,
+            spec,
         )
 
     # --- ML Random Forest scoring (post-engine) ---------------------------
     ml_score_arr: Optional[np.ndarray] = None
     if spec.matcher == "ml" and l_idx.size > 0:
         l_idx, r_idx, seps, ml_score_arr = _ml_rf_score(
-            left, right, left_src, right_src,
-            l_idx, r_idx, seps, spec,
+            left,
+            right,
+            left_src,
+            right_src,
+            l_idx,
+            r_idx,
+            seps,
+            spec,
         )
 
     # --- XGBoost scoring (post-engine) -----------------------------------
     xgb_score_arr: Optional[np.ndarray] = None
     if spec.matcher == "xgb" and l_idx.size > 0:
         l_idx, r_idx, seps, xgb_score_arr = _xgb_score(
-            left, right, left_src, right_src,
-            l_idx, r_idx, seps, spec,
+            left,
+            right,
+            left_src,
+            right_src,
+            l_idx,
+            r_idx,
+            seps,
+            spec,
         )
 
     # --- AUF match probability scoring (post-engine) ----------------------
     auf_prob_arr: Optional[np.ndarray] = None
     if spec.matcher == "auf" and l_idx.size > 0:
         l_idx, r_idx, seps, auf_prob_arr = _auf_score(
-            left, right, left_src, right_src,
-            l_idx, r_idx, seps, spec,
+            left,
+            right,
+            left_src,
+            right_src,
+            l_idx,
+            r_idx,
+            seps,
+            spec,
         )
 
     # --- macauff scoring (post-engine) -----------------------------------
     macauff_prob_arr: Optional[np.ndarray] = None
     if spec.matcher == "macauff" and l_idx.size > 0:
         l_idx, r_idx, seps, macauff_prob_arr = _macauff_score(
-            left, right, left_src, right_src,
-            l_idx, r_idx, seps, spec,
+            left,
+            right,
+            left_src,
+            right_src,
+            l_idx,
+            r_idx,
+            seps,
+            spec,
         )
 
     # --- post-match boolean filter ----------------------------------------
     if spec.filter_expr and l_idx.size > 0:
         l_idx, r_idx, seps = _apply_match_filter(
-            left, right, l_idx, r_idx, seps, spec.filter_expr,
+            left,
+            right,
+            l_idx,
+            r_idx,
+            seps,
+            spec.filter_expr,
         )
 
     p_match = _bayesian_qualify(left, right, l_idx, r_idx, seps, left_src, right_src, spec)
     return _build_result(
-        left, right, l_idx, r_idx, seps, spec,
-        p_match=p_match, right_suffix=right_suffix,
-        lr=lr_arr, reliability=reliability_arr,
+        left,
+        right,
+        l_idx,
+        r_idx,
+        seps,
+        spec,
+        p_match=p_match,
+        right_suffix=right_suffix,
+        lr=lr_arr,
+        reliability=reliability_arr,
         ml_score=ml_score_arr,
         xgb_score=xgb_score_arr,
         auf_prob=auf_prob_arr,
@@ -2639,7 +2823,5 @@ def id_join(
     """Relational id join between two catalogues using polars."""
     how = _JOIN_HOW.get(join_type, "inner")
     if join_type == "2not1":
-        return right_lf.join(
-            left_lf, left_on=id_right, right_on=id_left, how="anti", suffix=suffix
-        )
+        return right_lf.join(left_lf, left_on=id_right, right_on=id_left, how="anti", suffix=suffix)
     return left_lf.join(right_lf, left_on=id_left, right_on=id_right, how=how, suffix=suffix)
