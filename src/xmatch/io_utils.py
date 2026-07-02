@@ -49,21 +49,18 @@ def is_hats_dir(path: Union[str, Path]) -> bool:
 def _decode_pandas_bytes_columns(pdf) -> Any:
     """Decode ``bytes`` columns in a pandas DataFrame to UTF-8 strings.
 
-    Vectorised over column-dtype filtering via ``select_dtypes`` so we
+    Vectorised over column-dtype filtering via ``pdf.dtypes == 'object'`` so we
     skip every non-object column up-front instead of walking the full
     schema; for each remaining object column a single ``isinstance`` peek
     on the first non-null value gates the vectorised ``str.decode``.
 
-    Yields ~50 × speedup on wide DataFrames vs the previous per-column
-    ``pdf[col].dtype == object`` check (the gating check now runs only
-    on object columns), with identical semantics to the prior version.
+    Using ``df.columns[df.dtypes == "object"]`` avoids the overhead of
+    ``select_dtypes`` and suppresses Pandas 4 warnings regarding string inclusion.
+    Using ``to_numpy()[0]`` avoids slow Pandas ``.iloc[0]`` lookups inside the loop,
+    providing fast O(1) memory access.
     """
-    # pandas >= 3 warns when ``include="object"`` silently includes ``str``
-    # dtypes for backward compatibility.  Bytes-only payloads live in
-    # ``object`` columns, never in ``str``, so explicitly excluding ``str``
-    # both matches our intent and silences the deprecation warning.
-    for col in pdf.select_dtypes(include="object", exclude="str").columns:
-        if len(pdf) and isinstance(pdf[col].iloc[0], bytes):
+    for col in pdf.columns[pdf.dtypes == "object"]:
+        if len(pdf) and isinstance(pdf[col].to_numpy()[0], bytes):
             pdf[col] = pdf[col].str.decode("utf-8", errors="replace")
     return pdf
 
