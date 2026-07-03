@@ -21,3 +21,6 @@
 ## 2024-06-18 - NumPy Unique Vectorization Over Python Sets
 **Learning:** When performing duplicate filtering in large array operations (such as finding the best astropy matches), using a native Python `for` loop with a `set` for lookup incurs significant overhead due to Python's variable tracking and dynamic typing.
 **Action:** Prefer vectorized NumPy operations like `np.unique(array, return_index=True)` followed by `np.sort` on the indices. This pushes the loop down to the fast C backend, providing a substantial speedup for massive astronomical arrays.
+## 2024-07-24 - Avoid Python `set` and list comprehensions for boolean masks in Polars/NumPy operations
+**Learning:** In `_apply_match_filter`, evaluating a boolean mask by converting Polars column to a list, then to a Python `set`, and checking `i in set` in a list comprehension is disastrously slow (5.8s for 10M rows) compared to native vectorized NumPy operations (0.07s). Python's native variable tracking adds massive overhead on astronomical arrays.
+**Action:** When creating boolean filter masks from indices, always construct an empty boolean NumPy array (`np.zeros(size, dtype=bool)`) and use vectorized assignment (`mask[indices] = True`).
