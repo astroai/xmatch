@@ -58,12 +58,13 @@ def _decode_pandas_bytes_columns(pdf) -> Any:
     ``pdf[col].dtype == object`` check (the gating check now runs only
     on object columns), with identical semantics to the prior version.
     """
-    # pandas >= 3 warns when ``include="object"`` silently includes ``str``
-    # dtypes for backward compatibility.  Bytes-only payloads live in
-    # ``object`` columns, never in ``str``, so explicitly excluding ``str``
-    # both matches our intent and silences the deprecation warning.
-    for col in pdf.select_dtypes(include="object", exclude="str").columns:
-        if len(pdf) and isinstance(pdf[col].iloc[0], bytes):
+    # pandas >= 3 warns when ``select_dtypes(include="object")`` silently
+    # includes ``str`` dtypes for backward compatibility. Bytes-only
+    # payloads live in ``object`` columns, never in ``str``. Checking
+    # ``df.dtypes == "object"`` natively excludes ``str`` columns
+    # and avoids the deprecation warning while being significantly faster.
+    for col in pdf.columns[pdf.dtypes == "object"]:
+        if len(pdf) and isinstance(pdf[col].to_numpy()[0], bytes):
             pdf[col] = pdf[col].str.decode("utf-8", errors="replace")
     return pdf
 
@@ -227,8 +228,7 @@ def write_hats(
         from .exceptions import CrossMatchError
 
         raise CrossMatchError(
-            "HATS output requires the optional 'lsdb' package. "
-            "Install it with `pip install lsdb`."
+            "HATS output requires the optional 'lsdb' package. Install it with `pip install lsdb`."
         ) from exc
 
     if isinstance(frame, pl.LazyFrame):
