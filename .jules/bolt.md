@@ -21,3 +21,6 @@
 ## 2024-06-18 - NumPy Unique Vectorization Over Python Sets
 **Learning:** When performing duplicate filtering in large array operations (such as finding the best astropy matches), using a native Python `for` loop with a `set` for lookup incurs significant overhead due to Python's variable tracking and dynamic typing.
 **Action:** Prefer vectorized NumPy operations like `np.unique(array, return_index=True)` followed by `np.sort` on the indices. This pushes the loop down to the fast C backend, providing a substantial speedup for massive astronomical arrays.
+## 2026-06-25 - NumPy Vectorization over Python Sets for Filter Masks
+**Learning:** Building boolean masks using a python `set` lookup (`[i in keep_rows for i in range(tmp.height)]`) scales poorly for very large matched dataframes in astronomical crossmatching.
+**Action:** Replace `set` comprehensions with `np.zeros(size, dtype=bool)` and fancy indexing (`mask[indices] = True`) whenever filtering large indices arrays. This operates at C speed and drops filter overhead enormously.
