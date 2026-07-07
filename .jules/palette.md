@@ -5,3 +5,7 @@
 ## 2024-06-18 - CLI standard output routing and logical error exit codes are critical for shell script UX
 **Learning:** When users chain CLI commands in shell scripts, they expect data arrays (like list output) and their headers to group in `stdout` to allow clean piping, while application errors and warnings should specifically route to `stderr`. Additionally, non-zero error codes must be issued when requested data is not found; silent `0` exits on "not found" cases break logic branching in bash files.
 **Action:** In `src/xmatch/cli.py`, updated `list_catalogues` so its header outputs to `stdout` to maintain stream consistency. Additionally, updated `describe` logic to properly signal logical failures with boolean returns and subsequently output an error `1` exit code in `main()`.
+
+## 2024-07-07 - Actionable "Did you mean...?" hints
+**Learning:** Providing actionable feedback ("Did you mean...?") when users misspell requested resources significantly improves CLI UX. Crucially, when using `difflib.get_close_matches` for candidate suggestions, ensure the target candidates are matched with the same casing as the user's input (e.g., lowercased). `difflib.SequenceMatcher` is case-sensitive, so matching lowercased input directly against mixed-case candidates will result in artificially low match scores. Map the matched candidates back to their original display names afterward.
+**Action:** Implemented `_suggest_endpoint` in `src/xmatch/cli.py` to use `difflib` and properly lowercase items for matching before returning them in original casing.

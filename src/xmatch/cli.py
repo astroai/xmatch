@@ -25,6 +25,7 @@ engine — no logic changes; only the surface that the user types.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import logging
 import os
@@ -514,6 +515,31 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
         action="version",
         version=f"xmatch {__version__}",
     )
+
+
+def _suggest_endpoint(name: str, cm: CrossMatch, n: int = 3, cutoff: float = 0.4) -> str:
+    endpoints = get_public_endpoints()
+    pool = list(endpoints.keys())
+    for archive_key, archive in cm.archives_config.items():
+        pool.append(archive_key)
+        for svc_key, svc in archive.items():
+            if isinstance(svc, dict) and "access_url" in svc:
+                pool.append(svc_key)
+
+    if not pool:
+        return ""
+
+    lower_to_orig = {cand.lower(): cand for cand in pool}
+    matches = difflib.get_close_matches(
+        name.lower(),
+        list(lower_to_orig),
+        n=n,
+        cutoff=cutoff
+    )
+    if matches:
+        suggestions = [lower_to_orig[m] for m in matches]
+        return f"Did you mean: {', '.join(suggestions)}?"
+    return ""
 
 
 def _resolve_discovery_endpoint(name: str, cm: CrossMatch) -> str:
@@ -1649,6 +1675,9 @@ def handle_discover(
     url = _resolve_discovery_endpoint(endpoint, cm)
     if not url:
         console.error(f"Unknown endpoint '{endpoint}'.")
+        suggestion = _suggest_endpoint(endpoint, cm)
+        if suggestion:
+            console.hint(f"  {suggestion}")
         console.hint("Known endpoints:")
         for name, info in sorted(get_public_endpoints().items()):
             sys.stderr.write(f"  {_pad(console.cyan(name), 14)}{info['description']}\n")
@@ -1991,7 +2020,7 @@ def _split_subcommand(argv: Sequence[str]) -> tuple[Optional[str], List[str]]:
 
 
 
-    def _load_bundled_config() -> tuple[Path, Dict[str, Any]]:
+def _load_bundled_config() -> tuple[Path, Dict[str, Any]]:
     """Load the bundled ``xmatch.yaml`` that ships with the package.
 
     This is the *baseline* used by :func:`_run_doctor` to detect drift in the
@@ -2452,7 +2481,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # help, which the subparser itself owns — fall through to the usual
     # dispatch so the subparser receives ``["--help"]`` (or ``["-h"]``)
     # and argparse handles everything natively.
-if any(t in ("-h", "--help") for t in argv_list):
+    if any(t in ("-h", "--help") for t in argv_list):
         cmd_peek, _ = _split_subcommand(argv_list)
         if cmd_peek is None:
             parser = _build_top_parser()
