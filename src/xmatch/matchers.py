@@ -679,8 +679,10 @@ def _apply_match_filter(
         filtered = ctx.execute(
             f"SELECT _row_id FROM tmp WHERE {filter_expr}"
         ).collect()
-        keep_rows = set(int(r) for r in filtered["_row_id"].to_list())
-        keep = np.array([i in keep_rows for i in range(tmp.height)], dtype=bool)
+        # Fast vectorized O(1) assignment instead of native Python loops & sets
+        keep_indices = filtered["_row_id"].to_numpy()
+        keep = np.zeros(tmp.height, dtype=bool)
+        keep[keep_indices] = True
     except Exception as exc:
         logger.warning(
             "Filter expression '%s' failed (%s); keeping all pairs.",
