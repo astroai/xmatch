@@ -1297,16 +1297,15 @@ def _engineer_ml_features_and_labels(
     X[:, -1] = np.log1p(density)
 
     # --- pseudo-labels -------------------------------------------------------
-    unique_left, inverse = np.unique(left_idx, return_inverse=True)
     y_pseudo = np.zeros(n_pairs, dtype=int)
-    for idx in range(len(unique_left)):
-        group = inverse == idx
-        group_seps = X[group, 0]  # normalised separation
-        if group_seps.size >= 2:
-            best_pos = np.where(group)[0][int(np.argmin(group_seps))]
-            y_pseudo[best_pos] = 1
-        else:
-            y_pseudo[np.where(group)[0][0]] = 1
+    # Primary sort by left_idx, secondary sort by normalised separation (X[:, 0])
+    order = np.lexsort((X[:, 0], left_idx))
+    sorted_left_idx = left_idx[order]
+    # np.unique returns the first index of each unique element when return_index=True
+    # Since it's sorted by separation, this gives the index of the minimum separation for each left_idx
+    unique_left, unique_indices = np.unique(sorted_left_idx, return_index=True)
+    best_positions = order[unique_indices]
+    y_pseudo[best_positions] = 1
 
     # --- optional synthetic negative examples --------------------------------
     if add_synthetic_negatives:

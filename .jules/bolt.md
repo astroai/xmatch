@@ -29,3 +29,7 @@
 ## 2026-07-07 - Fast pandas object-column filtering (LANDED)
 **Learning:** `select_dtypes(include="object")` and `.iloc[0]` add overhead and trigger pandas deprecation warnings on wide catalog frames.
 **Action:** Use `pdf.columns[pdf.dtypes == "object"]` and `pdf[col].to_numpy()[0]` for bytes-decode gating in `_decode_pandas_bytes_columns`.
+
+## 2026-07-08 - Optimize pseudo-label generation (LANDED)
+**Learning:** A Python loop over `np.unique(left_idx)` with per-group boolean masks and `np.argmin` is O(N × unique_left) and dominates ML feature prep on large match tables.
+**Action:** Use `np.lexsort((X[:, 0], left_idx))` then `np.unique(..., return_index=True)` on the sorted left indices to pick the minimum-separation pair per primary in O(N log N).
