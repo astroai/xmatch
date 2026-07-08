@@ -61,9 +61,7 @@ class AuthConfig:
             username = os.environ.get(f"{env_prefix}_USER")
             password = os.environ.get(f"{env_prefix}_PASSWORD")
             if username and password:
-                logger.info(
-                    "Found credentials for '%s' in environment variables.", service_name
-                )
+                logger.info("Found credentials for '%s' in environment variables.", service_name)
                 session = requests.Session()
                 session.auth = requests.auth.HTTPBasicAuth(username, password)
                 loaded_auth[service_name] = session
@@ -79,21 +77,15 @@ class AuthConfig:
                     username = keyring.get_password(service_name, "username")
                     password = keyring.get_password(service_name, "password")
                     if username and password:
-                        logger.info(
-                            "Found credentials for '%s' in keyring.", service_name
-                        )
+                        logger.info("Found credentials for '%s' in keyring.", service_name)
                         session = requests.Session()
                         session.auth = requests.auth.HTTPBasicAuth(username, password)
                         loaded_auth[service_name] = session
                     else:
-                        logger.debug(
-                            "No keyring credentials for '%s'.", service_name
-                        )
+                        logger.debug("No keyring credentials for '%s'.", service_name)
                 except Exception:
                     # Expected on headless/CI — no working keyring backend.
-                    logger.debug(
-                        "Keyring unavailable for '%s' (no backend).", service_name
-                    )
+                    logger.debug("Keyring unavailable for '%s' (no backend).", service_name)
 
         return loaded_auth
 
@@ -115,6 +107,7 @@ class AuthConfig:
 # --------------------------------------------------------------------------- #
 # Public helpers
 # --------------------------------------------------------------------------- #
+
 
 def load_auth_config() -> AuthConfig:
     """Load and return an AuthConfig instance."""

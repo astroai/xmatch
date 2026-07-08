@@ -199,8 +199,10 @@ def test_suggest_preserves_original_case_with_mixed_case_pool():
         "twoMASS_psc": "fake_config",
         "allWISE_src": "fake_config",
     }
-    with mock.patch.object(cm, "catalogues_config", mixed_pool), \
-         mock.patch.object(cm, "aliases_config", {}):
+    with (
+        mock.patch.object(cm, "catalogues_config", mixed_pool),
+        mock.patch.object(cm, "aliases_config", {}),
+    ):
         # Mixed-case input: should still match and return ORIGINAL casing.
         out_upper = cm.suggest("GAIA_DR3")
         assert "Gaia_DR3" in out_upper
@@ -219,8 +221,10 @@ def test_suggest_empty_pool_returns_empty():
     from unittest import mock
 
     cm = CrossMatch()
-    with mock.patch.object(cm, "catalogues_config", {}), \
-         mock.patch.object(cm, "aliases_config", {}):
+    with (
+        mock.patch.object(cm, "catalogues_config", {}),
+        mock.patch.object(cm, "aliases_config", {}),
+    ):
         assert cm.suggest("anything") == []
         assert cm.suggest("") == []
 
@@ -230,8 +234,10 @@ def test_suggest_case_insensitive_aliases(cm):
     from unittest import mock
 
     aliases_mixed = {"DECaLS_DR10": "decals", "ls_DR10_Extra": "decals"}
-    with mock.patch.object(cm, "aliases_config", aliases_mixed), \
-         mock.patch.dict(cm.catalogues_config, {}, clear=True):
+    with (
+        mock.patch.object(cm, "aliases_config", aliases_mixed),
+        mock.patch.dict(cm.catalogues_config, {}, clear=True),
+    ):
         out = cm.suggest("decals_dr10_extra")
         assert "ls_DR10_Extra" in out
 
@@ -277,9 +283,9 @@ def test_crossmatch_multi_three_way_intersection(cm, three_frames):
     # All 3 of A match B, and those 3 also match C (at small radius)
     assert out.height == 3
     # Column naming: A cols unchanged; B cols get _2; C cols get _3.
-    assert "ra" in out.columns       # from cat-1
-    assert "ra_2" in out.columns     # from cat-2 (renamed)
-    assert "ra_3" in out.columns     # from cat-3 (renamed)
+    assert "ra" in out.columns  # from cat-1
+    assert "ra_2" in out.columns  # from cat-2 (renamed)
+    assert "ra_3" in out.columns  # from cat-3 (renamed)
     assert "sep_arcsec" in out.columns
     # Verify sep_arcsec appears exactly once (not duplicated from chain).
     assert out.columns.count("sep_arcsec") == 1
@@ -346,22 +352,18 @@ def test_crossmatch_multi_remote_first_catalogue(cm, tmp_path):
     except (urllib.error.URLError, TimeoutError, OSError):
         pytest.skip("ESA Gaia TAP endpoint is not reachable from this host.")
 
-    # --- Vega region (bright, dense — guaranteed Gaia coverage) -------------
-    ra_vega = 279.23473479
-    dec_vega = 38.78368896
+    # --- Gaia DR3 source region (guaranteed Gaia coverage) -------------
+    ra_vega = 279.24289761
+    dec_vega = 38.78910887
     cone_deg = 0.005  # ~18 arcsec — small enough for a fast TAP round-trip
 
     # --- local catalogue 2: a single star at Vega's position -----------------
-    local2 = pl.DataFrame(
-        {"id": [1], "ra": [ra_vega], "dec": [dec_vega]}
-    )
+    local2 = pl.DataFrame({"id": [1], "ra": [ra_vega], "dec": [dec_vega]})
     local2_path = tmp_path / "local2.csv"
     local2.write_csv(local2_path)
 
     # --- local catalogue 3: a star offset ~0.5" from Vega -------------------
-    local3 = pl.DataFrame(
-        {"id": [101], "ra": [ra_vega + 0.00014], "dec": [dec_vega]}
-    )
+    local3 = pl.DataFrame({"id": [101], "ra": [ra_vega + 0.00014], "dec": [dec_vega]})
     local3_path = tmp_path / "local3.csv"
     local3.write_csv(local3_path)
 
@@ -393,9 +395,7 @@ def test_crossmatch_multi_remote_first_catalogue(cm, tmp_path):
 @pytest.fixture
 def union_frames():
     """Catalogues with overlapping and non-overlapping sources."""
-    a = pl.DataFrame(
-        {"id": [1, 2, 3], "ra": [10.0, 20.0, 30.0], "dec": [5.0, 6.0, 7.0]}
-    )
+    a = pl.DataFrame({"id": [1, 2, 3], "ra": [10.0, 20.0, 30.0], "dec": [5.0, 6.0, 7.0]})
     b = pl.DataFrame(
         {
             "id": [10, 20],
@@ -509,36 +509,46 @@ def fof_frames():
         E  (cat2 only)            = NOT in output (no primary match)
         F  (cat3 only)            = NOT in output (no primary match)
     """
-    a = pl.DataFrame({
-        "id": [1, 2, 3, 4],
-        "ra": [10.0, 20.0, 30.0, 40.0],
-        "dec": [5.0, 6.0, 7.0, 8.0],
-    })
-    b = pl.DataFrame({
-        "id": [101, 102, 103],
-        "ra": [10.00005, 20.00005, 50.0],  # matches A, B, and E is new
-        "dec": [5.0, 6.0, 5.0],
-    })
-    c = pl.DataFrame({
-        "id": [201, 202],
-        "ra": [20.00005, 60.0],  # matches B, and F is new
-        "dec": [6.0, 5.0],
-    })
+    a = pl.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "ra": [10.0, 20.0, 30.0, 40.0],
+            "dec": [5.0, 6.0, 7.0, 8.0],
+        }
+    )
+    b = pl.DataFrame(
+        {
+            "id": [101, 102, 103],
+            "ra": [10.00005, 20.00005, 50.0],  # matches A, B, and E is new
+            "dec": [5.0, 6.0, 5.0],
+        }
+    )
+    c = pl.DataFrame(
+        {
+            "id": [201, 202],
+            "ra": [20.00005, 60.0],  # matches B, and F is new
+            "dec": [6.0, 5.0],
+        }
+    )
     return a, b, c
 
 
 def test_fof_match_two_catalogue_basic_transitive_closure():
     """Two catalogues with overlapping sources → bundles."""
-    a = pl.DataFrame({
-        "id": [1, 2, 3],
-        "ra": [10.0, 20.0, 30.0],
-        "dec": [5.0, 6.0, 7.0],
-    })
-    b = pl.DataFrame({
-        "id": [101, 102, 103],
-        "ra": [10.00005, 20.00005, 50.0],
-        "dec": [5.0, 6.0, 5.0],
-    })
+    a = pl.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "ra": [10.0, 20.0, 30.0],
+            "dec": [5.0, 6.0, 7.0],
+        }
+    )
+    b = pl.DataFrame(
+        {
+            "id": [101, 102, 103],
+            "ra": [10.00005, 20.00005, 50.0],
+            "dec": [5.0, 6.0, 5.0],
+        }
+    )
     cm = CrossMatch()
     out = cm.fof_match([a, b], radius_arcsec=1.0)
     assert isinstance(out, pl.DataFrame)
@@ -549,7 +559,7 @@ def test_fof_match_two_catalogue_basic_transitive_closure():
     # Primary sources: A(1)↔101, B(2)↔102, C(3) isolated → 3 bundles
     assert out.height == 3
     # Check _src_cats values
-    src_cats = dict(zip(out["bundle_id"].to_list(), out["_src_cats"].to_list()))
+    src_cats = dict(zip(out["bundle_id"].to_list(), out["_src_cats"].to_list(), strict=False))
     assert "1+2" in src_cats.values(), f"Expected '1+2' bundles, got {src_cats}"
     assert "1" in src_cats.values(), f"Expected '1' (isolated) bundles, got {src_cats}"
 
@@ -570,7 +580,9 @@ def test_fof_match_three_catalogue_transitive_chain(fof_frames):
     )
     # Verify n_cats column
     n_cats_vals = out["n_cats"].to_list()
-    assert max(n_cats_vals) >= 3, f"Expected at least one bundle with n_cats=3, got max {max(n_cats_vals)}"
+    assert max(n_cats_vals) >= 3, (
+        f"Expected at least one bundle with n_cats=3, got max {max(n_cats_vals)}"
+    )
 
 
 def test_fof_match_output_file(fof_frames, tmp_path):
@@ -610,18 +622,24 @@ def test_fof_match_requires_two_catalogues():
 
 def test_fof_match_all_primary_isolated():
     """All primary sources are isolated → one bundle per primary source."""
-    a = pl.DataFrame({
-        "ra": [10.0, 20.0, 30.0],
-        "dec": [5.0, 6.0, 7.0],
-    })
-    b = pl.DataFrame({
-        "ra": [50.0, 60.0, 70.0],
-        "dec": [5.0, 6.0, 7.0],
-    })
-    c = pl.DataFrame({
-        "ra": [100.0, 110.0],
-        "dec": [5.0, 6.0],
-    })
+    a = pl.DataFrame(
+        {
+            "ra": [10.0, 20.0, 30.0],
+            "dec": [5.0, 6.0, 7.0],
+        }
+    )
+    b = pl.DataFrame(
+        {
+            "ra": [50.0, 60.0, 70.0],
+            "dec": [5.0, 6.0, 7.0],
+        }
+    )
+    c = pl.DataFrame(
+        {
+            "ra": [100.0, 110.0],
+            "dec": [5.0, 6.0],
+        }
+    )
     cm = CrossMatch()
     out = cm.fof_match([a, b, c], radius_arcsec=1.0)
     assert out.height == 3  # one per primary source
@@ -646,17 +664,21 @@ def test_fof_match_preserves_primary_columns(fof_frames):
 def test_fof_match_column_averaging_and_strings():
     """When multiple cat-2 sources match the same primary source, numeric
     columns are averaged and string columns take the first value."""
-    a = pl.DataFrame({
-        "ra": [10.0],
-        "dec": [5.0],
-        "name": ["primary_star"],
-    })
-    b = pl.DataFrame({
-        "ra": [10.00005, 10.0001],  # both match the primary
-        "dec": [5.0, 5.0],
-        "mag": [15.0, 15.2],
-        "label": ["detection_A", "detection_B"],
-    })
+    a = pl.DataFrame(
+        {
+            "ra": [10.0],
+            "dec": [5.0],
+            "name": ["primary_star"],
+        }
+    )
+    b = pl.DataFrame(
+        {
+            "ra": [10.00005, 10.0001],  # both match the primary
+            "dec": [5.0, 5.0],
+            "mag": [15.0, 15.2],
+            "label": ["detection_A", "detection_B"],
+        }
+    )
     cm = CrossMatch()
     out = cm.fof_match([a, b], radius_arcsec=1.0)
     assert out.height == 1
@@ -667,4 +689,3 @@ def test_fof_match_column_averaging_and_strings():
     # label should be first value (string)
     assert "label" in out.columns
     assert out["label"][0] == "detection_A"
-

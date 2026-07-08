@@ -76,9 +76,9 @@ and regenerate alongside any such change.
   tolerance) must be paired with bumping ``SEED`` and regenerating the bench
   fixtures; boundary-density shifts that stay within tolerance are fine.
 """
+
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -89,20 +89,18 @@ import polars as pl
 # tests/test_benchmarks_io_1m.py are tuned to these values).
 # --------------------------------------------------------------------------- #
 SEED: int = 42
-N_DESI: int = 10_000          # left catalogue rows (DESI-like targets)
-N_GAIA: int = 1_000_000       # right catalogue rows (Gaia DR3-like background)
+N_DESI: int = 10_000  # left catalogue rows (DESI-like targets)
+N_GAIA: int = 1_000_000  # right catalogue rows (Gaia DR3-like background)
 CENTRE_RA_DEG: float = 180.0
 CENTRE_DEC_DEG: float = -30.0
 CONE_RADIUS_DEG: float = 0.5
-DESI_RA_ERR_ARCSEC: float = 10.0    # DESI achieves ~10 mas per axis
+DESI_RA_ERR_ARCSEC: float = 10.0  # DESI achieves ~10 mas per axis
 DESI_DEC_ERR_ARCSEC: float = 10.0
-GAIA_RA_ERR_ARCSEC: float = 0.5     # Gaia end-of-mission typical positional error
+GAIA_RA_ERR_ARCSEC: float = 0.5  # Gaia end-of-mission typical positional error
 GAIA_DEC_ERR_ARCSEC: float = 0.5
-MATCH_RADIUS_ARCSEC: float = 2.0    # typical DESI × Gaia crossmatch radius
+MATCH_RADIUS_ARCSEC: float = 2.0  # typical DESI × Gaia crossmatch radius
 
-OUTPUT_DIR = (
-    Path(__file__).resolve().parent.parent / "tests" / "data" / "benchmark"
-)
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / "tests" / "data" / "benchmark"
 
 
 def _cone_sample_flat(
@@ -212,10 +210,10 @@ def main() -> None:
 
     # Expected match count at the documented radius (printed for sanity only).
     cone_area_arcsec2 = np.pi * (CONE_RADIUS_DEG * 3600) ** 2
-    pi_r2 = np.pi * MATCH_RADIUS_ARCSEC ** 2
+    pi_r2 = np.pi * MATCH_RADIUS_ARCSEC**2
     expected = N_DESI * N_GAIA * pi_r2 / cone_area_arcsec2
     print(
-        f"\nExpected matches @ r={MATCH_RADIUS_ARCSEC}\" in "
+        f'\nExpected matches @ r={MATCH_RADIUS_ARCSEC}" in '
         f"{CONE_RADIUS_DEG}° cone: ~{expected:,.0f}\n"
         "  (rule-of-thumb; actual count will be ≈ this ± sampling noise)"
     )

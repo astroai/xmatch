@@ -1,3 +1,5 @@
+import json
+
 import polars as pl
 import pytest
 
@@ -11,6 +13,20 @@ def local_files(tmp_path):
     pl.DataFrame({"id": [1, 2], "ra": [10.0, 20.0], "dec": [5.0, 6.0]}).write_csv(a)
     pl.DataFrame({"id": [1, 2], "ra": [10.00005, 20.00005], "dec": [5.0, 6.0]}).write_parquet(b)
     return a, b
+
+
+@pytest.fixture(autouse=True)
+def mock_bundled_config(monkeypatch):
+    from pathlib import Path
+
+    import yaml
+
+    import xmatch.cli
+
+    def fake_load():
+        return Path("bundled_xmatch.yaml"), yaml.safe_load(_BUNDLED_TEXT)
+
+    monkeypatch.setattr(xmatch.cli, "_load_bundled_config", fake_load)
 
 
 def test_cli_version(capsys):
@@ -291,11 +307,6 @@ def test_progress_update_replaces_status(capfd):
     assert "second" in err
 
 
-# ----------------------------------------------------------- shell completion
-import json
-from pathlib import Path as _Path
-
-
 # Minimal xmatch.yaml fixture used by every doctor test.  By design this
 # is *not* the entire bundled config; we only need enough to exercise the
 # diff logic.  ``--config`` lets each test point at its own copy with a
@@ -304,13 +315,19 @@ _BUNDLED_TEXT = (
     "archives:\n"
     "  cds:\n"
     "    description: CDS\n"
+    "    tap_service:\n"
+    '      access_url: "http://tapvizier.u-strasbg.fr/TAPVizieR/tap"\n'
+    "  noao_datalab:\n"
+    "    description: NOAO\n"
+    "    tap_service:\n"
+    '      access_url: "https://datalab.noao.edu/tap"\n'
     "\n"
     "catalogue_aliases:\n"
-    '  gaia: "gaia_esa"\n'
+    '  gaia: "gaia_esa" # Default to ESA\'s version\n'
     '  nsc: "nsc_noao"\n'
     "\n"
     "catalogues:\n"
-    "  gaia_cds:\n"
+    "  gaia_esa:\n"
     '    description: "Gaia (Source Catalogue) via CDS VizieR"\n'
     "    archive: cds\n"
     "    service_id: tap_service\n"
@@ -338,6 +355,9 @@ _BUNDLED_TEXT = (
     '    description: "UKIDSS via NOAO"\n'
     "    archive: noao_datalab\n"
     "    service_id: tap_service\n"
+    '    access_identifier: "ukidss_las.object"\n'
+    '    ra_column: "ra"\n'
+    '    dec_column: "dec"\n'
 )
 
 
@@ -502,9 +522,7 @@ def test_cli_doctor_alias_redirect_returns_one(tmp_path, capsys):
 
 def test_cli_doctor_missing_catalogue_is_exit_zero(tmp_path, capsys):
     """Removing a bundled catalogue is informational; exit 0 by default."""
-    body = "\n".join(
-        line for line in _BUNDLED_TEXT.splitlines() if line.strip() != "ukidsslas_noao:"
-    )
+    body = _BUNDLED_TEXT.split("  ukidsslas_noao:")[0]
     assert body != _BUNDLED_TEXT
     rc = main(["doctor", "--config", _write_doctor_fixture(tmp_path, body)])
     assert rc == 0
@@ -515,16 +533,21 @@ def test_cli_doctor_missing_catalogue_is_exit_zero(tmp_path, capsys):
 
 def test_cli_doctor_missing_catalogue_strict_returns_one(tmp_path, capsys):
     """Same as above but with --strict: exit 1."""
-    body = "\n".join(
-        line for line in _BUNDLED_TEXT.splitlines() if line.strip() != "ukidsslas_noao:"
-    )
+    body = _BUNDLED_TEXT.split("  ukidsslas_noao:")[0]
     rc = main(["doctor", "--strict", "--config", _write_doctor_fixture(tmp_path, body)])
     assert rc == 1
 
 
 def test_cli_doctor_user_only_catalogue_is_exit_zero(tmp_path, capsys):
     """Adding a catalogue only to user config is informational; exit 0."""
-    body = _BUNDLED_TEXT + "\n  my_local_catalog:\n    archive: cds\n"
+    body = (
+        _BUNDLED_TEXT + "\n  my_local_catalog:\n"
+        "    archive: cds\n"
+        "    service_id: tap_service\n"
+        '    access_identifier: "my.local"\n'
+        '    ra_column: "ra"\n'
+        '    dec_column: "dec"\n'
+    )
     rc = main(["doctor", "--config", _write_doctor_fixture(tmp_path, body)])
     assert rc == 0
     out = capsys.readouterr().out

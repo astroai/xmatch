@@ -7,6 +7,8 @@ from typing import Dict, List
 import numpy as np
 import pytest
 
+from .test_real_catalogues import allwise_csv, gaia_csv, usno_csv  # noqa: F401
+
 # Global accumulator for benchmark results, populated by test_benchmarks.py.
 BENCH_RESULTS: List[Dict] = []
 
@@ -83,7 +85,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     for key in sorted(groups):
         entries = groups[key]
         scenario, radius = key
-        astro_time = astropy_times.get(key, None)
+        astro_time = astropy_times.get(key)
         for e in sorted(entries, key=lambda x: x["engine"]):
             if astro_time and astro_time > 0:
                 speedup = f"{astro_time / e['time_s']:.1f}x"

@@ -18,7 +18,7 @@ Results are printed as a compact terminal table at the end of the suite.
 from __future__ import annotations
 
 import time
-from typing import Dict, List
+from typing import List
 
 import numpy as np
 import polars as pl
@@ -44,15 +44,11 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 # Imports from the real-catalogue test module (tests/ is a package).
 # --------------------------------------------------------------------------- #
-from .test_real_catalogues import (
-    N_ROWS,
+from .test_real_catalogues import (  # noqa: E402
     _HAVE_ASTROQUERY,
     _allwise_source,
     _gaia_source,
     _usno_source,
-    allwise_csv,
-    gaia_csv,
-    usno_csv,
 )
 
 # --------------------------------------------------------------------------- #
@@ -151,7 +147,7 @@ def _raw_astropy_match(
         right[right_src.ra_column].to_numpy() * u.deg,
         right[right_src.dec_column].to_numpy() * u.deg,
     )
-    radius = spec.radius_arcsec * u.arcsec
+    spec.radius_arcsec * u.arcsec
 
     for _ in range(n_warmup):
         idx, sep2d, _ = lcoord.match_to_catalog_sky(rcoord)
@@ -346,7 +342,17 @@ def test_bench_gaia_x_allwise(radius_arcsec: float, gaia_csv, allwise_csv, reque
                 pass
         else:
             elapsed, result, left_n, right_n = _time_match(left_src, right_src, spec, engine)
-            _record("Gaia x AllWISE", left_src, right_src, engine, elapsed, result, left_n, right_n, spec)
+            _record(
+                "Gaia x AllWISE",
+                left_src,
+                right_src,
+                engine,
+                elapsed,
+                result,
+                left_n,
+                right_n,
+                spec,
+            )
 
     try:
         elapsed, n = _raw_astropy_match(left_src, right_src, spec)
@@ -371,7 +377,9 @@ def test_bench_gaia_x_usno(gaia_csv, usno_csv, request):
                 pass
         else:
             elapsed, result, left_n, right_n = _time_match(left_src, right_src, spec, engine)
-            _record("Gaia x USNO-B", left_src, right_src, engine, elapsed, result, left_n, right_n, spec)
+            _record(
+                "Gaia x USNO-B", left_src, right_src, engine, elapsed, result, left_n, right_n, spec
+            )
 
     try:
         elapsed, n = _raw_astropy_match(left_src, right_src, spec)

@@ -25,6 +25,7 @@ engine — no logic changes; only the surface that the user types.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import logging
 import os
@@ -514,6 +515,31 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
         action="version",
         version=f"xmatch {__version__}",
     )
+
+
+def _suggest_endpoint(name: str, cm: CrossMatch, n: int = 3, cutoff: float = 0.4) -> str:
+    endpoints = get_public_endpoints()
+    pool = list(endpoints.keys())
+    for archive_key, archive in cm.archives_config.items():
+        pool.append(archive_key)
+        for svc_key, svc in archive.items():
+            if isinstance(svc, dict) and "access_url" in svc:
+                pool.append(svc_key)
+
+    if not pool:
+        return ""
+
+    lower_to_orig = {cand.lower(): cand for cand in pool}
+    matches = difflib.get_close_matches(
+        name.lower(),
+        list(lower_to_orig),
+        n=n,
+        cutoff=cutoff,
+    )
+    if matches:
+        suggestions = [lower_to_orig[m] for m in matches]
+        return f"Did you mean: {', '.join(suggestions)}?"
+    return ""
 
 
 def _resolve_discovery_endpoint(name: str, cm: CrossMatch) -> str:
@@ -1649,6 +1675,9 @@ def handle_discover(
     url = _resolve_discovery_endpoint(endpoint, cm)
     if not url:
         console.error(f"Unknown endpoint '{endpoint}'.")
+        suggestion = _suggest_endpoint(endpoint, cm)
+        if suggestion:
+            console.hint(f"  {suggestion}")
         console.hint("Known endpoints:")
         for name, info in sorted(get_public_endpoints().items()):
             sys.stderr.write(f"  {_pad(console.cyan(name), 14)}{info['description']}\n")
@@ -1990,8 +2019,7 @@ def _split_subcommand(argv: Sequence[str]) -> tuple[Optional[str], List[str]]:
     return None, list(argv)
 
 
-
-    def _load_bundled_config() -> tuple[Path, Dict[str, Any]]:
+def _load_bundled_config() -> tuple[Path, Dict[str, Any]]:
     """Load the bundled ``xmatch.yaml`` that ships with the package.
 
     This is the *baseline* used by :func:`_run_doctor` to detect drift in the
@@ -2049,9 +2077,7 @@ def _compare_field(bundled_value: Any, user_value: Any) -> bool:
     return b == u
 
 
-def _diff_field_lists(
-    bundled_val: Any, user_val: Any
-) -> tuple[List[Any], List[Any]]:
+def _diff_field_lists(bundled_val: Any, user_val: Any) -> tuple[List[Any], List[Any]]:
     """Return ``(bundled_added, user_extra)`` as ordered lists.
 
     Used for lists such as ``default_columns`` — we report symmetric diff
@@ -2065,9 +2091,7 @@ def _diff_field_lists(
     return bundled_added, user_extra
 
 
-def _diff_configs(
-    bundled: Dict[str, Any], user: Dict[str, Any]
-) -> Dict[str, Any]:
+def _diff_configs(bundled: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
     """Compare the bundled baseline against the user's active config.
 
     Returns a report dict with four top-level arrays:
@@ -2097,34 +2121,25 @@ def _diff_configs(
     user_cats = dict(user.get("catalogues") or {})
     for name in sorted(bundled_cats):
         if name not in user_cats:
-            report["missing_in_user"].append(
-                {"section_type": "catalogue", "name": name}
-            )
+            report["missing_in_user"].append({"section_type": "catalogue", "name": name})
             continue
         bund = bundled_cats[name] or {}
         usr = user_cats[name] or {}
         # Union of all fields appearing in either side, plus the known
         # structural / informational fields so we never silently skip
         # them on the other side.
-        keys = (
-            set(bund)
-            | set(usr)
-            | OUTDATED_CATALOGUE_FIELDS
-            | INFORMATIONAL_CATALOGUE_FIELDS
-        )
+        keys = set(bund) | set(usr) | OUTDATED_CATALOGUE_FIELDS | INFORMATIONAL_CATALOGUE_FIELDS
         for field in sorted(keys):
             in_bund = field in bund
             in_user = field in usr
             bund_v = bund.get(field)
             user_v = usr.get(field)
-            if (in_bund and not in_user) or (
-                not in_bund and in_user
-            ) or not _compare_field(bund_v, user_v):
-                bucket = (
-                    "informational"
-                    if field in INFORMATIONAL_CATALOGUE_FIELDS
-                    else "outdated"
-                )
+            if (
+                (in_bund and not in_user)
+                or (not in_bund and in_user)
+                or not _compare_field(bund_v, user_v)
+            ):
+                bucket = "informational" if field in INFORMATIONAL_CATALOGUE_FIELDS else "outdated"
                 entry = {
                     "section_type": "catalogue",
                     "name": name,
@@ -2153,9 +2168,7 @@ def _diff_configs(
     for alias in sorted(bundled_aliases):
         bund_target = bundled_aliases[alias]
         if alias not in user_aliases:
-            report["missing_in_user"].append(
-                {"section_type": "alias", "name": alias}
-            )
+            report["missing_in_user"].append({"section_type": "alias", "name": alias})
             continue
         if bund_target != user_aliases[alias]:
             report["alias_redirects"].append(
@@ -2192,9 +2205,7 @@ def _diff_configs(
     user_archives = dict(user.get("archives") or {})
     for archive in sorted(bundled_archives):
         if archive not in user_archives:
-            report["missing_in_user"].append(
-                {"section_type": "archive", "name": archive}
-            )
+            report["missing_in_user"].append({"section_type": "archive", "name": archive})
         # We don't deep-compare nested service dicts (TAP URLs change too
         # often per release to be useful as drift signals).  Topology and
         # archive keys are what matter here.
@@ -2260,13 +2271,9 @@ def _emit_doctor_human(
                 added = entry["bundled_added"]
                 extra = entry["user_extra"]
                 if added:
-                    sys.stdout.write(
-                        f"    + bundled added:   {console.green(repr(added))}\n"
-                    )
+                    sys.stdout.write(f"    + bundled added:   {console.green(repr(added))}\n")
                 if extra:
-                    sys.stdout.write(
-                        f"    - user has extra:  {console.yellow(repr(extra))}\n"
-                    )
+                    sys.stdout.write(f"    - user has extra:  {console.yellow(repr(extra))}\n")
             else:
                 sys.stdout.write(
                     f"    bundled: {console.dim(repr(entry['bundled_value']))}\n"
@@ -2343,12 +2350,10 @@ def _emit_doctor_json(
         "config_active": str(active_path) if active_path else None,
         "config_bundled": str(bundled_path),
         "outdated_fields": [
-            {k: v for k, v in e.items() if k != "_bucket"}
-            for e in report["outdated_fields"]
+            {k: v for k, v in e.items() if k != "_bucket"} for e in report["outdated_fields"]
         ],
         "informational_fields": [
-            {k: v for k, v in e.items() if k != "_bucket"}
-            for e in report["informational_fields"]
+            {k: v for k, v in e.items() if k != "_bucket"} for e in report["informational_fields"]
         ],
         "missing_in_user": report["missing_in_user"],
         "user_only": report["user_only"],
@@ -2428,6 +2433,7 @@ def _run_doctor(argv: Sequence[str]) -> int:
         quiet=getattr(args, "quiet", False),
     )
 
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Entry point for the ``xmatch`` console script and ``python -m xmatch``.
 
@@ -2452,7 +2458,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # help, which the subparser itself owns — fall through to the usual
     # dispatch so the subparser receives ``["--help"]`` (or ``["-h"]``)
     # and argparse handles everything natively.
-if any(t in ("-h", "--help") for t in argv_list):
+    if any(t in ("-h", "--help") for t in argv_list):
         cmd_peek, _ = _split_subcommand(argv_list)
         if cmd_peek is None:
             parser = _build_top_parser()

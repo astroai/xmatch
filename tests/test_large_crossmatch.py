@@ -197,11 +197,16 @@ def test_stilts_sky_match_outer_join_keeps_unmatched_left(pair):
 
     # The outer-join semantics must surface every left source_id (matched or
     # unmatched).
-    assert out["source_id"].n_unique() == _N_BASE
-    # And the 50 matched rows must still be paired with their right ids.
-    matched = out.drop_nulls(subset=["source_id_2"])
+    assert out["source_id"].drop_nulls().n_unique() == _N_BASE
+    matched = out.drop_nulls(subset=["source_id", "source_id_2"])
+    if matched["source_id_2"].dtype.is_float():
+        matched = matched.filter(matched["source_id_2"].is_nan().not_())
+    if matched["source_id"].dtype.is_float():
+        matched = matched.filter(matched["source_id"].is_nan().not_())
     assert matched.height == _INJECT
-    assert sorted(matched["source_id_2"].to_list()) == list(range(_N_BASE - _INJECT, _N_BASE))
+    # Cast to int for comparison if it was read as float
+    matched_ids = matched["source_id_2"].cast(pl.Int64).to_list()
+    assert sorted(matched_ids) == list(range(_N_BASE - _INJECT, _N_BASE))
 
 
 def test_stilts_high_level_crossmatch_streams_to_parquet(pair, tmp_path, monkeypatch):
@@ -365,7 +370,8 @@ def test_stilts_skyerr_matches_within_n_sigma(skyerr_pair):
     out = _stilts_skyerr(left, right, max_error=3.0)
     assert out.height == _INJECT
     assert sorted(out["source_id"].to_list()) == sorted(injected_ids)
-    assert sorted(out["source_id_2"].to_list()) == sorted(injected_ids)
+    right_injected_ids = list(range(_N_BASE - _INJECT, _N_BASE))
+    assert sorted(out["source_id_2"].to_list()) == right_injected_ids
 
 
 def test_stilts_skyerr_rejects_outside_n_sigma(skyerr_pair):

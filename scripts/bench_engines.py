@@ -22,6 +22,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 import time
 from pathlib import Path
@@ -36,7 +37,6 @@ sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
 from xmatch.matchers import MatchSpec, sky_match  # noqa: E402
 from xmatch.sources import CatalogueSource  # noqa: E402
-
 
 # --------------------------------------------------------------------------- #
 # helpers
@@ -91,16 +91,12 @@ def _time_engine(
     times: list = []
     n_matches = 0
     for _ in range(n_warmup):
-        out = sky_match(
-            left_src, right_src, left_lf, right_lf, spec, engine=engine
-        ).collect()
+        out = sky_match(left_src, right_src, left_lf, right_lf, spec, engine=engine).collect()
         n_matches = out.height
 
     for _ in range(n_timed):
         t0 = time.perf_counter()
-        out = sky_match(
-            left_src, right_src, left_lf, right_lf, spec, engine=engine
-        ).collect()
+        out = sky_match(left_src, right_src, left_lf, right_lf, spec, engine=engine).collect()
         times.append(time.perf_counter() - t0)
         n_matches = out.height
 
@@ -129,28 +125,22 @@ def main() -> int:
         default="1k,5k,20k,100k",
         help="Comma-separated catalogue sizes (k=×1000).",
     )
-    parser.add_argument(
-        "--radius", type=float, default=1.0, help="Match radius in arcsec."
-    )
-    parser.add_argument(
-        "--n-warmup", type=int, default=1, help="Warm-up iterations per engine."
-    )
-    parser.add_argument(
-        "--n-timed", type=int, default=3, help="Timed iterations per engine."
-    )
+    parser.add_argument("--radius", type=float, default=1.0, help="Match radius in arcsec.")
+    parser.add_argument("--n-warmup", type=int, default=1, help="Warm-up iterations per engine.")
+    parser.add_argument("--n-timed", type=int, default=3, help="Timed iterations per engine.")
     parser.add_argument(
         "--chunk-size",
         type=int,
         default=None,
         help="Override _scipy_match_nd chunk size (default: 50000). "
-             "Only affects N-d matching via the fast engine.",
+        "Only affects N-d matching via the fast engine.",
     )
     parser.add_argument(
         "--extra-cols",
         default=None,
         help="Comma-separated col:weight pairs for N-d matching benchmark "
-             "(e.g. 'g:0.5,r:0.3').  When set, each size also benchmarks "
-             "N-d cKDTree matching vs spatial-only baseline.",
+        "(e.g. 'g:0.5,r:0.3').  When set, each size also benchmarks "
+        "N-d cKDTree matching vs spatial-only baseline.",
     )
     args = parser.parse_args()
 
@@ -192,10 +182,8 @@ def main() -> int:
                 continue
             if ":" in pair:
                 col, _, w = pair.partition(":")
-                try:
+                with contextlib.suppress(ValueError):
                     phot_cols[col.strip()] = float(w.strip())
-                except ValueError:
-                    pass
             else:
                 phot_cols[pair] = 1.0
 
@@ -228,8 +216,7 @@ def main() -> int:
         pass
 
     # Header.
-    col_count = len(phot_cols)
-    nd_label = f" +{col_count}col N-d" if col_count else ""
+    len(phot_cols)
     hdr_engine = f"{'Engine':>18}" if nd_spec else f"{'Engine':>6}"
     print()
     print(f"{'Size':>8}  {hdr_engine}  {'Time':>10}  {'Matches':>8}  {'rate':>10}")
@@ -244,8 +231,14 @@ def main() -> int:
         for eng in engines:
             try:
                 elapsed, n_match = _time_engine(
-                    eng, lf, lf, left_src, right_src, spec,
-                    args.n_warmup, args.n_timed,
+                    eng,
+                    lf,
+                    lf,
+                    left_src,
+                    right_src,
+                    spec,
+                    args.n_warmup,
+                    args.n_timed,
                 )
                 rate = n / elapsed if elapsed > 0 else 0
                 print(
@@ -259,16 +252,16 @@ def main() -> int:
         # Spatial-only baseline is the "fast" engine row already printed above.
         if nd_spec:
             # Build chunk-size candidates; the configured size always appears.
-            cand = {matchers._ND_CHUNK_SIZE}                 # user config / default
-            cand.add(min(5_000, n))                           # small (many chunks)
+            cand = {matchers._ND_CHUNK_SIZE}  # user config / default
+            cand.add(min(5_000, n))  # small (many chunks)
             if n > 20_000:
-                cand.add(n)                                   # no chunking
-            below = sorted(c for c in cand if 0 < c < n)      # distinct sizes < n
+                cand.add(n)  # no chunking
+            below = sorted(c for c in cand if 0 < c < n)  # distinct sizes < n
             if any(c >= n for c in cand):
-                below.append(n)                                # one "full" row
+                below.append(n)  # one "full" row
             chunk_sizes = below
 
-            _saved = matchers._ND_CHUNK_SIZE                  # restore after loop
+            _saved = matchers._ND_CHUNK_SIZE  # restore after loop
             try:
                 for cs in chunk_sizes:
                     matchers._ND_CHUNK_SIZE = cs
@@ -278,8 +271,14 @@ def main() -> int:
                         label = f"N-d ({cs // 1000}k chunk)"
                     try:
                         elapsed_nd, n_match_nd = _time_engine(
-                            "fast", lf, lf, left_src, right_src, nd_spec,
-                            args.n_warmup, args.n_timed,
+                            "fast",
+                            lf,
+                            lf,
+                            left_src,
+                            right_src,
+                            nd_spec,
+                            args.n_warmup,
+                            args.n_timed,
                         )
                         rate_nd = n / elapsed_nd if elapsed_nd > 0 else 0
                         print(
@@ -288,10 +287,7 @@ def main() -> int:
                             f"{n_match_nd:>8,}  {rate_nd:>8,.0f}/s"
                         )
                     except Exception as exc:
-                        print(
-                            f"{indent:>8}  {label:>18}  "
-                            f"{'FAILED':>10}  ({exc})"
-                        )
+                        print(f"{indent:>8}  {label:>18}  {'FAILED':>10}  ({exc})")
             finally:
                 matchers._ND_CHUNK_SIZE = _saved
 

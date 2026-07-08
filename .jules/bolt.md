@@ -21,3 +21,11 @@
 ## 2024-06-18 - NumPy Unique Vectorization Over Python Sets
 **Learning:** When performing duplicate filtering in large array operations (such as finding the best astropy matches), using a native Python `for` loop with a `set` for lookup incurs significant overhead due to Python's variable tracking and dynamic typing.
 **Action:** Prefer vectorized NumPy operations like `np.unique(array, return_index=True)` followed by `np.sort` on the indices. This pushes the loop down to the fast C backend, providing a substantial speedup for massive astronomical arrays.
+
+## 2026-07-07 - Vectorized boolean mask from Polars row indices (LANDED)
+**Learning:** Building `keep = np.array([i in keep_rows for i in range(n)])` from a Python `set` of row IDs is O(n) with heavy Python overhead on large match tables.
+**Action:** Use `keep = np.zeros(n, dtype=bool); keep[filtered["_row_id"].to_numpy()] = True` in `_apply_match_filter`.
+
+## 2026-07-07 - Fast pandas object-column filtering (LANDED)
+**Learning:** `select_dtypes(include="object")` and `.iloc[0]` add overhead and trigger pandas deprecation warnings on wide catalog frames.
+**Action:** Use `pdf.columns[pdf.dtypes == "object"]` and `pdf[col].to_numpy()[0]` for bytes-decode gating in `_decode_pandas_bytes_columns`.

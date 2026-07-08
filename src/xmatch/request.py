@@ -144,9 +144,7 @@ class MatchRequest:
         extra_distance: Dict[str, float] = dict(params.get("extra_distance_cols") or {})
         # Normalise extra_distance_cols values to float (may arrive as str/int).
         if extra_distance:
-            extra_distance = {
-                str(k): float(v) for k, v in extra_distance.items()
-            }
+            extra_distance = {str(k): float(v) for k, v in extra_distance.items()}
         spec = MatchSpec(
             radius_arcsec=float(params.get("radius_arcsec", 1.0)),
             matcher=params.get("matcher") or "sky",
@@ -162,7 +160,8 @@ class MatchRequest:
             lr_q=float(params.get("lr_q", 0.8)),
             ml_color_columns=list(params.get("ml_color_columns") or []),
             ml_model_path=params.get("ml_model_path"),
-            xgb_model_path=params.get("xgb_model_path"),            macauff_flux_columns=list(params.get("macauff_flux_columns") or []),
+            xgb_model_path=params.get("xgb_model_path"),
+            macauff_flux_columns=list(params.get("macauff_flux_columns") or []),
             pm_prior=bool(params.get("pm_prior")),
             pm_prior_magnitude_column=params.get("pm_prior_magnitude_column"),
         )

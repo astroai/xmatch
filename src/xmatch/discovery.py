@@ -77,10 +77,7 @@ def discover_tables(
     polars.DataFrame
         Columns: ``schema_name``, ``table_name``, ``description``, ``table_type``.
     """
-    query = (
-        "SELECT schema_name, table_name, description, table_type "
-        "FROM TAP_SCHEMA.tables"
-    )
+    query = "SELECT schema_name, table_name, description, table_type FROM TAP_SCHEMA.tables"
     conditions = []
     if schema_filter:
         safe = schema_filter.replace("'", "''")

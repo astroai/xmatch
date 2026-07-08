@@ -12,6 +12,7 @@ Run::
     pytest -m bench tests/test_benchmarks_io_1m.py -v -s
     pytest -m bench tests/test_benchmarks_io_1m.py -v -s --run-stilts
 """
+
 from __future__ import annotations
 
 import gc
@@ -179,7 +180,7 @@ def test_bench_io_1m_desi_x_gaia(snapshot, request):
 
     print(
         f"\nLoaded snapshot: left (desi_l) = {left_n:,} rows, "
-        f"right (gaia_r) = {right_n:,} rows @ r={spec.radius_arcsec}\""
+        f'right (gaia_r) = {right_n:,} rows @ r={spec.radius_arcsec}"'
     )
 
     baseline_n: int | None = None  # first successful engine's match count
@@ -212,7 +213,7 @@ def test_bench_io_1m_desi_x_gaia(snapshot, request):
         sep_max = float(result["sep_arcsec"].max()) if n_matches else 0.0
         print(
             f"  [{engine}] median {elapsed:6.2f}s over {N_TIMED} runs; "
-            f"{n_matches:,} matches; sep_max={sep_max:.3f}\"; "
+            f'{n_matches:,} matches; sep_max={sep_max:.3f}"; '
             f"peak RSS = {peak_rss_mb:.0f} MB"
         )
         BENCH_RESULTS.append(
@@ -244,7 +245,7 @@ def test_bench_io_1m_desi_x_gaia(snapshot, request):
         # matches.  A near-zero count means the snapshot or the matcher's
         # RA/Dec wiring has regressed.
         assert n_matches > 100, (
-            f"{engine}: only {n_matches} matches at r={spec.radius_arcsec}\" — "
+            f'{engine}: only {n_matches} matches at r={spec.radius_arcsec}" — '
             "snapshot may have lost RA/Dec spread"
         )
 

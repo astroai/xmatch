@@ -1,6 +1,7 @@
+from unittest import mock
+
 import polars as pl
 import pytest
-from unittest import mock
 
 from xmatch import io_utils
 from xmatch.exceptions import InputError
@@ -82,13 +83,17 @@ def test_decode_pandas_bytes_columns_skips_non_object_columns():
     """Vectorised byte-column decode skips non-object columns up-front."""
     import pandas as pd
 
-    pdf = pd.DataFrame({
-        "id": [1, 2, 3],                          # int64 — skipped
-        "mag": [10.5, 12.0, 14.2],                # float64 — skipped
-        "src": [b"GDR3", b"Gaia", b"DESI"],       # object bytes — decoded
-        "label": ["alpha", "beta", "gamma"],     # object str — left alone
-        "epoch": pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"]),  # datetime — skipped
-    })
+    pdf = pd.DataFrame(
+        {
+            "id": [1, 2, 3],  # int64 — skipped
+            "mag": [10.5, 12.0, 14.2],  # float64 — skipped
+            "src": [b"GDR3", b"Gaia", b"DESI"],  # object bytes — decoded
+            "label": ["alpha", "beta", "gamma"],  # object str — left alone
+            "epoch": pd.to_datetime(
+                ["2020-01-01", "2020-01-02", "2020-01-03"]
+            ),  # datetime — skipped
+        }
+    )
     out = io_utils._decode_pandas_bytes_columns(pdf.copy())
     assert out["src"].tolist() == ["GDR3", "Gaia", "DESI"]
     assert out["label"].tolist() == ["alpha", "beta", "gamma"]
@@ -131,14 +136,16 @@ def test_decode_pandas_bytes_columns_skips_string_dtype():
     """
     import pandas as pd
 
-    pdf = pd.DataFrame({
-        "src": [b"GDR3", b"Gaia"],                              # object bytes — decoded
-        "tag": pd.array(["x", "y"], dtype="string"),            # str — skipped
-        "label": ["a", "b"],                                    # object str — left alone
-    })
+    pdf = pd.DataFrame(
+        {
+            "src": [b"GDR3", b"Gaia"],  # object bytes — decoded
+            "tag": pd.array(["x", "y"], dtype="string"),  # str — skipped
+            "label": ["a", "b"],  # object str — left alone
+        }
+    )
     out = io_utils._decode_pandas_bytes_columns(pdf.copy())
     assert out["src"].tolist() == ["GDR3", "Gaia"]
-    assert out["tag"].tolist() == ["x", "y"]                    # untouched
+    assert out["tag"].tolist() == ["x", "y"]  # untouched
     assert str(out["tag"].dtype) == "string"
     assert out["label"].tolist() == ["a", "b"]
 
@@ -171,9 +178,7 @@ def test_write_frame_hats_suffix_routes_to_write_hats(tmp_path):
     sample = pl.DataFrame({"ra": [10.0, 20.0], "dec": [5.0, 10.0], "mag": [10.0, 12.0]})
     hats_dir = tmp_path / "result.hats"
 
-    with mock.patch(
-        "xmatch.io_utils.write_hats"
-    ) as mock_write_hats:
+    with mock.patch("xmatch.io_utils.write_hats") as mock_write_hats:
         io_utils.write_frame(sample, hats_dir)
         mock_write_hats.assert_called_once()
         _, kwargs = mock_write_hats.call_args
@@ -187,9 +192,7 @@ def test_write_frame_hats_respects_threshold(tmp_path):
     sample = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     hats_dir = tmp_path / "big.hats"
 
-    with mock.patch(
-        "xmatch.io_utils.write_hats"
-    ) as mock_write_hats:
+    with mock.patch("xmatch.io_utils.write_hats") as mock_write_hats:
         io_utils.write_frame(sample, hats_dir, hats_threshold=42_000)
         _, kwargs = mock_write_hats.call_args
         assert kwargs["threshold"] == 42_000
@@ -200,12 +203,12 @@ def test_write_frame_hats_custom_ra_dec(tmp_path):
     sample = pl.DataFrame({"alpha": [10.0], "delta": [5.0]})
     hats_dir = tmp_path / "custom.hats"
 
-    with mock.patch(
-        "xmatch.io_utils.write_hats"
-    ) as mock_write_hats:
+    with mock.patch("xmatch.io_utils.write_hats") as mock_write_hats:
         io_utils.write_frame(
-            sample, hats_dir,
-            ra_column="alpha", dec_column="delta",
+            sample,
+            hats_dir,
+            ra_column="alpha",
+            dec_column="delta",
         )
         _, kwargs = mock_write_hats.call_args
         assert kwargs["ra_column"] == "alpha"
@@ -224,9 +227,7 @@ def test_write_hats_unavailable_raises():
             raise ImportError("No module named 'lsdb'")
         return _original_import(name, *args, **kwargs)
 
-    with mock.patch(
-        "builtins.__import__", side_effect=_raise_on_lsdb
-    ):
+    with mock.patch("builtins.__import__", side_effect=_raise_on_lsdb):
         with pytest.raises(Exception) as exc_info:
             io_utils.write_hats(sample, "/tmp/fake.hats")
         assert "lsdb" in str(exc_info.value).lower()

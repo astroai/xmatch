@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 
 def _quote_id(name: str) -> str:
     """Quote an ADQL identifier (double-quoted per VO spec)."""
-    return '"' + name.replace('"', '""') + '"'
+    # If the name contains a dot, it might be a schema-qualified table name (e.g. gaiadr3.gaia_source).
+    # We should quote the parts separately so the database parser doesn't treat the dot as part of the name.
+    return ".".join('"' + part.replace('"', '""') + '"' for part in name.split("."))
 
 
 def _select_columns(src: CatalogueSource, requested: Optional[List[str]]) -> str:

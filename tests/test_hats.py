@@ -29,8 +29,10 @@ def test_require_lsdb_raises_with_helpful_message():
 def test_read_hats_no_path():
     """read_hats raises when source has no path and no access_identifier."""
     src = CatalogueSource(name="test", is_local=False)
-    with mock.patch.object(hats_source, "_require_lsdb", return_value=mock.MagicMock()), \
-            pytest.raises(CrossMatchError, match="No HATS path"):
+    with (
+        mock.patch.object(hats_source, "_require_lsdb", return_value=mock.MagicMock()),
+        pytest.raises(CrossMatchError, match="No HATS path"),
+    ):
         hats_source.read_hats(src)
 
 
@@ -39,15 +41,20 @@ def test_read_hats_no_path():
 # ---------------------------------------------------------------------------
 def test_hats_crossmatch_unsupported_join_type_raises():
     """hats_crossmatch rejects join types other than '1and2'."""
-    src1 = CatalogueSource(name="hats1", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake")
-    src2 = CatalogueSource(name="hats2", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake")
+    src1 = CatalogueSource(
+        name="hats1", is_local=False, access_method="hats", access_identifier="/tmp/fake"
+    )
+    src2 = CatalogueSource(
+        name="hats2", is_local=False, access_method="hats", access_identifier="/tmp/fake"
+    )
     # patch _require_lsdb to return a dummy so we get past the import gate
-    with mock.patch.object(hats_source, "_require_lsdb", return_value=mock.MagicMock()), \
-            pytest.raises(CrossMatchError, match="only supports join_type='1and2'"):
+    with (
+        mock.patch.object(hats_source, "_require_lsdb", return_value=mock.MagicMock()),
+        pytest.raises(CrossMatchError, match="only supports join_type='1and2'"),
+    ):
         hats_source.hats_crossmatch(
-            src1, src2,
+            src1,
+            src2,
             MatchSpec(radius_arcsec=1.0, join_type="all"),
         )
 
@@ -79,29 +86,43 @@ def _make_fake_result_df():
     """Return a minimal pandas DataFrame mimicking an LSDB crossmatch result."""
     import pandas as pd
 
-    return pd.DataFrame({
-        "ra": [10.0, 20.0],
-        "dec": [5.0, 6.0],
-        "mag": [15.0, 16.0],
-        "ra_2": [10.0001, 20.0001],
-        "dec_2": [5.0001, 6.0001],
-        "mag_2": [15.1, 16.1],
-        "_dist_arcsec": [0.5, 0.7],
-    })
+    return pd.DataFrame(
+        {
+            "ra": [10.0, 20.0],
+            "dec": [5.0, 6.0],
+            "mag": [15.0, 16.0],
+            "ra_2": [10.0001, 20.0001],
+            "dec_2": [5.0001, 6.0001],
+            "mag_2": [15.1, 16.1],
+            "_dist_arcsec": [0.5, 0.7],
+        }
+    )
 
 
 def test_hats_crossmatch_passes_n_neighbors_best(fake_lsdb):
     """find='best' → LSDB's n_neighbors=1."""
-    src1 = CatalogueSource(name="hats1", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake",
-                           ra_column="ra", dec_column="dec")
-    src2 = CatalogueSource(name="hats2", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake2",
-                           ra_column="ra", dec_column="dec")
+    src1 = CatalogueSource(
+        name="hats1",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake",
+        ra_column="ra",
+        dec_column="dec",
+    )
+    src2 = CatalogueSource(
+        name="hats2",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake2",
+        ra_column="ra",
+        dec_column="dec",
+    )
 
     with mock.patch.object(hats_source, "_require_lsdb", return_value=fake_lsdb):
         result = hats_source.hats_crossmatch(
-            src1, src2, MatchSpec(radius_arcsec=1.0, find="best"),
+            src1,
+            src2,
+            MatchSpec(radius_arcsec=1.0, find="best"),
         )
 
     # Assert LSDB was called with correct parameters.
@@ -125,16 +146,28 @@ def test_hats_crossmatch_passes_n_neighbors_best(fake_lsdb):
 
 def test_hats_crossmatch_passes_n_neighbors_all(fake_lsdb):
     """find='all' → LSDB's n_neighbors=None (unlimited)."""
-    src1 = CatalogueSource(name="hats1", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake",
-                           ra_column="ra", dec_column="dec")
-    src2 = CatalogueSource(name="hats2", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake2",
-                           ra_column="ra", dec_column="dec")
+    src1 = CatalogueSource(
+        name="hats1",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake",
+        ra_column="ra",
+        dec_column="dec",
+    )
+    src2 = CatalogueSource(
+        name="hats2",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake2",
+        ra_column="ra",
+        dec_column="dec",
+    )
 
     with mock.patch.object(hats_source, "_require_lsdb", return_value=fake_lsdb):
         hats_source.hats_crossmatch(
-            src1, src2, MatchSpec(radius_arcsec=1.0, find="all"),
+            src1,
+            src2,
+            MatchSpec(radius_arcsec=1.0, find="all"),
         )
 
     cat1 = fake_lsdb.read_hats.return_value
@@ -149,27 +182,41 @@ def test_hats_crossmatch_find_all_multi_row_rename(fake_lsdb):
 
     # 2 left stars: star-A matches 2 right stars, star-B matches 1.
     cat_multi = mock.MagicMock()
-    cat_multi.crossmatch.return_value.compute.return_value = pd.DataFrame({
-        "ra":        [10.0, 10.0, 20.0],   # left star-A (×2), star-B
-        "dec":       [5.0,  5.0,  6.0],
-        "mag":       [15.0, 15.0, 16.0],
-        "ra_2":      [10.0001, 10.0002, 20.0001],
-        "dec_2":     [5.0001,  5.0002,  6.0001],
-        "mag_2":     [15.1,    15.2,    16.1],
-        "_dist_arcsec": [0.5,  0.9,  0.7],
-    })
+    cat_multi.crossmatch.return_value.compute.return_value = pd.DataFrame(
+        {
+            "ra": [10.0, 10.0, 20.0],  # left star-A (×2), star-B
+            "dec": [5.0, 5.0, 6.0],
+            "mag": [15.0, 15.0, 16.0],
+            "ra_2": [10.0001, 10.0002, 20.0001],
+            "dec_2": [5.0001, 5.0002, 6.0001],
+            "mag_2": [15.1, 15.2, 16.1],
+            "_dist_arcsec": [0.5, 0.9, 0.7],
+        }
+    )
     fake_lsdb.read_hats = mock.MagicMock(return_value=cat_multi)
 
-    src1 = CatalogueSource(name="hats1", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake",
-                           ra_column="ra", dec_column="dec")
-    src2 = CatalogueSource(name="hats2", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake2",
-                           ra_column="ra", dec_column="dec")
+    src1 = CatalogueSource(
+        name="hats1",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake",
+        ra_column="ra",
+        dec_column="dec",
+    )
+    src2 = CatalogueSource(
+        name="hats2",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake2",
+        ra_column="ra",
+        dec_column="dec",
+    )
 
     with mock.patch.object(hats_source, "_require_lsdb", return_value=fake_lsdb):
         result = hats_source.hats_crossmatch(
-            src1, src2, MatchSpec(radius_arcsec=1.0, find="all"),
+            src1,
+            src2,
+            MatchSpec(radius_arcsec=1.0, find="all"),
         )
 
     # 3 output rows (2 matches for star-A + 1 for star-B)
@@ -191,16 +238,28 @@ def test_hats_crossmatch_find_all_multi_row_rename(fake_lsdb):
 
 def test_hats_crossmatch_custom_right_suffix(fake_lsdb):
     """right_suffix='_3' → LSDB suffixes=('', '_3')."""
-    src1 = CatalogueSource(name="hats1", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake",
-                           ra_column="ra", dec_column="dec")
-    src2 = CatalogueSource(name="hats2", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake2",
-                           ra_column="ra", dec_column="dec")
+    src1 = CatalogueSource(
+        name="hats1",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake",
+        ra_column="ra",
+        dec_column="dec",
+    )
+    src2 = CatalogueSource(
+        name="hats2",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake2",
+        ra_column="ra",
+        dec_column="dec",
+    )
 
     with mock.patch.object(hats_source, "_require_lsdb", return_value=fake_lsdb):
         hats_source.hats_crossmatch(
-            src1, src2, MatchSpec(radius_arcsec=1.0),
+            src1,
+            src2,
+            MatchSpec(radius_arcsec=1.0),
             right_suffix="_3",
         )
 
@@ -211,24 +270,40 @@ def test_hats_crossmatch_custom_right_suffix(fake_lsdb):
 
 def test_hats_crossmatch_warns_on_missing_dist_arcsec(fake_lsdb, caplog):
     """When LSDB result lacks _dist_arcsec, a warning is logged."""
-    src1 = CatalogueSource(name="hats1", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake",
-                           ra_column="ra", dec_column="dec")
-    src2 = CatalogueSource(name="hats2", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake2",
-                           ra_column="ra", dec_column="dec")
+    src1 = CatalogueSource(
+        name="hats1",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake",
+        ra_column="ra",
+        dec_column="dec",
+    )
+    src2 = CatalogueSource(
+        name="hats2",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake2",
+        ra_column="ra",
+        dec_column="dec",
+    )
 
     # Override fake_lsdb.read_hats to return a catalog without _dist_arcsec.
     import pandas as pd
+
     cat_no_dist = mock.MagicMock()
-    cat_no_dist.crossmatch.return_value.compute.return_value = pd.DataFrame({
-        "ra": [10.0], "dec": [5.0],
-    })
+    cat_no_dist.crossmatch.return_value.compute.return_value = pd.DataFrame(
+        {
+            "ra": [10.0],
+            "dec": [5.0],
+        }
+    )
     fake_lsdb.read_hats = mock.MagicMock(return_value=cat_no_dist)
 
     with mock.patch.object(hats_source, "_require_lsdb", return_value=fake_lsdb):
         hats_source.hats_crossmatch(
-            src1, src2, MatchSpec(radius_arcsec=1.0),
+            src1,
+            src2,
+            MatchSpec(radius_arcsec=1.0),
         )
 
     assert "missing expected '_dist_arcsec'" in caplog.text
@@ -236,19 +311,29 @@ def test_hats_crossmatch_warns_on_missing_dist_arcsec(fake_lsdb, caplog):
 
 def test_hats_crossmatch_with_local_left_frame(fake_lsdb):
     """A non-HATS left catalogue is converted via lsdb.from_dataframe."""
-    src1 = CatalogueSource(name="local", is_local=True,
-                           ra_column="ra", dec_column="dec")
-    src2 = CatalogueSource(name="hats", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake",
-                           ra_column="ra", dec_column="dec")
+    src1 = CatalogueSource(name="local", is_local=True, ra_column="ra", dec_column="dec")
+    src2 = CatalogueSource(
+        name="hats",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake",
+        ra_column="ra",
+        dec_column="dec",
+    )
 
-    local_lf = pl.DataFrame({
-        "ra": [10.0, 20.0], "dec": [5.0, 6.0], "mag": [15.0, 16.0],
-    }).lazy()
+    local_lf = pl.DataFrame(
+        {
+            "ra": [10.0, 20.0],
+            "dec": [5.0, 6.0],
+            "mag": [15.0, 16.0],
+        }
+    ).lazy()
 
     with mock.patch.object(hats_source, "_require_lsdb", return_value=fake_lsdb):
         hats_source.hats_crossmatch(
-            src1, src2, MatchSpec(radius_arcsec=1.0),
+            src1,
+            src2,
+            MatchSpec(radius_arcsec=1.0),
             local_lf1=local_lf,
         )
 
@@ -263,16 +348,27 @@ def test_hats_crossmatch_with_local_left_frame(fake_lsdb):
 
 def test_hats_crossmatch_warns_on_prior_columns(fake_lsdb, caplog):
     """Bayesian prior_columns trigger a warning (unsupported via LSDB)."""
-    src1 = CatalogueSource(name="hats1", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake",
-                           ra_column="ra", dec_column="dec")
-    src2 = CatalogueSource(name="hats2", is_local=False, access_method="hats",
-                           access_identifier="/tmp/fake2",
-                           ra_column="ra", dec_column="dec")
+    src1 = CatalogueSource(
+        name="hats1",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake",
+        ra_column="ra",
+        dec_column="dec",
+    )
+    src2 = CatalogueSource(
+        name="hats2",
+        is_local=False,
+        access_method="hats",
+        access_identifier="/tmp/fake2",
+        ra_column="ra",
+        dec_column="dec",
+    )
 
     with mock.patch.object(hats_source, "_require_lsdb", return_value=fake_lsdb):
         hats_source.hats_crossmatch(
-            src1, src2,
+            src1,
+            src2,
             MatchSpec(radius_arcsec=1.0, prior_columns=["phot_g_mean_mag"]),
         )
 
@@ -305,11 +401,14 @@ def test_resolve_source_hats_dir_with_overrides(cm, tmp_path):
     hats_dir.mkdir()
     (hats_dir / "properties").write_text("hats")
 
-    src = cm.resolve_source(str(hats_dir), {
-        "ra_column": "raj2000",
-        "dec_column": "dej2000",
-        "id_column": "source_id",
-    })
+    src = cm.resolve_source(
+        str(hats_dir),
+        {
+            "ra_column": "raj2000",
+            "dec_column": "dej2000",
+            "id_column": "source_id",
+        },
+    )
     assert src.ra_column == "raj2000"
     assert src.dec_column == "dej2000"
     assert src.id_column == "source_id"
@@ -336,19 +435,28 @@ def test_crossmatch_multi_hats_at_position_3_routes_via_hats_crossmatch(cm, tmp_
     # Mock hats_crossmatch to avoid needing actual LSDB.
     # The first _dispatch call routes to hats_crossmatch (cat1=HATS, cat2=local).
     # Both the first-pair and the position-3 HATS branch call hats_crossmatch.
-    with mock.patch.object(hats_source, "_require_lsdb", return_value=mock.MagicMock()), \
-            mock.patch.object(
-                hats_source, "hats_crossmatch",
-                return_value=pl.DataFrame({
-                    "ra": [10.0, 20.0], "dec": [5.0, 6.0],
-                    "ra_2": [10.0001, 20.0001], "dec_2": [5.0001, 6.0001],
+    with (
+        mock.patch.object(hats_source, "_require_lsdb", return_value=mock.MagicMock()),
+        mock.patch.object(
+            hats_source,
+            "hats_crossmatch",
+            return_value=pl.DataFrame(
+                {
+                    "ra": [10.0, 20.0],
+                    "dec": [5.0, 6.0],
+                    "ra_2": [10.0001, 20.0001],
+                    "dec_2": [5.0001, 6.0001],
                     "sep_arcsec": [0.5, 0.7],
-                })
-            ) as mock_hats_xm:
+                }
+            ),
+        ) as mock_hats_xm,
+    ):
         cm.crossmatch_multi(
             [str(hats1), str(local2_path), str(hats3)],
             radius_arcsec=1.0,
-            ra=10.0, dec=5.0, radius_deg=0.01,
+            ra=10.0,
+            dec=5.0,
+            radius_deg=0.01,
         )
 
     # hats_crossmatch should be called exactly twice:
@@ -371,12 +479,17 @@ def test_crossmatch_two_hats_via_dispatch(cm, tmp_path):
     (hats2 / "properties").write_text("hats")
 
     with mock.patch.object(
-        hats_source, "hats_crossmatch",
-        return_value=pl.DataFrame({
-            "ra": [10.0], "dec": [5.0],
-            "ra_2": [10.0001], "dec_2": [5.0001],
-            "sep_arcsec": [0.5],
-        })
+        hats_source,
+        "hats_crossmatch",
+        return_value=pl.DataFrame(
+            {
+                "ra": [10.0],
+                "dec": [5.0],
+                "ra_2": [10.0001],
+                "dec_2": [5.0001],
+                "sep_arcsec": [0.5],
+            }
+        ),
     ) as mock_hats_xm:
         cm.crossmatch_multi(
             [str(hats1), str(hats2)],

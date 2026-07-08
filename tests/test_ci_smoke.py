@@ -225,9 +225,13 @@ def _collect_test_names(keyword: str) -> list[str]:
     """
     proc = subprocess.run(
         [
-            sys.executable, "-m", "pytest",
-            "-k", keyword,
-            "--collect-only", "-q",
+            sys.executable,
+            "-m",
+            "pytest",
+            "-k",
+            keyword,
+            "--collect-only",
+            "-q",
             "--no-header",
         ],
         capture_output=True,
@@ -244,11 +248,7 @@ def _collect_test_names(keyword: str) -> list[str]:
             f"--- STDOUT ---\n{proc.stdout}\n"
             f"--- STDERR ---\n{proc.stderr}"
         )
-    return [
-        line.strip()
-        for line in proc.stdout.splitlines()
-        if line.strip().startswith("tests/")
-    ]
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip().startswith("tests/")]
 
 
 def test_changelog_smoke_pm_drift_test_count() -> None:
@@ -296,11 +296,11 @@ def test_changelog_smoke_pm_drift_test_count() -> None:
         f"This usually means a test was added, removed, or renamed without "
         f"updating CHANGELOG.md (or vice versa).\n\n"
         f"Collected {count} test(s):\n  " + "\n  ".join(collected) + "\n\n"
-        f"Sections to update in CHANGELOG.md:\n"
-        f"  * 'Added — PM Drift Prior (`pm_prior=True`)': 5 baseline tests\n"
-        f"  * 'Added — Per-Row PM Drift Mode (when `pm_prior=True`)': 3 new tests\n"
-        f"If you intentionally changed the inventory, update both the test "
-        f"file and CHANGELOG.md, then update the count here."
+        "Sections to update in CHANGELOG.md:\n"
+        "  * 'Added — PM Drift Prior (`pm_prior=True`)': 5 baseline tests\n"
+        "  * 'Added — Per-Row PM Drift Mode (when `pm_prior=True`)': 3 new tests\n"
+        "If you intentionally changed the inventory, update both the test "
+        "file and CHANGELOG.md, then update the count here."
     )
 
 
@@ -338,8 +338,8 @@ def test_changelog_smoke_hats_test_count() -> None:
         f"Update tests/test_hats.py and the CHANGELOG.md bullet:\n\n"
         f"  * 'Added — HATS / LSDB Integration': 16 HATS tests\n\n"
         f"Collected {count} test(s):\n  " + "\n  ".join(collected) + "\n\n"
-        f"If you intentionally changed the inventory, update both the test "
-        f"file and CHANGELOG.md, then update the count here."
+        "If you intentionally changed the inventory, update both the test "
+        "file and CHANGELOG.md, then update the count here."
     )
 
 
@@ -401,21 +401,19 @@ def test_changelog_smoke_hats_named_in_bullets() -> None:
         f"(`test_changelog_smoke_hats_test_count`) still passes because the "
         f"total count is unchanged, but the SPECIFIC NAMES the CHANGELOG "
         f"promises no longer exist.\n\n"
-        f"Missing from test suite:\n  "
-        + "\n  ".join(sorted(missing_from_suite))
-        + "\n\nEither:\n"
-        f"  1. Revert the rename/deletion to restore the advertised names.\n"
-        f"  2. Update CHANGELOG.md to advertise the new names.\n"
+        f"Missing from test suite:\n  " + "\n  ".join(sorted(missing_from_suite)) + "\n\nEither:\n"
+        "  1. Revert the rename/deletion to restore the advertised names.\n"
+        "  2. Update CHANGELOG.md to advertise the new names.\n"
     )
     assert not missing_from_changelog, (
-        f"\n--- REVERSE CHECK FAILED ---\n"
-        f"These HATS test names exist in tests/test_hats.py but are no "
-        f"longer mentioned in CHANGELOG.md (a contributor likely edited the "
-        f"bullet text without touching the test file):\n\n"
-        f"Missing from CHANGELOG:\n  "
+        "\n--- REVERSE CHECK FAILED ---\n"
+        "These HATS test names exist in tests/test_hats.py but are no "
+        "longer mentioned in CHANGELOG.md (a contributor likely edited the "
+        "bullet text without touching the test file):\n\n"
+        "Missing from CHANGELOG:\n  "
         + "\n  ".join(sorted(missing_from_changelog))
         + "\n\nUpdate CHANGELOG.md's 'Added — HATS / LSDB Integration' bullet "
-        f"to mention these names verbatim.\n"
+        "to mention these names verbatim.\n"
     )
 
 
@@ -455,8 +453,8 @@ def test_changelog_smoke_data_lab_test_count() -> None:
         f"Update tests/test_crossmatch.py and the CHANGELOG.md bullet:\n\n"
         f"  * 'Added — NOAO Data Lab Catalogues': 2 Data Lab tests\n\n"
         f"Collected {count} test(s):\n  " + "\n  ".join(collected) + "\n\n"
-        f"If you intentionally changed the inventory, update both the test "
-        f"file and CHANGELOG.md, then update the count here."
+        "If you intentionally changed the inventory, update both the test "
+        "file and CHANGELOG.md, then update the count here."
     )
 
 
@@ -518,21 +516,19 @@ def test_changelog_smoke_data_lab_named_in_bullets() -> None:
         f"(`test_changelog_smoke_data_lab_test_count`) still passes "
         f"because the total count is unchanged, but the SPECIFIC NAMES "
         f"the CHANGELOG promises no longer exist.\n\n"
-        f"Missing from test suite:\n  "
-        + "\n  ".join(sorted(missing_from_suite))
-        + "\n\nEither:\n"
-        f"  1. Revert the rename/deletion to restore the advertised names.\n"
-        f"  2. Update CHANGELOG.md to advertise the new names.\n"
+        f"Missing from test suite:\n  " + "\n  ".join(sorted(missing_from_suite)) + "\n\nEither:\n"
+        "  1. Revert the rename/deletion to restore the advertised names.\n"
+        "  2. Update CHANGELOG.md to advertise the new names.\n"
     )
     assert not missing_from_changelog, (
-        f"\n--- REVERSE CHECK FAILED ---\n"
-        f"These Data Lab test names exist in tests/test_crossmatch.py but "
-        f"are no longer mentioned in CHANGELOG.md (a contributor likely "
-        f"edited the bullet text without touching the test file):\n\n"
-        f"Missing from CHANGELOG:\n  "
+        "\n--- REVERSE CHECK FAILED ---\n"
+        "These Data Lab test names exist in tests/test_crossmatch.py but "
+        "are no longer mentioned in CHANGELOG.md (a contributor likely "
+        "edited the bullet text without touching the test file):\n\n"
+        "Missing from CHANGELOG:\n  "
         + "\n  ".join(sorted(missing_from_changelog))
         + "\n\nUpdate CHANGELOG.md's 'Added — NOAO Data Lab Catalogues' "
-        f"bullet to mention these names verbatim.\n"
+        "bullet to mention these names verbatim.\n"
     )
 
 
@@ -625,19 +621,17 @@ def test_changelog_smoke_per_row_names_listed() -> None:
         f"    test_changelog_smoke_pm_drift_test_count\n"
         f") still passes because total count is unchanged, but the SPECIFIC "
         f"NAMES the CHANGELOG promises no longer exist.\n\n"
-        f"Missing from test suite:\n  "
-        + "\n  ".join(sorted(missing_from_suite))
-        + "\n\nEither:\n"
-        f"  1. Revert the rename/deletion to restore the advertised names.\n"
-        f"  2. Update CHANGELOG.md to advertise the new names.\n"
+        f"Missing from test suite:\n  " + "\n  ".join(sorted(missing_from_suite)) + "\n\nEither:\n"
+        "  1. Revert the rename/deletion to restore the advertised names.\n"
+        "  2. Update CHANGELOG.md to advertise the new names.\n"
     )
     assert not missing_from_changelog, (
-        f"\n--- REVERSE CHECK FAILED ---\n"
-        f"These per-row test names exist in tests/test_matchers.py but are "
-        f"no longer mentioned in CHANGELOG.md (a contributor likely edited "
-        f"the bullet text without touching the test file):\n\n"
-        f"Missing from CHANGELOG:\n  "
+        "\n--- REVERSE CHECK FAILED ---\n"
+        "These per-row test names exist in tests/test_matchers.py but are "
+        "no longer mentioned in CHANGELOG.md (a contributor likely edited "
+        "the bullet text without touching the test file):\n\n"
+        "Missing from CHANGELOG:\n  "
         + "\n  ".join(sorted(missing_from_changelog))
         + "\n\nUpdate CHANGELOG.md's 'Added — Per-Row PM Drift Mode' bullet "
-        f"to mention these names verbatim.\n"
+        "to mention these names verbatim.\n"
     )

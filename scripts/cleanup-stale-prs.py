@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -136,7 +135,7 @@ def filter_stale(prs: list[dict[str, object]]) -> list[StalePR]:
 def render_table(rows: list[StalePR]) -> str:
     cols = ("PR", "head", "title", "author", "+add", "-del", "updated", "group")
     widths = (5, 33, 48, 14, 6, 6, 12, 10)
-    head = "  ".join(c.ljust(w) for c, w in zip(cols, widths))
+    head = "  ".join(c.ljust(w) for c, w in zip(cols, widths, strict=False))
     sep = "  ".join("-" * w for w in widths)
     body_lines = [
         "  ".join(
@@ -179,7 +178,7 @@ def close_and_debranch(rows: list[StalePR]) -> tuple[str, str]:
     pr_list = tempfile.NamedTemporaryFile(  # noqa: SIM115 - using context for clarity
         prefix="cleanup-prs-", suffix=".txt", mode="w", delete=False
     )
-    br_list = tempfile.NamedTemporaryFile(
+    br_list = tempfile.NamedTemporaryFile(  # noqa: SIM115
         prefix="cleanup-branches-", suffix=".txt", mode="w", delete=False
     )
     pr_list.close()
@@ -318,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print("==> Done. Rollback lists:")
     print(f"    PR list (re-open via `gh pr reopen`):      {pr_list}")
-    print(f"    branch list (re-push via `git push <sha>:refs/heads/<head>`):")
+    print("    branch list (re-push via `git push <sha>:refs/heads/<head>`):")
     print(f"      {br_list}")
     return 0
 

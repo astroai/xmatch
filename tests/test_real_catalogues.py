@@ -493,9 +493,7 @@ def test_skyellipse_gaia_self_match_with_correlation(gaia_csv):
         find="best",
     )
     out = sky_match(src, src, lf, lf, spec, engine="fast").collect()
-    assert out.height == N_ROWS, (
-        f"skyellipse self-match expected {N_ROWS}, got {out.height}"
-    )
+    assert out.height == N_ROWS, f"skyellipse self-match expected {N_ROWS}, got {out.height}"
     assert "sep_arcsec" in out.columns
     assert float(out["sep_arcsec"].max()) < 1e-6
 
@@ -512,9 +510,7 @@ def test_skyellipse_vs_sky_on_gaia_self_match(gaia_csv):
     lf = src.lazy()
 
     spec_sky = MatchSpec(radius_arcsec=0.01, find="best")
-    spec_ell = MatchSpec(
-        matcher="skyellipse", max_error=5.0, radius_arcsec=0.01, find="best"
-    )
+    spec_ell = MatchSpec(matcher="skyellipse", max_error=5.0, radius_arcsec=0.01, find="best")
 
     sky_out = sky_match(src, src, lf, lf, spec_sky, engine="fast").collect()
     ell_out = sky_match(src, src, lf, lf, spec_ell, engine="fast").collect()
@@ -526,9 +522,7 @@ def test_skyellipse_vs_sky_on_gaia_self_match(gaia_csv):
 
 
 @pytest.mark.skipif(not _HAVE_ASTROQUERY, reason="astroquery not installed")
-def test_nway_gaia_allwise_usno_photometric_priors(
-    gaia_csv, allwise_csv, usno_csv
-):
+def test_nway_gaia_allwise_usno_photometric_priors(gaia_csv, allwise_csv, usno_csv):
     """3-way Bayesian N-way crossmatch (Gaia × AllWISE × USNO-B1.0) with a
     photometric prior on ``phot_g_mean_mag``.
 
@@ -552,9 +546,7 @@ def test_nway_gaia_allwise_usno_photometric_priors(
         chunk_size=10_000,
     )
 
-    assert result.height >= 1, (
-        "nway_match found no 3-way tuples — check cache or cone selection"
-    )
+    assert result.height >= 1, "nway_match found no 3-way tuples — check cache or cone selection"
     assert "p_match" in result.columns
     p = result["p_match"].to_numpy()
     assert ((p >= 0.0) & (p <= 1.0)).all()

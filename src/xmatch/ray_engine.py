@@ -20,7 +20,7 @@ object store with ``ray.put()`` so workers can read it zero-copy.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 
@@ -69,9 +69,8 @@ def _get_ray_pixel_batch():
         pixels and queries it once, returning
         ``(left_idx, right_idx, seps)`` for this batch only.
         """
-        from scipy.spatial import cKDTree
-
         import cdshealpix as hp
+        from scipy.spatial import cKDTree
 
         from .matchers import _chord_to_arcsec
 
@@ -90,8 +89,10 @@ def _get_ray_pixel_batch():
         rep_lon = float(np.arctan2(rep_xyz[1], rep_xyz[0]))
         rep_lat = float(np.arcsin(np.clip(rep_xyz[2], -1.0, 1.0)))
         npix = hp.cone_search_lonlat(
-            lon=rep_lon, lat=rep_lat,
-            radius=float(np.radians(radius_deg)), depth=5,
+            lon=rep_lon,
+            lat=rep_lat,
+            radius=float(np.radians(radius_deg)),
+            depth=5,
         )
 
         # Build merged margin tree from all neighbouring right pixels.
@@ -113,7 +114,10 @@ def _get_ray_pixel_batch():
 
         if spec.find == "best":
             dist, local_idx = margin_tree.query(
-                batch_xyz, k=1, distance_upper_bound=chord_max, workers=-1,
+                batch_xyz,
+                k=1,
+                distance_upper_bound=chord_max,
+                workers=-1,
             )
             valid = np.isfinite(dist) & (local_idx < margin_tree.n)
             if not np.any(valid):
@@ -125,7 +129,9 @@ def _get_ray_pixel_batch():
 
         # find == "all"
         idx_lists = margin_tree.query_ball_point(
-            batch_xyz, r=chord_max, workers=-1,
+            batch_xyz,
+            r=chord_max,
+            workers=-1,
         )
         l_parts, r_parts, sep_parts = [], [], []
         for k, neighbors in enumerate(idx_lists):
@@ -179,14 +185,20 @@ def _ray_gather_with_progress(futures, total: int):
             eta = (total - done) / rate if rate > 0 else 0
             logger.info(
                 "Ray progress: %d/%d batches (%.0f%%, %.1f/s, ETA %.0fs)",
-                done, total, 100.0 * done / total, rate, eta,
+                done,
+                total,
+                100.0 * done / total,
+                rate,
+                eta,
             )
             last_log = now
 
     elapsed = time.time() - start_time
     logger.info(
         "Ray gather complete: %d batches in %.1fs (%.1f/s).",
-        total, elapsed, total / max(elapsed, 1e-6),
+        total,
+        elapsed,
+        total / max(elapsed, 1e-6),
     )
     return results
 
@@ -205,14 +217,12 @@ def ray_zone_match(
 
     Parameters are identical to :func:`xmatch.matchers._scipy_match`.
     """
-    from .matchers import _zone_match, _scipy_match
+    from .matchers import _scipy_match, _zone_match
 
     # N-dimensional extra_distance_cols are delegated to _scipy_match
     # (single-machine cKDTree with N-d ranking).
     if spec.extra_distance_cols:
-        logger.info(
-            "extra_distance_cols set; using Tier 1 cKDTree for N-d matching."
-        )
+        logger.info("extra_distance_cols set; using Tier 1 cKDTree for N-d matching.")
         return _scipy_match(left, right, left_src, right_src, spec)
 
     if not ray_available():
@@ -261,10 +271,7 @@ def ray_zone_match(
     _, r_inv = np.unique(r_pix, return_inverse=True)
     unique_pix = np.unique(r_pix)
     r_groups = {int(pix): np.where(r_pix == pix)[0] for pix in unique_pix}
-    r_xyz_by_pix = {
-        int(pix): _radec_to_xyz(r_ra[idx], r_dec[idx])
-        for pix, idx in r_groups.items()
-    }
+    r_xyz_by_pix = {int(pix): _radec_to_xyz(r_ra[idx], r_dec[idx]) for pix, idx in r_groups.items()}
 
     # Place right-side pixel data in Ray's object store (zero-copy for workers).
     r_xyz_refs: dict[int, ray.ObjectRef] = {}
@@ -284,9 +291,7 @@ def ray_zone_match(
         rsig = _pos_sigma_arcsec(right, right_src)
         if lsig is None or rsig is None:
             return (np.array([], int), np.array([], int), np.array([], float))
-        search_radius = spec.max_error * (
-            float(np.nanmax(lsig)) + float(np.nanmax(rsig))
-        )
+        search_radius = spec.max_error * (float(np.nanmax(lsig)) + float(np.nanmax(rsig)))
         radius_deg = max(search_radius, 0.0) / 3600.0
         chord_max = _arcsec_to_chord(max(search_radius, 0.0))
 
@@ -338,4 +343,3 @@ def ray_zone_match(
         np.concatenate(r_parts),
         np.concatenate(sep_parts),
     )
-
