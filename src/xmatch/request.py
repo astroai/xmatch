@@ -90,7 +90,7 @@ class MatchRequest:
 
     # ---------------------------------------------------------------- matching
     engine: str = "auto"
-    """Sky-match engine: ``"auto"`` → STILTS if available else astropy,
+    """Sky-match engine: ``"auto"`` → STILTS if available else fast,
     ``"astropy"``, ``"fast"`` (cKDTree), ``"zone"`` (HEALPix sharded),
     or ``"stilts"``."""
 

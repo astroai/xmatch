@@ -2614,12 +2614,7 @@ def sky_match(
 
     chosen = engine
     if chosen == "auto":
-        # STILTS does not support custom right suffixes for catalogues 3+, so fall back to astropy.
-        chosen = (
-            "stilts"
-            if (stilts.stilts_available(stilts_cmd_base) and right_suffix == _RIGHT_SUFFIX)
-            else "astropy"
-        )
+        chosen = "stilts" if stilts.stilts_available(stilts_cmd_base) else "fast"
 
     # --- proper motion propagation (common to all engines) -----------------
     if spec.target_epoch is not None:
@@ -2646,13 +2641,6 @@ def sky_match(
         right_lf = right_eager.lazy()
 
     if chosen == "stilts":
-        if right_suffix != _RIGHT_SUFFIX:
-            logger.warning(
-                "STILTS engine selected — right_suffix='%s' is ignored; "
-                "STILTS always uses '_2'. Multi-way crossmatching with STILTS "
-                "will produce duplicate column names for catalogues 3+.",
-                right_suffix,
-            )
         if spec.prior_columns:
             logger.warning(
                 "STILTS engine selected — Bayesian probabilistic qualification "
@@ -2676,9 +2664,11 @@ def sky_match(
                 stilts_cmd_base=stilts_cmd_base,
                 java_opts=java_opts,
                 tmpdir=tmpdir,
+                right_suffix=right_suffix,
             ).lazy()
         except Exception as exc:
-            logger.warning("STILTS match failed (%s); falling back to astropy engine.", exc)
+            logger.warning("STILTS match failed (%s); falling back to fast engine.", exc)
+            chosen = "fast"
 
     if chosen == "astropy":
         left = left_lf.collect()

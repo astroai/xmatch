@@ -179,6 +179,7 @@ def stilts_sky_match(
     stilts_cmd_base=None,
     java_opts=None,
     tmpdir=None,
+    right_suffix: str = "_2",
 ) -> pl.DataFrame:
     base = _resolve_base_command(stilts_cmd_base)
     if base is None:
@@ -206,7 +207,11 @@ def stilts_sky_match(
     with tempfile.TemporaryDirectory(prefix="xmatch_stilts_") as tmp:
         in1 = Path(tmp) / "in1.fits"
         in2 = Path(tmp) / "in2.fits"
-        out = Path(tmp) / "out.parquet"
+        from astropy.table import Table
+
+        from .io_utils import astropy_table_to_polars
+
+        out = Path(tmp) / "out.fits"
         _write_fits(left, in1)
         _write_fits(right, in2)
 
@@ -222,17 +227,17 @@ def stilts_sky_match(
             "join": _STILTS_JOIN.get(spec.join_type, "1and2"),
             "find": spec.find,
             # Match the astropy engine's schema: left columns keep their names,
-            # right-hand collisions get a "_2" suffix.
+            # right-hand collisions get a custom suffix.
             "fixcols": "dups",
             "suffix1": "",
-            "suffix2": "_2",
+            "suffix2": right_suffix,
             "out": str(out),
-            "ofmt": "parquet",
+            "ofmt": "fits",
         }
         _run_stilts(base, "tmatch2", params, java_opts, tmpdir)
-        result = pl.read_parquet(out)
+        result = astropy_table_to_polars(Table.read(out))
 
         collide = set(left.columns) & set(right.columns)
-        r_ra = right_src.ra_column + ("_2" if right_src.ra_column in collide else "")
-        r_dec = right_src.dec_column + ("_2" if right_src.dec_column in collide else "")
+        r_ra = right_src.ra_column + (right_suffix if right_src.ra_column in collide else "")
+        r_dec = right_src.dec_column + (right_suffix if right_src.dec_column in collide else "")
         return _add_true_separation(result, left_src.ra_column, left_src.dec_column, r_ra, r_dec)
