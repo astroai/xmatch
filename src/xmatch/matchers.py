@@ -1179,16 +1179,18 @@ def _likelihood_ratio_scoring(
     if spec.find == "best":
         # For each primary source, find the candidate with max reliability.
         # Ties go to smallest LR (then smallest sep).
+        # We sort by reliability desc, then LR asc, then sep asc, then inverse.
+        # This keeps all items in the same group together, ordered correctly.
+        order = np.lexsort((seps, lr, -reliability, inverse))
+
+        # Then find the first occurrence of each group in the sorted array
+        sorted_inverse = inverse[order]
+        _, first_occurrence_indices = np.unique(sorted_inverse, return_index=True)
+        best_indices = order[first_occurrence_indices]
+
         best_mask = np.zeros(len(left_idx), dtype=bool)
-        for idx in range(len(unique_left)):
-            group_mask = inverse == idx
-            group_lr = lr[group_mask]
-            group_rel = reliability[group_mask]
-            group_seps = seps[group_mask]
-            # Sort by reliability desc, then LR asc, then sep asc.
-            order = np.lexsort((group_seps, group_lr, -group_rel))
-            best_pos = np.where(group_mask)[0][order[0]]
-            best_mask[best_pos] = True
+        best_mask[best_indices] = True
+
         return (
             left_idx[best_mask],
             right_idx[best_mask],
