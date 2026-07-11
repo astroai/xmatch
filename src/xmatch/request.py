@@ -164,6 +164,7 @@ class MatchRequest:
             macauff_flux_columns=list(params.get("macauff_flux_columns") or []),
             pm_prior=bool(params.get("pm_prior")),
             pm_prior_magnitude_column=params.get("pm_prior_magnitude_column"),
+            fallback_policy=params.get("fallback_policy", "warn"),
         )
         return cls(
             cat1=cat1,

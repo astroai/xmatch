@@ -128,6 +128,13 @@ class MatchSpec:
     # to ``None`` (process all pixels in one pass).  Only effective with
     # ``engine="zone"`` and ``cdshealpix`` installed.
     batch_size: Optional[int] = None
+    # ``warn`` preserves legacy fallback behavior; ``error`` is required for
+    # scientific promotion when an engine cannot honor the requested semantics.
+    fallback_policy: str = "warn"
+
+    def __post_init__(self) -> None:
+        if self.fallback_policy not in ("warn", "error"):
+            raise ValueError("fallback_policy must be 'warn' or 'error'")
 
 
 # --------------------------------------------------------------------------- #
@@ -2110,11 +2117,19 @@ def _zone_match(
     since the N-d ranking loop is simpler without pixel sharding.
     """
     if spec.extra_distance_cols or spec.matcher in ("lr", "ml", "xgb", "auf", "macauff"):
+        if spec.fallback_policy == "error":
+            raise CrossMatchError(
+                "engine='zone' cannot honor extra-distance or probabilistic matcher semantics"
+            )
         logger.info("extra_distance_cols/LR/ML/AUF/macauff set; using Tier 1 cKDTree for matching.")
         return _scipy_match(left, right, left_src, right_src, spec)
     try:
         import cdshealpix as hp  # noqa: F401
-    except ImportError:
+    except ImportError as exc:
+        if spec.fallback_policy == "error":
+            raise CrossMatchError(
+                "engine='zone' requires optional cdshealpix under fallback_policy='error'"
+            ) from exc
         logger.warning(
             "engine='zone' requested but 'cdshealpix' is unavailable; "
             "falling back to the Tier 1 cKDTree (no pixel-shard optimisation). "
@@ -2603,6 +2618,10 @@ def sky_match(
         # perturbation method to estimate errors empirically.
         pass
     elif spec.matcher != "sky" and not (_has_error_info(left_src) and _has_error_info(right_src)):
+        if spec.fallback_policy == "error":
+            raise CrossMatchError(
+                f"matcher={spec.matcher!r} requires positional errors under fallback_policy='error'"
+            )
         logger.warning(
             "Matcher '%s' needs positional errors on both catalogues; falling back to 'sky'.",
             spec.matcher,
@@ -2641,6 +2660,10 @@ def sky_match(
 
     if chosen == "stilts":
         if spec.prior_columns:
+            if spec.fallback_policy == "error":
+                raise CrossMatchError(
+                    "engine='stilts' cannot provide Bayesian qualification under fallback_policy='error'"
+                )
             logger.warning(
                 "STILTS engine selected — Bayesian probabilistic qualification "
                 "(prior_columns=%s) is skipped. Use engine='fast' or 'astropy' "
@@ -2648,6 +2671,10 @@ def sky_match(
                 spec.prior_columns,
             )
         if spec.filter_expr:
+            if spec.fallback_policy == "error":
+                raise CrossMatchError(
+                    "engine='stilts' cannot apply filter_expr under fallback_policy='error'"
+                )
             logger.warning(
                 "STILTS engine selected — filter_expr='%s' is skipped. "
                 "Use engine='fast', 'astropy', or 'zone' for post-match filtering.",
@@ -2666,6 +2693,10 @@ def sky_match(
                 right_suffix=right_suffix,
             ).lazy()
         except Exception as exc:
+            if spec.fallback_policy == "error":
+                raise CrossMatchError(
+                    "engine='stilts' failed under fallback_policy='error'"
+                ) from exc
             logger.warning("STILTS match failed (%s); falling back to fast engine.", exc)
             chosen = "fast"
 

@@ -24,6 +24,8 @@ from typing import Tuple
 
 import numpy as np
 
+from .exceptions import CrossMatchError
+
 logger = logging.getLogger(__name__)
 
 # Lazy-initialised Ray remote function (avoids import-time @ray.remote failure).
@@ -222,10 +224,16 @@ def ray_zone_match(
     # N-dimensional extra_distance_cols are delegated to _scipy_match
     # (single-machine cKDTree with N-d ranking).
     if spec.extra_distance_cols:
+        if spec.fallback_policy == "error":
+            raise CrossMatchError(
+                "engine='ray' cannot honor extra-distance semantics; use engine='fast'"
+            )
         logger.info("extra_distance_cols set; using Tier 1 cKDTree for N-d matching.")
         return _scipy_match(left, right, left_src, right_src, spec)
 
     if not ray_available():
+        if spec.fallback_policy == "error":
+            raise CrossMatchError("engine='ray' requires Ray under fallback_policy='error'")
         logger.info("Ray unavailable; using single-machine zone engine.")
         return _zone_match(left, right, left_src, right_src, spec)
 
@@ -235,6 +243,10 @@ def ray_zone_match(
         try:
             ray.init(ignore_reinit_error=True, logging_level=logging.WARNING)
         except Exception as exc:
+            if spec.fallback_policy == "error":
+                raise CrossMatchError(
+                    "engine='ray' could not initialize Ray under fallback_policy='error'"
+                ) from exc
             logger.warning("Ray init failed (%s); using single-machine zone engine.", exc)
             return _zone_match(left, right, left_src, right_src, spec)
 
@@ -258,7 +270,11 @@ def ray_zone_match(
             hp.lonlat_to_healpix(np.radians(r_ra), np.radians(r_dec), NSIDE),
             dtype=int,
         )
-    except ImportError:
+    except ImportError as exc:
+        if spec.fallback_policy == "error":
+            raise CrossMatchError(
+                "engine='ray' requires optional cdshealpix under fallback_policy='error'"
+            ) from exc
         logger.warning("cdshealpix unavailable; falling back to scipy cKDTree.")
         return _scipy_match(left, right, left_src, right_src, spec)
 
