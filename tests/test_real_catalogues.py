@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import tempfile
 import time
 from typing import Callable
 
@@ -47,7 +48,12 @@ from xmatch.sources import CatalogueSource
 # --------------------------------------------------------------------------- #
 # Cache configuration
 # --------------------------------------------------------------------------- #
-CACHE_DIR = pathlib.Path(os.environ.get("XMATCH_REAL_CATALOGUES_DIR", "/scratch/xmatch-catalogues"))
+CACHE_DIR = pathlib.Path(
+    os.environ.get(
+        "XMATCH_REAL_CATALOGUES_DIR",
+        str(pathlib.Path(tempfile.gettempdir()) / "xmatch-catalogues"),
+    )
+)
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 CENTRE_RA_DEG = 262.4
