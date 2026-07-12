@@ -16,6 +16,11 @@ results stream straight to disk so large matches never need to fit in memory.
 Results can be saved as Parquet, CSV, FITS, or **HATS** (hierarchical tiling)
 for efficient spatial queries on massive catalogues.
 
+For deterministic scale evidence, run
+`pixi run python scripts/benchmark_contract.py`. It reports fixed catalogue
+sizes, candidate counts, wall time, peak RSS, output checksums, and global-ID
+parity; use `/scratch` for large CANFAR runs.
+
 ## Features
 
 - One simple command: `xmatch cat1 cat2`.
