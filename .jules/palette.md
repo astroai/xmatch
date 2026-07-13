@@ -9,3 +9,6 @@
 ## 2026-07-07 - Endpoint typo suggestions on discover (LANDED)
 **Learning:** Unknown endpoint errors should suggest close matches via `difflib.get_close_matches` on a lowercased candidate pool, then map back to original casing for display.
 **Action:** Added `_suggest_endpoint` and wired it into `handle_discover` when `_resolve_discovery_endpoint` fails.
+## 2024-05-24 - Prevent dangling whitespace in CLI output
+**Learning:** When string interpolation is used to append optional CLI suggestions, it can lead to trailing whitespace or blank lines in the terminal output when the suggestion evaluates to an empty string.
+**Action:** Always conditionally check if suggestion strings are non-empty before printing or interpolating them to maintain clean and accessible CLI output.
