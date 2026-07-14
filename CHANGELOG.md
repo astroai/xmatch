@@ -5,6 +5,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — v0.5 Audit + HATS + Data Lab + New Engines
 
+### Added — Versioned Association Contract
+
+* **`xmatch.association.v1`**: strict candidate records with stable
+  content-derived association IDs, release-scoped evidence/source/candidate
+  IDs, explicit score semantics, true arcsecond separation, evaluation epoch,
+  decisions, extensible flags, and content-addressed provenance.
+* **Packaged conformance fixture**: four analytic/adversarial records cover a
+  unique selection, crowded-field ambiguity, and unknown epoch/uncertainty;
+  nine focused tests enforce deterministic round trips and reject invalid
+  probabilities, calibration claims, identifiers, epochs, and separations.
+* Documentation now describes `p_match` as an assumed-prior posterior rather
+  than an empirically calibrated probability.
+
 ### Added — New Match Features
 
 * **Proper motion correction**: `MatchSpec.target_epoch` propagates RA/Dec to a

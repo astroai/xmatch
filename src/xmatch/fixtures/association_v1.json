@@ -1,0 +1,126 @@
+{
+  "schema_version": "xmatch.association.v1",
+  "records": [
+    {
+      "schema_version": "xmatch.association.v1",
+      "association_id": "xmatch.association.v1:ee45ba39bb271b1d16ae432f04b11cfdda8135c6dea3afbed6447582a0b52248",
+      "evidence_id": "zensus:evidence:e-001",
+      "source_id": "cosmos2020:source:101",
+      "candidate_id": "specz:source:9001",
+      "method": "bayes_positional",
+      "method_version": "1.0.0",
+      "separation_arcsec": 0.18,
+      "evaluation_epoch_jyear": 2015.5,
+      "decision": "selected",
+      "score": {
+        "name": "posterior",
+        "value": 0.96,
+        "semantics": "assumed_prior_posterior",
+        "calibration_id": null
+      },
+      "flags": [
+        "score_uncalibrated"
+      ],
+      "provenance": {
+        "input_release_ids": [
+          "catalog:cosmos2020:v1",
+          "zensus:cosmos-evidence:0.1.0"
+        ],
+        "software_version": "xmatch:0.5.0",
+        "parameters_sha256": "sha256:72178d1b90ab81ffa84296fd675651af820e4baa7af31d3e60416e8c764ed075"
+      }
+    },
+    {
+      "schema_version": "xmatch.association.v1",
+      "association_id": "xmatch.association.v1:44b3d991e77f6949ed9a953ff0939b06574db73aeff299106f1f7b27f1b12c90",
+      "evidence_id": "zensus:evidence:e-002",
+      "source_id": "cosmos2020:source:202",
+      "candidate_id": "specz:source:9002",
+      "method": "bayes_positional",
+      "method_version": "1.0.0",
+      "separation_arcsec": 0.29,
+      "evaluation_epoch_jyear": 2015.5,
+      "decision": "candidate",
+      "score": {
+        "name": "posterior",
+        "value": 0.54,
+        "semantics": "assumed_prior_posterior",
+        "calibration_id": null
+      },
+      "flags": [
+        "ambiguous",
+        "crowded_field",
+        "score_uncalibrated"
+      ],
+      "provenance": {
+        "input_release_ids": [
+          "catalog:cosmos2020:v1",
+          "zensus:cosmos-evidence:0.1.0"
+        ],
+        "software_version": "xmatch:0.5.0",
+        "parameters_sha256": "sha256:72178d1b90ab81ffa84296fd675651af820e4baa7af31d3e60416e8c764ed075"
+      }
+    },
+    {
+      "schema_version": "xmatch.association.v1",
+      "association_id": "xmatch.association.v1:a7c7f55903837410b5dc74701b96ccbc74651ee79afa2b44167943c07af8b9da",
+      "evidence_id": "zensus:evidence:e-003",
+      "source_id": "cosmos2020:source:202",
+      "candidate_id": "specz:source:9003",
+      "method": "bayes_positional",
+      "method_version": "1.0.0",
+      "separation_arcsec": 0.4,
+      "evaluation_epoch_jyear": 2015.5,
+      "decision": "candidate",
+      "score": {
+        "name": "posterior",
+        "value": 0.46,
+        "semantics": "assumed_prior_posterior",
+        "calibration_id": null
+      },
+      "flags": [
+        "ambiguous",
+        "crowded_field",
+        "score_uncalibrated"
+      ],
+      "provenance": {
+        "input_release_ids": [
+          "catalog:cosmos2020:v1",
+          "zensus:cosmos-evidence:0.1.0"
+        ],
+        "software_version": "xmatch:0.5.0",
+        "parameters_sha256": "sha256:72178d1b90ab81ffa84296fd675651af820e4baa7af31d3e60416e8c764ed075"
+      }
+    },
+    {
+      "schema_version": "xmatch.association.v1",
+      "association_id": "xmatch.association.v1:a190e370d280bc83b36199edfb38bb9501d6b262af81b987c514d4282de6d4fd",
+      "evidence_id": "zensus:evidence:e-004",
+      "source_id": "cosmos2020:source:303",
+      "candidate_id": "specz:source:9004",
+      "method": "bayes_positional",
+      "method_version": "1.0.0",
+      "separation_arcsec": 0.51,
+      "evaluation_epoch_jyear": null,
+      "decision": "candidate",
+      "score": {
+        "name": "inverse_separation",
+        "value": 0.75,
+        "semantics": "ranking_score",
+        "calibration_id": null
+      },
+      "flags": [
+        "epoch_unknown",
+        "missing_uncertainty"
+      ],
+      "provenance": {
+        "input_release_ids": [
+          "catalog:cosmos2020:v1",
+          "zensus:cosmos-evidence:0.1.0"
+        ],
+        "software_version": "xmatch:0.5.0",
+        "parameters_sha256": "sha256:72178d1b90ab81ffa84296fd675651af820e4baa7af31d3e60416e8c764ed075"
+      }
+    }
+  ]
+}
