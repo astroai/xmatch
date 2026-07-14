@@ -9,3 +9,7 @@
 ## 2026-07-07 - Endpoint typo suggestions on discover (LANDED)
 **Learning:** Unknown endpoint errors should suggest close matches via `difflib.get_close_matches` on a lowercased candidate pool, then map back to original casing for display.
 **Action:** Added `_suggest_endpoint` and wired it into `handle_discover` when `_resolve_discovery_endpoint` fails.
+
+## 2026-07-14 - Prevent dangling whitespace from empty CLI hints
+**Learning:** When generating optional suggestions in CLI interfaces (e.g., "Did you mean?"), rendering or concatenating an empty suggestion string can result in dangling blank lines or trailing whitespace at the end of error messages, making the output look unpolished.
+**Action:** Always verify if a dynamic suggestion string is truthy before printing or appending it to base error messages, avoiding unconditional formatting like `print(f"Error: {msg} {hint}")`.
