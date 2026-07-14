@@ -6,6 +6,8 @@ platforms = ["osx-arm64", "linux-64"]
 [tasks]
 lint = "ruff check ."
 format = "ruff format ."
+preflight-push = "ruff check . && ruff format --check . && python -m compileall -q src/xmatch tests"
+ci-local = "pixi run preflight-push && pytest tests/test_ci_smoke.py -q"
 test = "pytest"
 
 [dependencies]
