@@ -250,7 +250,7 @@ def compute_nway_p_match(
     decs: list,
     sigmas: list,
     radius_arcsec: float,
-    prior_columns: list = None,
+    prior_columns: list | None = None,
 ) -> np.ndarray:
     """Compute N-way posterior match probability p ∈ [0, 1] per tuple.
 

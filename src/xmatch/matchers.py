@@ -808,6 +808,7 @@ def _scipy_match(
     if spec.find == "best":
         # --- skyellipse: query k>1 candidates, pick best by Mahalanobis d² --
         if spec.matcher == "skyellipse":
+            assert cov_l is not None and cov_r is not None
             k_candidates = min(max(10, int(spec.max_error * 2)), r_xyz.shape[0])
             dist_sp, idx_sp = tree.query(
                 l_xyz,
@@ -851,9 +852,8 @@ def _scipy_match(
                     l_idx_parts.append(np.array([i], dtype=np.int64))
                     r_idx_parts.append(np.array([best_r], dtype=np.int64))
                     sep_parts.append(
-                        np.array(
-                            [_chord_to_arcsec(float(dist_sp[i][valid_k][best_j]))],
-                            dtype=float,
+                        _chord_to_arcsec(
+                            np.array([float(dist_sp[i][valid_k][best_j])], dtype=float)
                         )
                     )
 
@@ -890,6 +890,7 @@ def _scipy_match(
 
     # --- skyellipse Mahalanobis post-filter (find="all") -------------------
     if spec.matcher == "skyellipse" and left_idx.size > 0:
+        assert cov_l is not None and cov_r is not None
         sra2_l, sde2_l, rho_l = cov_l
         sra2_r, sde2_r, rho_r = cov_r
         mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
@@ -1247,7 +1248,7 @@ def _engineer_ml_features_and_labels(
     """
     from scipy.spatial import cKDTree
 
-    empty_result = (
+    empty_result: Tuple[np.ndarray, np.ndarray, int, int, List[str], np.ndarray] = (
         np.zeros((0, 1), dtype=float),
         np.zeros(0, dtype=int),
         0,
@@ -2268,12 +2269,12 @@ def _zone_match_healpix(
                     workers=-1,
                 )
                 valid = np.isfinite(dist) & (local_idx < margin_tree.n)
-                for k in np.nonzero(valid)[0]:
-                    k_idx = left_indices[k]
-                    global_r = int(margin_global[local_idx[k]])
-                    sep_arcsec = float(_chord_to_arcsec(float(dist[k])))
+                for valid_index in np.nonzero(valid)[0]:
+                    k_idx = left_indices[valid_index]
+                    global_r_index = int(margin_global[local_idx[valid_index]])
+                    sep_arcsec = float(_chord_to_arcsec(float(dist[valid_index])))
                     batch_l.append(np.array([k_idx], dtype=np.int64))
-                    batch_r.append(np.array([global_r], dtype=np.int64))
+                    batch_r.append(np.array([global_r_index], dtype=np.int64))
                     batch_s.append(np.array([sep_arcsec], dtype=float))
             else:
                 idx_lists = margin_tree.query_ball_point(
@@ -2281,19 +2282,19 @@ def _zone_match_healpix(
                     r=chord_max,
                     workers=-1,
                 )
-                for k, neighbors in enumerate(idx_lists):
+                for neighbor_index, neighbors in enumerate(idx_lists):
                     if not neighbors:
                         continue
-                    k_idx = left_indices[k]
+                    k_idx = left_indices[neighbor_index]
                     nb = np.asarray(neighbors, dtype=np.int64)
-                    global_r = margin_global[nb].astype(np.int64)
+                    global_r_indices = margin_global[nb].astype(np.int64)
                     chords = np.linalg.norm(
-                        margin_xyz[nb] - batch_xyz[k],
+                        margin_xyz[nb] - batch_xyz[neighbor_index],
                         axis=-1,
                     )
                     seps = _chord_to_arcsec(chords)
                     batch_l.append(np.full(len(neighbors), k_idx, dtype=np.int64))
-                    batch_r.append(global_r)
+                    batch_r.append(global_r_indices)
                     batch_s.append(np.asarray(seps, dtype=float))
 
         # Flush batch to accumulator (out-of-core friendly — per-batch
@@ -2317,6 +2318,7 @@ def _zone_match_healpix(
 
     # --- skyellipse Mahalanobis post-filter ---------------------------------
     if spec.matcher == "skyellipse" and left_idx.size > 0:
+        assert cov_l is not None and cov_r is not None
         sra2_l, sde2_l, rho_l = cov_l
         sra2_r, sde2_r, rho_r = cov_r
         mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
