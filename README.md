@@ -37,8 +37,8 @@ parity; use `/scratch` for large CANFAR runs.
     unit-sphere embeddings; drop-in replacement for astropy (~3–5× faster,
     no Java dependency).
   - **torchsky** – optional tensor-native nearest-neighbour matching with
-    coarse nested-HEALPix candidate pruning. It currently supports
-    `matcher=sky`, `find=best`, and no extra-distance columns.
+    coarse nested-HEALPix candidate pruning. It supports `matcher=sky`,
+    `find=best` or `find=all`, and no extra-distance columns.
   - **zone** – Tier 2: HEALPix-sharded cone match via `cdshealpix`. When
     `cdshealpix` is not importable the engine transparently falls back to
     Tier 1 with a logged warning, so the API contract is unchanged.
@@ -258,7 +258,7 @@ the same result schema (left columns + right columns with collisions suffixed
 | Tier | Flag | Implementation | Notes |
 |------|------|----------------|-------|
 | 1    | `--engine fast` | in-process `scipy.spatial.cKDTree` on 3-D Cartesian unit-sphere embeddings | Drop-in replacement for astropy, ~3–5× faster, no Java. |
-| 1T   | `--engine torchsky` | tensor-native nearest-neighbour matching with nested-HEALPix candidate pruning | Optional `xmatch[torchsky]` extra; currently exact for `matcher=sky`, `find=best`, with no extra-distance columns. |
+| 1T   | `--engine torchsky` | tensor-native matching with nested-HEALPix candidate pruning | Optional `xmatch[torchsky]` extra; exact for `matcher=sky`, `find=best` or `find=all`, with no extra-distance columns. |
 | 2    | `--engine zone` | HEALPix-sharded cone match via `cdshealpix` | Falls back to Tier 1 with a logged warning if `cdshealpix` is not importable. |
 | (default) | `--engine auto` → `stilts` → `fast` | automatic in-process fallback | Default when no `--engine` is passed. STILTS needs Java. |
 | 3    | `--probabilistic --priors c1,c2,…` | Budavári hierarchical Bayes factor over the matched pairs | Engine-agnostic: layers an assumed-prior posterior `p_match ∈ [0, 1]` on top of whichever engine produced the pairs; it is not a calibrated probability. |
