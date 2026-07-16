@@ -754,9 +754,12 @@ def build_legacy_parser() -> argparse.ArgumentParser:
     )
     g_alg.add_argument(
         "--engine",
-        choices=["auto", "stilts", "astropy", "fast", "zone", "ray"],
+        choices=["auto", "stilts", "astropy", "fast", "torchsky", "zone", "ray"],
         default="auto",
-        help="Sky-match engine (fast=scipy.cKDTree, zone=HEALPix pixellated, ray=distributed).",
+        help=(
+            "Sky-match engine (fast=scipy.cKDTree, torchsky=tensor-native nearest, "
+            "zone=HEALPix pixellated, ray=distributed)."
+        ),
     )
 
     g_id = parser.add_argument_group("ID join")
@@ -1000,9 +1003,12 @@ def _build_match_subparser() -> argparse.ArgumentParser:
     )
     g_alg.add_argument(
         "--engine",
-        choices=["auto", "stilts", "astropy", "fast", "zone", "ray"],
+        choices=["auto", "stilts", "astropy", "fast", "torchsky", "zone", "ray"],
         default="auto",
-        help="Sky-match engine (fast=scipy.cKDTree, zone=HEALPix, ray=distributed).",
+        help=(
+            "Sky-match engine (fast=scipy.cKDTree, torchsky=tensor-native nearest, "
+            "zone=HEALPix, ray=distributed)."
+        ),
     )
     g_alg.add_argument(
         "--union",

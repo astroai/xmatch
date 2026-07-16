@@ -91,8 +91,8 @@ class MatchRequest:
     # ---------------------------------------------------------------- matching
     engine: str = "auto"
     """Sky-match engine: ``"auto"`` → STILTS if available else fast,
-    ``"astropy"``, ``"fast"`` (cKDTree), ``"zone"`` (HEALPix sharded),
-    or ``"stilts"``."""
+    ``"astropy"``, ``"fast"`` (cKDTree), ``"torchsky"`` (tensor-native
+    nearest-neighbour), ``"zone"`` (HEALPix sharded), or ``"stilts"``."""
 
     id_join: bool = False
     """Switch from sky-matching to a pure polars relational ID join."""

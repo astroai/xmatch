@@ -7,6 +7,8 @@ Sky-match engines (drop-in alternatives):
 * ``astropy`` – ``match_to_catalog_sky`` / ``search_around_sky`` from astropy.
 * ``fast``   – Tier 1: ``scipy.spatial.cKDTree`` on 3D Cartesian unit-sphere
   embeddings. Drop-in replacement for ``astropy`` in-memory; ~3-5x faster.
+* ``torchsky`` – tensor-native nearest-neighbour matching with a coarse
+  nested-HEALPix candidate index.
 * ``zone``   – Tier 2: HEALPix-sharded cone match. Uses ``cdshealpix`` when
   importable (sub-pixel zonning + per-pixel ``cKDTree`` queries) and falls
   back to a single ``cKDTree`` query when ``cdshealpix`` is not available
@@ -2097,6 +2099,58 @@ def _ml_fallback_best_by_sep(
 
 
 # --------------------------------------------------------------------------- #
+# Torchsky engine (optional tensor-native nearest-neighbour backend)
+# --------------------------------------------------------------------------- #
+def _load_torchsky_crossmatch():
+    try:
+        from torchsky.catalogs import crossmatch_sky
+    except ImportError as exc:
+        raise CrossMatchError("engine='torchsky' requires the optional torchsky package") from exc
+    return crossmatch_sky
+
+
+def _torchsky_match(
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+    left_src: CatalogueSource,
+    right_src: CatalogueSource,
+    spec: MatchSpec,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Run Torchsky's deterministic nearest-neighbour catalog matcher."""
+    if spec.matcher != "sky" or spec.find != "best" or spec.extra_distance_cols:
+        raise CrossMatchError(
+            "engine='torchsky' currently supports only matcher='sky', "
+            "find='best', and no extra_distance_cols"
+        )
+    if left.height == 0 or right.height == 0:
+        return (
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int64),
+            np.array([], dtype=float),
+        )
+
+    crossmatch_sky = _load_torchsky_crossmatch()
+    result = crossmatch_sky(
+        left[left_src.ra_column].to_numpy().copy(),
+        left[left_src.dec_column].to_numpy().copy(),
+        right[right_src.ra_column].to_numpy().copy(),
+        right[right_src.dec_column].to_numpy().copy(),
+        radius_arcsec=spec.radius_arcsec,
+    )
+
+    def as_numpy(value, dtype):
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().numpy()
+        return np.asarray(value, dtype=dtype)
+
+    return (
+        as_numpy(result.left_index, np.int64),
+        as_numpy(result.right_index, np.int64),
+        as_numpy(result.separation_arcsec, float),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Tier 2 — HEALPix zone engine
 # --------------------------------------------------------------------------- #
 def _zone_match(
@@ -2712,6 +2766,18 @@ def sky_match(
         right = right_lf.collect()
         l_idx, r_idx, seps = _scipy_match(left, right, left_src, right_src, spec)
         logger.info("fast (cKDTree) sky match: %d matched pairs.", len(l_idx))
+    elif chosen == "torchsky":
+        left = left_lf.collect()
+        right = right_lf.collect()
+        try:
+            l_idx, r_idx, seps = _torchsky_match(left, right, left_src, right_src, spec)
+            logger.info("torchsky sky match: %d matched pairs.", len(l_idx))
+        except CrossMatchError as exc:
+            if spec.fallback_policy == "error":
+                raise
+            logger.warning("%s; falling back to fast engine.", exc)
+            l_idx, r_idx, seps = _scipy_match(left, right, left_src, right_src, spec)
+            logger.info("fast (cKDTree) sky match: %d matched pairs.", len(l_idx))
     elif chosen == "zone":
         left = left_lf.collect()
         right = right_lf.collect()
