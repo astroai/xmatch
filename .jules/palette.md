@@ -9,3 +9,7 @@
 ## 2026-07-07 - Endpoint typo suggestions on discover (LANDED)
 **Learning:** Unknown endpoint errors should suggest close matches via `difflib.get_close_matches` on a lowercased candidate pool, then map back to original casing for display.
 **Action:** Added `_suggest_endpoint` and wired it into `handle_discover` when `_resolve_discovery_endpoint` fails.
+
+## 2024-07-16 - Prevent blank lines for missing CLI suggestions
+**Learning:** In CLI applications, helper texts like "Did you mean: X?" often return empty strings when no suitable candidate is found. Simply injecting or concatenating this result can lead to dangling whitespace or blank lines in terminal output, degrading the UX.
+**Action:** Always conditionally check if the result of a suggestion helper is non-empty before rendering it to `sys.stderr` or stdout, particularly when using formatting functions like `console.hint()` that append newlines.
