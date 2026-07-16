@@ -21,6 +21,23 @@ For deterministic scale evidence, run
 sizes, candidate counts, wall time, peak RSS, output checksums, and global-ID
 parity; use `/scratch` for large CANFAR runs.
 
+To compare the in-process catalog engines across dense-patch and sparse
+full-sky layouts, run:
+
+```bash
+pixi run python scripts/benchmark_contract.py \
+  --engines fast,torchsky,zone \
+  --layouts dense,sparse \
+  --finds best,all \
+  --output benchmark_results/xmatch_engine_matrix.json
+```
+
+Unavailable or semantically unsupported engines are recorded as explicit
+errors. Successful engines report pair-ID parity against `fast`; benchmark
+failures never silently fall back to another engine. The matrix distinguishes
+whether every requested engine completed from whether the successful engines
+agree with the `fast` pair set.
+
 ## Features
 
 - One simple command: `xmatch cat1 cat2`.
