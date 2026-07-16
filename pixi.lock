@@ -6076,6 +6076,7 @@ packages:
   - keyring>=23.0
   - astroquery>=0.4.6
   - lsdb ; extra == 'hats'
+  - torchsky>=0.4.0.dev0 ; extra == 'torchsky'
   - ray ; extra == 'ray'
   - keyrings-cryptfile ; extra == 'keyring-backends'
   - keyrings-osx ; extra == 'keyring-backends'
