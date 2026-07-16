@@ -2117,10 +2117,9 @@ def _torchsky_match(
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run Torchsky's deterministic nearest-neighbour catalog matcher."""
-    if spec.matcher != "sky" or spec.find != "best" or spec.extra_distance_cols:
+    if spec.matcher != "sky" or spec.extra_distance_cols:
         raise CrossMatchError(
-            "engine='torchsky' currently supports only matcher='sky', "
-            "find='best', and no extra_distance_cols"
+            "engine='torchsky' currently supports only matcher='sky' and no extra_distance_cols"
         )
     if left.height == 0 or right.height == 0:
         return (
@@ -2136,6 +2135,7 @@ def _torchsky_match(
         right[right_src.ra_column].to_numpy().copy(),
         right[right_src.dec_column].to_numpy().copy(),
         radius_arcsec=spec.radius_arcsec,
+        find=spec.find,
     )
 
     def as_numpy(value, dtype):

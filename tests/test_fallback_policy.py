@@ -73,8 +73,15 @@ def test_torchsky_engine_adapts_nearest_match_result(
 ) -> None:
     captured = {}
 
-    def fake_crossmatch(left_ra, left_dec, right_ra, right_dec, *, radius_arcsec):
-        captured["inputs"] = (left_ra, left_dec, right_ra, right_dec, radius_arcsec)
+    def fake_crossmatch(left_ra, left_dec, right_ra, right_dec, *, radius_arcsec, find):
+        captured["inputs"] = (
+            left_ra,
+            left_dec,
+            right_ra,
+            right_dec,
+            radius_arcsec,
+            find,
+        )
         return SimpleNamespace(
             left_index=np.array([0], dtype=np.int64),
             right_index=np.array([1], dtype=np.int64),
@@ -96,13 +103,12 @@ def test_torchsky_engine_adapts_nearest_match_result(
     assert left_idx.tolist() == [0]
     assert right_idx.tolist() == [1]
     assert separation.tolist() == [0.25]
-    assert captured["inputs"][-1] == 1.5
+    assert captured["inputs"][-2:] == (1.5, "best")
 
 
 @pytest.mark.parametrize(
     "spec",
     [
-        MatchSpec(find="all", fallback_policy="error"),
         MatchSpec(matcher="skyerr", fallback_policy="error"),
         MatchSpec(extra_distance_cols={"mag": 1.0}, fallback_policy="error"),
     ],

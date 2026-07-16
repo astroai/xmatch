@@ -57,3 +57,40 @@ def test_torchsky_engine_matches_fast_nearest_neighbours() -> None:
         rtol=0.0,
         atol=1e-6,
     )
+
+
+def test_torchsky_engine_matches_fast_all_candidates() -> None:
+    left = pl.DataFrame({"left_id": [0, 1], "ra": [10.0, 20.0], "dec": [0.0, 0.0]})
+    right = pl.DataFrame(
+        {
+            "right_id": [0, 1, 2, 3],
+            "ra": [10.0002, 10.0001, 20.0001, 80.0],
+            "dec": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    spec = MatchSpec(radius_arcsec=2.0, find="all", fallback_policy="error")
+
+    outputs = {
+        engine: sky_match(
+            _source("left", "left_id"),
+            _source("right", "right_id"),
+            left.lazy(),
+            right.lazy(),
+            spec,
+            engine=engine,
+        ).collect()
+        for engine in ("fast", "torchsky")
+    }
+
+    outputs = {
+        engine: output.sort(["left_id", "sep_arcsec", "right_id"], maintain_order=True)
+        for engine, output in outputs.items()
+    }
+    assert outputs["torchsky"]["left_id"].to_list() == outputs["fast"]["left_id"].to_list()
+    assert outputs["torchsky"]["right_id"].to_list() == outputs["fast"]["right_id"].to_list()
+    np.testing.assert_allclose(
+        outputs["torchsky"]["sep_arcsec"].to_numpy(),
+        outputs["fast"]["sep_arcsec"].to_numpy(),
+        rtol=0.0,
+        atol=1e-6,
+    )
