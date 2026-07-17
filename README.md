@@ -26,9 +26,13 @@ full-sky layouts, run:
 
 ```bash
 pixi run python scripts/benchmark_contract.py \
-  --engines fast,torchsky,zone \
+  --left-rows 10000 \
+  --right-rows 100000 \
+  --timed-runs 3 \
+  --engines fast,torchsky \
   --layouts dense,sparse \
   --finds best,all \
+  --promotion-engine torchsky \
   --output benchmark_results/xmatch_engine_matrix.json
 ```
 
@@ -37,6 +41,19 @@ errors. Successful engines report pair-ID parity against `fast`; benchmark
 failures never silently fall back to another engine. The matrix distinguishes
 whether every requested engine completed from whether the successful engines
 agree with the `fast` pair set.
+
+`--promotion-engine` evaluates, but does not change, automatic engine dispatch.
+Run the campaign in an environment containing the exact Torchsky wheel under
+evaluation; a missing optional engine is recorded as an error, never replaced
+by a fallback.
+The versioned `xmatch-engine-promotion-v1` policy requires successful
+dense/sparse × best/all cases at 10,000-by-100,000 scale with at least three
+timed runs, exact global-ID and pair-hash parity, wall time no more than 1.25×
+`fast`, and isolated peak RSS no more than 1.5× `fast` in every case. Each
+matrix case runs in a fresh subprocess so its peak RSS is not inherited from a
+previous engine. The JSON records environment provenance and every failed gate;
+keep Torchsky out of `engine="auto"` until an archived representative report is
+eligible under this policy.
 
 ## Features
 
