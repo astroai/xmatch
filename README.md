@@ -55,6 +55,14 @@ previous engine. The JSON records environment provenance and every failed gate;
 keep Torchsky out of `engine="auto"` until an archived representative report is
 eligible under this policy.
 
+The SHA-pinned 10,000-by-100,000 macOS/arm64 preliminary report is archived at
+[`benchmark_results/xmatch_engine_promotion_10k_100k_macos_arm64.json`](benchmark_results/xmatch_engine_promotion_10k_100k_macos_arm64.json)
+(SHA-256 `8a63161fd8f9485206881a90fab1c41409ab06b132abc524f88f3880b8a3a0c9`).
+Correctness parity passes in all four cases, but Torchsky fails every CPU
+wall-time and RSS promotion threshold, so automatic selection remains
+unchanged. Repeat the same command in the pinned CANFAR release environment
+before treating the hardware measurements as publication-grade evidence.
+
 ## Features
 
 - One simple command: `xmatch cat1 cat2`.
