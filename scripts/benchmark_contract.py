@@ -9,10 +9,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import platform
 import resource
+import subprocess
+import sys
+import tempfile
 import time
+from datetime import UTC, datetime
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +27,9 @@ import polars as pl
 
 from xmatch.matchers import MatchSpec, sky_match
 from xmatch.sources import CatalogueSource
+
+_PROMOTION_LAYOUTS = ("dense", "sparse")
+_PROMOTION_FINDS = ("best", "all")
 
 
 def _peak_rss_bytes() -> int:
@@ -135,6 +144,7 @@ def run_benchmark(
         "find": find,
         "left_rows": left_rows,
         "right_rows": right_rows,
+        "timed_runs": timed_runs,
         "candidate_count": result.height,
         "wall_seconds_median": float(np.median(timings)),
         "rows_per_second": left_rows / float(np.median(timings)),
@@ -143,6 +153,45 @@ def run_benchmark(
         "pair_sha256": pair_checksum,
         "output_sha256": checksum,
     }
+
+
+def _run_benchmark_isolated(
+    left_rows: int,
+    right_rows: int,
+    timed_runs: int,
+    *,
+    engine: str,
+    layout: str,
+    find: str,
+) -> dict[str, Any]:
+    """Run one case in a fresh process so peak RSS is case-local."""
+    with tempfile.TemporaryDirectory(prefix="xmatch-benchmark-") as tmpdir:
+        output = Path(tmpdir) / "result.json"
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--left-rows",
+            str(left_rows),
+            "--right-rows",
+            str(right_rows),
+            "--timed-runs",
+            str(timed_runs),
+            "--engines",
+            engine,
+            "--layouts",
+            layout,
+            "--finds",
+            find,
+            "--output",
+            str(output),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(detail[-2000:] or f"benchmark exited {completed.returncode}")
+        row = json.loads(output.read_text())
+        row.pop("provenance", None)
+        return row
 
 
 def run_matrix(
@@ -160,7 +209,7 @@ def run_matrix(
         for find in finds:
             for engine in engines:
                 try:
-                    row = run_benchmark(
+                    row = _run_benchmark_isolated(
                         left_rows,
                         right_rows,
                         timed_runs,
@@ -202,6 +251,113 @@ def run_matrix(
     }
 
 
+def evaluate_promotion(
+    matrix: dict[str, Any],
+    candidate_engine: str,
+    *,
+    max_wall_ratio: float = 1.25,
+    max_rss_ratio: float = 1.5,
+    min_left_rows: int = 10_000,
+    min_right_rows: int = 100_000,
+    min_timed_runs: int = 3,
+) -> dict[str, Any]:
+    """Evaluate a candidate without changing automatic engine dispatch."""
+    if max_wall_ratio <= 0.0 or max_rss_ratio <= 0.0:
+        raise ValueError("promotion ratios must be positive")
+    if candidate_engine == "fast":
+        raise ValueError("candidate engine must differ from the fast baseline")
+    rows = matrix.get("rows", [])
+    by_case = {(row.get("engine"), row.get("layout"), row.get("find")): row for row in rows}
+    reasons: list[str] = []
+    cases: list[dict[str, Any]] = []
+    for layout, find in product(_PROMOTION_LAYOUTS, _PROMOTION_FINDS):
+        baseline = by_case.get(("fast", layout, find))
+        candidate = by_case.get((candidate_engine, layout, find))
+        label = f"{layout}/{find}"
+        if baseline is None or baseline.get("status") != "ok":
+            reasons.append(f"{label}: missing successful fast baseline")
+            continue
+        if candidate is None or candidate.get("status") != "ok":
+            reasons.append(f"{label}: missing successful {candidate_engine} result")
+            continue
+        case_reasons: list[str] = []
+        for key in ("left_rows", "right_rows", "timed_runs"):
+            if candidate.get(key) != baseline.get(key):
+                case_reasons.append(f"candidate {key} differs from fast baseline")
+        if candidate.get("left_rows", 0) < min_left_rows:
+            case_reasons.append(f"left_rows < {min_left_rows}")
+        if candidate.get("right_rows", 0) < min_right_rows:
+            case_reasons.append(f"right_rows < {min_right_rows}")
+        if candidate.get("timed_runs", 0) < min_timed_runs:
+            case_reasons.append(f"timed_runs < {min_timed_runs}")
+        if not candidate.get("global_id_parity", False):
+            case_reasons.append("global source-ID parity failed")
+        if not candidate.get("pair_parity_with_fast", False):
+            case_reasons.append("candidate pair hash differs from fast")
+        baseline_wall = baseline.get("wall_seconds_median", 0.0)
+        baseline_rss = baseline.get("peak_rss_bytes", 0)
+        if baseline_wall <= 0.0 or baseline_rss <= 0:
+            reasons.append(f"{label}: fast baseline has invalid resource measurements")
+            continue
+        candidate_wall = candidate.get("wall_seconds_median", 0.0)
+        candidate_rss = candidate.get("peak_rss_bytes", 0)
+        if candidate_wall <= 0.0 or candidate_rss <= 0:
+            reasons.append(f"{label}: candidate has invalid resource measurements")
+            continue
+        wall_ratio = candidate_wall / baseline_wall
+        rss_ratio = candidate_rss / baseline_rss
+        if wall_ratio > max_wall_ratio:
+            case_reasons.append(f"wall ratio {wall_ratio:.3f} > {max_wall_ratio:.3f}")
+        if rss_ratio > max_rss_ratio:
+            case_reasons.append(f"RSS ratio {rss_ratio:.3f} > {max_rss_ratio:.3f}")
+        reasons.extend(f"{label}: {reason}" for reason in case_reasons)
+        cases.append(
+            {
+                "layout": layout,
+                "find": find,
+                "wall_ratio_vs_fast": wall_ratio,
+                "rss_ratio_vs_fast": rss_ratio,
+                "eligible": not case_reasons,
+            }
+        )
+    return {
+        "policy": "xmatch-engine-promotion-v1",
+        "candidate_engine": candidate_engine,
+        "eligible_for_automatic_selection": not reasons and len(cases) == 4,
+        "thresholds": {
+            "max_wall_ratio_vs_fast": max_wall_ratio,
+            "max_rss_ratio_vs_fast": max_rss_ratio,
+            "min_left_rows": min_left_rows,
+            "min_right_rows": min_right_rows,
+            "min_timed_runs": min_timed_runs,
+            "required_layouts": list(_PROMOTION_LAYOUTS),
+            "required_finds": list(_PROMOTION_FINDS),
+        },
+        "cases": cases,
+        "reasons": reasons,
+    }
+
+
+def benchmark_provenance() -> dict[str, str]:
+    """Return enough environment identity to reproduce an archived report."""
+    git = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return {
+        "created_utc": datetime.now(UTC).isoformat(),
+        "git_sha": git.stdout.strip() if git.returncode == 0 else "unknown",
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "xmatch": importlib.metadata.version("xmatch"),
+        "numpy": np.__version__,
+        "polars": pl.__version__,
+    }
+
+
 def _csv_values(value: str) -> tuple[str, ...]:
     values = tuple(item.strip() for item in value.split(",") if item.strip())
     if not values:
@@ -217,8 +373,11 @@ def main() -> int:
     parser.add_argument("--engines", type=_csv_values, default=("fast",))
     parser.add_argument("--layouts", type=_csv_values, default=("dense",))
     parser.add_argument("--finds", type=_csv_values, default=("all",))
+    parser.add_argument("--promotion-engine")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.promotion_engine and len(args.engines) == len(args.layouts) == len(args.finds) == 1:
+        parser.error("--promotion-engine requires a matrix with multiple engines/layouts/finds")
     if len(args.engines) == len(args.layouts) == len(args.finds) == 1:
         result = run_benchmark(
             args.left_rows,
@@ -237,6 +396,9 @@ def main() -> int:
             layouts=args.layouts,
             finds=args.finds,
         )
+        if args.promotion_engine:
+            result["promotion"] = evaluate_promotion(result, args.promotion_engine)
+    result["provenance"] = benchmark_provenance()
     payload = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
