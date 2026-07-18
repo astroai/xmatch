@@ -321,7 +321,10 @@ format. Release IDs cover the canonical JSONL checksum, record count, shared
 provenance, and optional parent release. The companion
 `xmatch.association.component.release.v1` format publishes exact, namespaced
 component membership and explicit merge/split lineage without treating a
-component ID as stable across releases.
+component ID as stable across releases. Deterministic constructors require
+explicit endpoint namespaces and decision policy; content-addressed component
+delta releases classify created, continued, merged, split, and retired topology
+from exact membership overlap.
 
 ## HATS output
 

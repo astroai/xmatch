@@ -126,3 +126,51 @@ mixed input releases, nondeterministic component ordering, and overwrite.
 Verification rejects byte-level tampering. It streams the file but retains one
 global membership set so it can prove that every namespaced member belongs to
 at most one component.
+
+## Deterministic construction and release deltas
+
+`construct_association_components` builds connected components directly from a
+verified association release. Callers must supply both endpoint input-release
+IDs and the exact `AssociationDecision` values to include; the constructor does
+not infer catalogue namespaces or acceptance policy. If a verified parent
+component release is supplied, exact namespaced-member overlap becomes each
+new component's declared parent lineage.
+
+```python
+from xmatch.association import (
+    AssociationDecision,
+    construct_association_components,
+    verify_association_component_delta_release,
+    write_association_component_delta_release,
+)
+
+components = construct_association_components(
+    "releases/cosmos-v2",
+    source_input_release_id="catalog:cosmos2020:dr1",
+    candidate_input_release_id="catalog:specz:dr1",
+    included_decisions=(AssociationDecision.SELECTED,),
+    parent_component_directory="components/cosmos-v1",
+)
+
+delta_manifest = write_association_component_delta_release(
+    "components/cosmos-v1",
+    "components/cosmos-v2",
+    "component-deltas/cosmos-v1-to-v2",
+)
+verified = verify_association_component_delta_release(
+    "component-deltas/cosmos-v1-to-v2",
+    parent_component_directory="components/cosmos-v1",
+    current_component_directory="components/cosmos-v2",
+)
+```
+
+`xmatch.association.component.delta.release.v1` contains canonical
+`deltas.jsonl` rows plus a content-addressed `manifest.json`. Every row names
+the parent and current association-release and component-release endpoints.
+Classification uses the exact overlap graph: zero-degree current or parent
+components are `created` or `retired`, isolated one-to-one edges are
+`continued`, and many-to-one or one-to-many edges are `merged` or `split`.
+Many-to-many changes emit both merge and split events. Publication rejects
+declared lineage that differs from exact membership overlap. Verification
+checks row IDs, ordering, counts, and byte checksums; when both endpoint
+directories are supplied it also recomputes the full classification.
