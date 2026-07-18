@@ -2068,15 +2068,14 @@ def _pick_best_per_primary(
     per unique primary source, keeping the candidate with the largest
     *scores* value.
     """
-    unique_left = np.unique(left_idx)
-    best_mask = np.zeros(len(left_idx), dtype=bool)
-    for ul in unique_left:
-        group = left_idx == ul
-        group_scores = scores[group]
-        best_local = int(np.argmax(group_scores))
-        best_pos = int(np.where(group)[0][best_local])
-        best_mask[best_pos] = True
-    return left_idx[best_mask], right_idx[best_mask], seps[best_mask], scores[best_mask]
+    # Performance optimization: Replace O(N^2) for loop and np.argmax with O(N log N) vectorized approach
+    # np.lexsort sorts by the primary group key first, then secondary score
+    sort_idx = np.lexsort((-scores, left_idx))
+    sorted_left_idx = left_idx[sort_idx]
+    # np.unique with return_index=True extracts the first (best) occurrence per primary group
+    _, unique_idx = np.unique(sorted_left_idx, return_index=True)
+    best_idx = sort_idx[unique_idx]
+    return left_idx[best_idx], right_idx[best_idx], seps[best_idx], scores[best_idx]
 
 
 def _ml_fallback_best_by_sep(
@@ -2086,16 +2085,15 @@ def _ml_fallback_best_by_sep(
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Fallback: pick the spatially-nearest candidate per primary source."""
-    unique_left = np.unique(left_idx)
-    best_mask = np.zeros(len(left_idx), dtype=bool)
-    for ul in unique_left:
-        group = left_idx == ul
-        group_seps = seps[group]
-        best_local = int(np.argmin(group_seps))
-        best_pos = int(np.where(group)[0][best_local])
-        best_mask[best_pos] = True
-    scores = 1.0 / (1.0 + seps[best_mask])
-    return left_idx[best_mask], right_idx[best_mask], seps[best_mask], scores
+    # Performance optimization: Replace O(N^2) for loop and np.argmin with O(N log N) vectorized approach
+    # np.lexsort sorts by the primary group key first, then secondary separation
+    sort_idx = np.lexsort((seps, left_idx))
+    sorted_left_idx = left_idx[sort_idx]
+    # np.unique extracts the minimum separation pair for each primary source
+    _, unique_idx = np.unique(sorted_left_idx, return_index=True)
+    best_idx = sort_idx[unique_idx]
+    scores = 1.0 / (1.0 + seps[best_idx])
+    return left_idx[best_idx], right_idx[best_idx], seps[best_idx], scores
 
 
 # --------------------------------------------------------------------------- #
