@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added — Versioned Association Contract
 
+* **`xmatch.association.release.v1`**: deterministic release directories pair
+  canonical `associations.jsonl` records with a content-addressed manifest,
+  shared executable provenance, an optional parent release, and streaming
+  checksum/count/schema verification. Publication is atomic and never
+  overwrites an existing release path.
 * **`xmatch.association.v1`**: strict candidate records with stable
   content-derived association IDs, release-scoped evidence/source/candidate
   IDs, explicit score semantics, true arcsecond separation, evaluation epoch,

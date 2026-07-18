@@ -1,15 +1,23 @@
-"""Versioned candidate-association records."""
+"""Versioned candidate-association records and release artifacts."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any, Iterable, Iterator, Mapping
 
 ASSOCIATION_SCHEMA_VERSION = "xmatch.association.v1"
+ASSOCIATION_RELEASE_SCHEMA_VERSION = "xmatch.association.release.v1"
+
+_RELEASE_MANIFEST = "manifest.json"
+_RELEASE_RECORDS = "associations.jsonl"
 
 
 class ScoreSemantics(str, Enum):
@@ -49,6 +57,34 @@ def _exact_keys(data: Mapping[str, Any], expected: set[str], name: str) -> None:
         raise ValueError(f"{name} fields must be exactly {sorted(expected)}; got {sorted(actual)}")
 
 
+def _sha256(value: str, name: str) -> str:
+    digest = _text(value, name)
+    if not digest.startswith("sha256:") or len(digest) != 71:
+        raise ValueError(f"{name} must be 'sha256:' followed by 64 hexadecimal digits")
+    try:
+        int(digest[7:], 16)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be 'sha256:' followed by 64 hexadecimal digits") from exc
+    return digest
+
+
+def _content_id(value: str, schema_version: str, name: str) -> str:
+    identifier = _text(value, name)
+    prefix = f"{schema_version}:"
+    digest = identifier.removeprefix(prefix)
+    if not identifier.startswith(prefix) or len(digest) != 64:
+        raise ValueError(f"{name} must identify {schema_version}")
+    try:
+        int(digest, 16)
+    except ValueError as exc:
+        raise ValueError(f"{name} must identify {schema_version}") from exc
+    return identifier
+
+
+def _canonical_json(data: Mapping[str, Any]) -> bytes:
+    return json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
 @dataclass(frozen=True)
 class AssociationProvenance:
     """Inputs and executable configuration that produced a candidate record."""
@@ -67,17 +103,7 @@ class AssociationProvenance:
             raise ValueError("input_release_ids must contain at least two distinct releases")
         object.__setattr__(self, "input_release_ids", releases)
         _text(self.software_version, "software_version")
-        digest = _text(self.parameters_sha256, "parameters_sha256")
-        if not digest.startswith("sha256:") or len(digest) != 71:
-            raise ValueError(
-                "parameters_sha256 must be 'sha256:' followed by 64 hexadecimal digits"
-            )
-        try:
-            int(digest[7:], 16)
-        except ValueError as exc:
-            raise ValueError(
-                "parameters_sha256 must be 'sha256:' followed by 64 hexadecimal digits"
-            ) from exc
+        _sha256(self.parameters_sha256, "parameters_sha256")
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationProvenance":
@@ -258,3 +284,273 @@ class AssociationRecord:
             "flags": list(self.flags),
             "provenance": self.provenance.to_dict(),
         }
+
+
+def _release_identity(
+    *,
+    record_count: int,
+    records_sha256: str,
+    parent_release_id: str | None,
+    provenance: AssociationProvenance,
+) -> dict[str, Any]:
+    return {
+        "schema_version": ASSOCIATION_RELEASE_SCHEMA_VERSION,
+        "association_schema_version": ASSOCIATION_SCHEMA_VERSION,
+        "record_count": record_count,
+        "records_sha256": records_sha256,
+        "parent_release_id": parent_release_id,
+        "provenance": provenance.to_dict(),
+    }
+
+
+def _release_id(**identity: Any) -> str:
+    digest = hashlib.sha256(_canonical_json(_release_identity(**identity))).hexdigest()
+    return f"{ASSOCIATION_RELEASE_SCHEMA_VERSION}:{digest}"
+
+
+@dataclass(frozen=True)
+class AssociationReleaseManifest:
+    """Content identity and shared provenance for an association release."""
+
+    release_id: str
+    record_count: int
+    records_sha256: str
+    parent_release_id: str | None
+    provenance: AssociationProvenance
+    association_schema_version: str = ASSOCIATION_SCHEMA_VERSION
+    records_path: str = _RELEASE_RECORDS
+
+    def __post_init__(self) -> None:
+        if self.association_schema_version != ASSOCIATION_SCHEMA_VERSION:
+            raise ValueError(f"association_schema_version must be {ASSOCIATION_SCHEMA_VERSION!r}")
+        if self.records_path != _RELEASE_RECORDS:
+            raise ValueError(f"records_path must be {_RELEASE_RECORDS!r}")
+        if isinstance(self.record_count, bool) or not isinstance(self.record_count, int):
+            raise ValueError("record_count must be a non-negative integer")
+        if self.record_count < 0:
+            raise ValueError("record_count must be a non-negative integer")
+        _sha256(self.records_sha256, "records_sha256")
+        if not isinstance(self.provenance, AssociationProvenance):
+            raise ValueError("provenance must be AssociationProvenance")
+        if self.parent_release_id is not None:
+            _content_id(
+                self.parent_release_id,
+                ASSOCIATION_RELEASE_SCHEMA_VERSION,
+                "parent_release_id",
+            )
+        expected = _release_id(
+            record_count=self.record_count,
+            records_sha256=self.records_sha256,
+            parent_release_id=self.parent_release_id,
+            provenance=self.provenance,
+        )
+        if self.release_id != expected:
+            raise ValueError("release_id does not match the release identity")
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationReleaseManifest":
+        _exact_keys(
+            data,
+            {
+                "schema_version",
+                "release_id",
+                "association_schema_version",
+                "records_path",
+                "record_count",
+                "records_sha256",
+                "parent_release_id",
+                "provenance",
+            },
+            "association release manifest",
+        )
+        if data["schema_version"] != ASSOCIATION_RELEASE_SCHEMA_VERSION:
+            raise ValueError(f"schema_version must be {ASSOCIATION_RELEASE_SCHEMA_VERSION!r}")
+        provenance = data["provenance"]
+        if not isinstance(provenance, Mapping):
+            raise ValueError("provenance must be an object")
+        return cls(
+            release_id=data["release_id"],
+            record_count=data["record_count"],
+            records_sha256=data["records_sha256"],
+            parent_release_id=data["parent_release_id"],
+            provenance=AssociationProvenance.from_mapping(provenance),
+            association_schema_version=data["association_schema_version"],
+            records_path=data["records_path"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": ASSOCIATION_RELEASE_SCHEMA_VERSION,
+            "release_id": self.release_id,
+            "association_schema_version": self.association_schema_version,
+            "records_path": self.records_path,
+            "record_count": self.record_count,
+            "records_sha256": self.records_sha256,
+            "parent_release_id": self.parent_release_id,
+            "provenance": self.provenance.to_dict(),
+        }
+
+
+def load_association_release_manifest(
+    directory: str | os.PathLike[str],
+) -> AssociationReleaseManifest:
+    """Load and validate a release manifest without reading its records."""
+    path = Path(directory) / _RELEASE_MANIFEST
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read association release manifest: {path}") from exc
+    if not isinstance(data, Mapping):
+        raise ValueError("association release manifest must be an object")
+    return AssociationReleaseManifest.from_mapping(data)
+
+
+def _validated_release_records(
+    directory: Path,
+    manifest: AssociationReleaseManifest,
+) -> Iterator[AssociationRecord]:
+    path = directory / manifest.records_path
+    digest = hashlib.sha256()
+    previous_id: str | None = None
+    count = 0
+
+    try:
+        handle = path.open("rb")
+    except OSError as exc:
+        raise ValueError(f"cannot read association release records: {path}") from exc
+    with handle:
+        for line_number, line in enumerate(handle, start=1):
+            digest.update(line)
+            if not line.endswith(b"\n"):
+                raise ValueError(f"association record line {line_number} is not newline-terminated")
+            try:
+                data = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"association record line {line_number} is not valid JSON"
+                ) from exc
+            if not isinstance(data, Mapping):
+                raise ValueError(f"association record line {line_number} must be an object")
+            record = AssociationRecord.from_mapping(data)
+            if record.provenance != manifest.provenance:
+                raise ValueError(
+                    f"association record line {line_number} provenance differs from the manifest"
+                )
+            if previous_id is not None and record.association_id <= previous_id:
+                raise ValueError("association records must be strictly ordered by association_id")
+            previous_id = record.association_id
+            count += 1
+            yield record
+
+    if count != manifest.record_count:
+        raise ValueError(
+            f"record_count mismatch: manifest has {manifest.record_count}, records have {count}"
+        )
+    actual_digest = f"sha256:{digest.hexdigest()}"
+    if actual_digest != manifest.records_sha256:
+        raise ValueError("records_sha256 does not match associations.jsonl")
+
+
+def iter_association_release(
+    directory: str | os.PathLike[str],
+) -> Iterator[AssociationRecord]:
+    """Stream validated records; checksum/count validation completes at EOF."""
+    path = Path(directory)
+    manifest = load_association_release_manifest(path)
+    yield from _validated_release_records(path, manifest)
+
+
+def verify_association_release(
+    directory: str | os.PathLike[str],
+) -> AssociationReleaseManifest:
+    """Stream through every record and return the validated manifest."""
+    path = Path(directory)
+    manifest = load_association_release_manifest(path)
+    for _ in _validated_release_records(path, manifest):
+        pass
+    return manifest
+
+
+def write_association_release(
+    records: Iterable[AssociationRecord | Mapping[str, Any]],
+    directory: str | os.PathLike[str],
+    *,
+    provenance: AssociationProvenance,
+    parent_release_id: str | None = None,
+) -> AssociationReleaseManifest:
+    """Atomically write a deterministic, content-addressed association release.
+
+    ``records`` is consumed once and must be strictly ordered by
+    :attr:`AssociationRecord.association_id`. This keeps publication bounded to
+    one record plus the writer buffers; callers can use their table engine's
+    external sort before publication.
+    """
+    if not isinstance(provenance, AssociationProvenance):
+        raise ValueError("provenance must be AssociationProvenance")
+    if parent_release_id is not None:
+        _content_id(
+            parent_release_id,
+            ASSOCIATION_RELEASE_SCHEMA_VERSION,
+            "parent_release_id",
+        )
+
+    target = Path(directory)
+    if target.exists():
+        raise FileExistsError(f"association release path already exists: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
+
+    try:
+        digest = hashlib.sha256()
+        count = 0
+        previous_id: str | None = None
+        records_path = temporary / _RELEASE_RECORDS
+        with records_path.open("xb") as handle:
+            for item in records:
+                record = (
+                    item
+                    if isinstance(item, AssociationRecord)
+                    else AssociationRecord.from_mapping(item)
+                )
+                if record.provenance != provenance:
+                    raise ValueError(
+                        "association record provenance differs from release provenance"
+                    )
+                if previous_id is not None and record.association_id <= previous_id:
+                    raise ValueError(
+                        "association records must be strictly ordered by association_id"
+                    )
+                previous_id = record.association_id
+                line = _canonical_json(record.to_dict()) + b"\n"
+                handle.write(line)
+                digest.update(line)
+                count += 1
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        records_sha256 = f"sha256:{digest.hexdigest()}"
+        identity = {
+            "record_count": count,
+            "records_sha256": records_sha256,
+            "parent_release_id": parent_release_id,
+            "provenance": provenance,
+        }
+        manifest = AssociationReleaseManifest(
+            release_id=_release_id(**identity),
+            **identity,
+        )
+        manifest_path = temporary / _RELEASE_MANIFEST
+        with manifest_path.open("xb") as handle:
+            handle.write(_canonical_json(manifest.to_dict()) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if target.exists():
+            raise FileExistsError(f"association release path already exists: {target}")
+        # ponytail: one local publisher owns a target path; concurrent object-store
+        # publication should use the provider's conditional-create primitive.
+        temporary.rename(target)
+        return manifest
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
