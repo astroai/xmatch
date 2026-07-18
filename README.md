@@ -59,10 +59,14 @@ eligible under this policy.
 The SHA-pinned 10,000-by-100,000 macOS/arm64 preliminary report is archived at
 [`benchmark_results/xmatch_engine_promotion_10k_100k_macos_arm64.json`](benchmark_results/xmatch_engine_promotion_10k_100k_macos_arm64.json)
 (SHA-256 `8a63161fd8f9485206881a90fab1c41409ab06b132abc524f88f3880b8a3a0c9`).
-Correctness parity passes in all four cases, but Torchsky fails every CPU
-wall-time and RSS promotion threshold, so automatic selection remains
-unchanged. Repeat the same command in the pinned CANFAR release environment
-before treating the hardware measurements as publication-grade evidence.
+The follow-up against Xmatch `b18eb97` and merged Torchsky `4113f94` is
+[`benchmark_results/xmatch_engine_promotion_10k_100k_torchsky_4113f94_macos_arm64.json`](benchmark_results/xmatch_engine_promotion_10k_100k_torchsky_4113f94_macos_arm64.json)
+(SHA-256 `584f183f3bab472b375513f59bc8f04131041f6b5c122ba954c3d02cf2ad0d11`).
+Correctness parity passes in all four cases. Torchsky is faster on both sparse
+cases, but dense wall time and the fixed PyTorch RSS footprint remain above the
+policy thresholds, so automatic selection remains unchanged. Repeat the same
+command in the pinned CANFAR release environment before treating the hardware
+measurements as publication-grade evidence.
 
 ## Features
 
