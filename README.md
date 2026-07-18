@@ -315,7 +315,10 @@ Tier 3 is orthogonal: pass `--probabilistic --priors g,r` on top of any engine
 to add a Bayesian qualification column.
 
 Versioned downstream association releases use the
-[`xmatch.association.v1`](docs/association-v1.md) candidate-record contract.
+[`xmatch.association.v1`](docs/association-v1.md) candidate-record contract and
+the atomic, streaming-verifiable `xmatch.association.release.v1` directory
+format. Release IDs cover the canonical JSONL checksum, record count, shared
+provenance, and optional parent release.
 
 ## HATS output
 
