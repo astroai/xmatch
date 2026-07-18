@@ -45,7 +45,8 @@ agree with the `fast` pair set.
 `--promotion-engine` evaluates, but does not change, automatic engine dispatch.
 Run the campaign in an environment containing the exact Torchsky wheel under
 evaluation; a missing optional engine is recorded as an error, never replaced
-by a fallback.
+by a fallback. Provenance records the Torchsky version and, for editable source
+installs, its direct URL and Git revision.
 The versioned `xmatch-engine-promotion-v1` policy requires successful
 dense/sparse × best/all cases at 10,000-by-100,000 scale with at least three
 timed runs, exact global-ID and pair-hash parity, wall time no more than 1.25×

@@ -1,13 +1,40 @@
 """Tests for the deterministic xmatch benchmark contract."""
 
 from copy import deepcopy
+from types import SimpleNamespace
 
 from scripts.benchmark_contract import (
+    _torchsky_provenance,
     evaluate_promotion,
     run_benchmark,
     run_matrix,
     synthetic_catalogues,
 )
+
+
+def test_torchsky_provenance_records_editable_source_sha(monkeypatch, tmp_path) -> None:
+    class Distribution:
+        version = "0.4.0.dev0"
+
+        @staticmethod
+        def read_text(name: str) -> str | None:
+            assert name == "direct_url.json"
+            return '{"dir_info":{"editable":true},"url":"' + tmp_path.as_uri() + '"}'
+
+    monkeypatch.setattr(
+        "scripts.benchmark_contract.importlib.metadata.distribution",
+        lambda name: Distribution(),
+    )
+    monkeypatch.setattr(
+        "scripts.benchmark_contract.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="abc123\n"),
+    )
+
+    assert _torchsky_provenance() == {
+        "torchsky": "0.4.0.dev0",
+        "torchsky_source_sha": "abc123",
+        "torchsky_source_url": tmp_path.as_uri(),
+    }
 
 
 def test_synthetic_catalogues_are_deterministic() -> None:
