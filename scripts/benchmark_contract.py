@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from itertools import product
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import numpy as np
 import polars as pl
@@ -338,6 +339,38 @@ def evaluate_promotion(
     }
 
 
+def _torchsky_provenance() -> dict[str, str]:
+    """Identify the optional Torchsky engine and its editable source revision."""
+    try:
+        distribution = importlib.metadata.distribution("torchsky")
+    except importlib.metadata.PackageNotFoundError:
+        return {"torchsky": "not-installed", "torchsky_source_sha": "not-installed"}
+
+    result = {"torchsky": distribution.version, "torchsky_source_sha": "unavailable"}
+    direct_url = distribution.read_text("direct_url.json")
+    if not direct_url:
+        return result
+    try:
+        source = json.loads(direct_url)
+        url = str(source["url"])
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return result
+    result["torchsky_source_url"] = url
+    parsed = urlparse(url)
+    if parsed.scheme != "file" or not source.get("dir_info", {}).get("editable"):
+        return result
+    git = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(unquote(parsed.path)),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if git.returncode == 0:
+        result["torchsky_source_sha"] = git.stdout.strip()
+    return result
+
+
 def benchmark_provenance() -> dict[str, str]:
     """Return enough environment identity to reproduce an archived report."""
     git = subprocess.run(
@@ -347,7 +380,7 @@ def benchmark_provenance() -> dict[str, str]:
         text=True,
         check=False,
     )
-    return {
+    result = {
         "created_utc": datetime.now(UTC).isoformat(),
         "git_sha": git.stdout.strip() if git.returncode == 0 else "unknown",
         "platform": platform.platform(),
@@ -356,6 +389,8 @@ def benchmark_provenance() -> dict[str, str]:
         "numpy": np.__version__,
         "polars": pl.__version__,
     }
+    result.update(_torchsky_provenance())
+    return result
 
 
 def _csv_values(value: str) -> tuple[str, ...]:
