@@ -15,9 +15,13 @@ from typing import Any, Iterable, Iterator, Mapping
 
 ASSOCIATION_SCHEMA_VERSION = "xmatch.association.v1"
 ASSOCIATION_RELEASE_SCHEMA_VERSION = "xmatch.association.release.v1"
+ASSOCIATION_COMPONENT_SCHEMA_VERSION = "xmatch.association.component.v1"
+ASSOCIATION_COMPONENT_MEMBERSHIP_SCHEMA_VERSION = "xmatch.association.component.membership.v1"
+ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION = "xmatch.association.component.release.v1"
 
 _RELEASE_MANIFEST = "manifest.json"
 _RELEASE_RECORDS = "associations.jsonl"
+_COMPONENT_MEMBERSHIPS = "memberships.jsonl"
 
 
 class ScoreSemantics(str, Enum):
@@ -547,6 +551,651 @@ def write_association_release(
 
         if target.exists():
             raise FileExistsError(f"association release path already exists: {target}")
+        # ponytail: one local publisher owns a target path; concurrent object-store
+        # publication should use the provider's conditional-create primitive.
+        temporary.rename(target)
+        return manifest
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+
+
+@dataclass(frozen=True)
+class AssociationComponentMember:
+    """One catalogue object in a release-scoped association component."""
+
+    input_release_id: str
+    member_id: str
+
+    def __post_init__(self) -> None:
+        _text(self.input_release_id, "input_release_id")
+        _text(self.member_id, "member_id")
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationComponentMember":
+        _exact_keys(data, {"input_release_id", "member_id"}, "association component member")
+        return cls(data["input_release_id"], data["member_id"])
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "input_release_id": self.input_release_id,
+            "member_id": self.member_id,
+        }
+
+
+def _component_id(
+    association_release_id: str,
+    *,
+    member_count: int,
+    members_sha256: str,
+) -> str:
+    identity = {
+        "schema_version": ASSOCIATION_COMPONENT_SCHEMA_VERSION,
+        "association_release_id": association_release_id,
+        "member_count": member_count,
+        "members_sha256": members_sha256,
+    }
+    digest = hashlib.sha256(_canonical_json(identity)).hexdigest()
+    return f"{ASSOCIATION_COMPONENT_SCHEMA_VERSION}:{digest}"
+
+
+def _component_member_identity(
+    members: Iterable[AssociationComponentMember],
+) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    count = 0
+    for member in members:
+        digest.update(_canonical_json(member.to_dict()) + b"\n")
+        count += 1
+    return count, f"sha256:{digest.hexdigest()}"
+
+
+@dataclass(frozen=True)
+class AssociationComponent:
+    """Exact membership and optional ancestry for one release-scoped component."""
+
+    association_release_id: str
+    members: tuple[AssociationComponentMember, ...]
+    parent_component_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _content_id(
+            self.association_release_id,
+            ASSOCIATION_RELEASE_SCHEMA_VERSION,
+            "association_release_id",
+        )
+        if not isinstance(self.members, (tuple, list)):
+            raise ValueError("members must be a sequence")
+        if not all(isinstance(member, AssociationComponentMember) for member in self.members):
+            raise ValueError("members must contain AssociationComponentMember values")
+        members = tuple(
+            sorted(self.members, key=lambda item: (item.input_release_id, item.member_id))
+        )
+        if not members:
+            raise ValueError("an association component must contain at least one member")
+        if len(set(members)) != len(members):
+            raise ValueError("association component members must not contain duplicates")
+        object.__setattr__(self, "members", members)
+        if not isinstance(self.parent_component_ids, (tuple, list)):
+            raise ValueError("parent_component_ids must be a sequence")
+        parents = tuple(
+            sorted(
+                _content_id(value, ASSOCIATION_COMPONENT_SCHEMA_VERSION, "parent_component_id")
+                for value in self.parent_component_ids
+            )
+        )
+        if len(set(parents)) != len(parents):
+            raise ValueError("parent_component_ids must not contain duplicates")
+        object.__setattr__(self, "parent_component_ids", parents)
+
+    @property
+    def component_id(self) -> str:
+        member_count, members_sha256 = _component_member_identity(self.members)
+        return _component_id(
+            self.association_release_id,
+            member_count=member_count,
+            members_sha256=members_sha256,
+        )
+
+
+@dataclass(frozen=True)
+class AssociationComponentMembership:
+    """One canonical row in a component membership release."""
+
+    association_release_id: str
+    component_id: str
+    input_release_id: str
+    member_id: str
+    parent_component_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _content_id(
+            self.association_release_id,
+            ASSOCIATION_RELEASE_SCHEMA_VERSION,
+            "association_release_id",
+        )
+        _content_id(self.component_id, ASSOCIATION_COMPONENT_SCHEMA_VERSION, "component_id")
+        _text(self.input_release_id, "input_release_id")
+        _text(self.member_id, "member_id")
+        if not isinstance(self.parent_component_ids, (tuple, list)):
+            raise ValueError("parent_component_ids must be a sequence")
+        parents = tuple(
+            sorted(
+                _content_id(value, ASSOCIATION_COMPONENT_SCHEMA_VERSION, "parent_component_id")
+                for value in self.parent_component_ids
+            )
+        )
+        if len(set(parents)) != len(parents):
+            raise ValueError("parent_component_ids must not contain duplicates")
+        object.__setattr__(self, "parent_component_ids", parents)
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationComponentMembership":
+        _exact_keys(
+            data,
+            {
+                "schema_version",
+                "association_release_id",
+                "component_id",
+                "input_release_id",
+                "member_id",
+                "parent_component_ids",
+            },
+            "association component membership",
+        )
+        if data["schema_version"] != ASSOCIATION_COMPONENT_MEMBERSHIP_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version must be {ASSOCIATION_COMPONENT_MEMBERSHIP_SCHEMA_VERSION!r}"
+            )
+        parents = data["parent_component_ids"]
+        if not isinstance(parents, list):
+            raise ValueError("parent_component_ids must be a list")
+        return cls(
+            association_release_id=data["association_release_id"],
+            component_id=data["component_id"],
+            input_release_id=data["input_release_id"],
+            member_id=data["member_id"],
+            parent_component_ids=tuple(parents),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": ASSOCIATION_COMPONENT_MEMBERSHIP_SCHEMA_VERSION,
+            "association_release_id": self.association_release_id,
+            "component_id": self.component_id,
+            "input_release_id": self.input_release_id,
+            "member_id": self.member_id,
+            "parent_component_ids": list(self.parent_component_ids),
+        }
+
+
+def _component_release_identity(
+    *,
+    association_release_id: str,
+    component_count: int,
+    membership_count: int,
+    memberships_sha256: str,
+    parent_component_release_id: str | None,
+    provenance: AssociationProvenance,
+) -> dict[str, Any]:
+    return {
+        "schema_version": ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION,
+        "membership_schema_version": ASSOCIATION_COMPONENT_MEMBERSHIP_SCHEMA_VERSION,
+        "association_release_id": association_release_id,
+        "component_count": component_count,
+        "membership_count": membership_count,
+        "memberships_sha256": memberships_sha256,
+        "parent_component_release_id": parent_component_release_id,
+        "provenance": provenance.to_dict(),
+    }
+
+
+def _component_release_id(**identity: Any) -> str:
+    digest = hashlib.sha256(_canonical_json(_component_release_identity(**identity))).hexdigest()
+    return f"{ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION}:{digest}"
+
+
+@dataclass(frozen=True)
+class AssociationComponentReleaseManifest:
+    """Content identity and provenance for component membership and lineage."""
+
+    component_release_id: str
+    association_release_id: str
+    component_count: int
+    membership_count: int
+    memberships_sha256: str
+    parent_component_release_id: str | None
+    provenance: AssociationProvenance
+    membership_schema_version: str = ASSOCIATION_COMPONENT_MEMBERSHIP_SCHEMA_VERSION
+    memberships_path: str = _COMPONENT_MEMBERSHIPS
+
+    def __post_init__(self) -> None:
+        _content_id(
+            self.association_release_id,
+            ASSOCIATION_RELEASE_SCHEMA_VERSION,
+            "association_release_id",
+        )
+        if self.membership_schema_version != ASSOCIATION_COMPONENT_MEMBERSHIP_SCHEMA_VERSION:
+            raise ValueError(
+                "membership_schema_version must be "
+                f"{ASSOCIATION_COMPONENT_MEMBERSHIP_SCHEMA_VERSION!r}"
+            )
+        if self.memberships_path != _COMPONENT_MEMBERSHIPS:
+            raise ValueError(f"memberships_path must be {_COMPONENT_MEMBERSHIPS!r}")
+        for value, name in (
+            (self.component_count, "component_count"),
+            (self.membership_count, "membership_count"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.component_count > self.membership_count:
+            raise ValueError("component_count must not exceed membership_count")
+        _sha256(self.memberships_sha256, "memberships_sha256")
+        if self.parent_component_release_id is not None:
+            _content_id(
+                self.parent_component_release_id,
+                ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION,
+                "parent_component_release_id",
+            )
+        if not isinstance(self.provenance, AssociationProvenance):
+            raise ValueError("provenance must be AssociationProvenance")
+        expected = _component_release_id(
+            association_release_id=self.association_release_id,
+            component_count=self.component_count,
+            membership_count=self.membership_count,
+            memberships_sha256=self.memberships_sha256,
+            parent_component_release_id=self.parent_component_release_id,
+            provenance=self.provenance,
+        )
+        if self.component_release_id != expected:
+            raise ValueError("component_release_id does not match the component release identity")
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationComponentReleaseManifest":
+        _exact_keys(
+            data,
+            {
+                "schema_version",
+                "component_release_id",
+                "association_release_id",
+                "membership_schema_version",
+                "memberships_path",
+                "component_count",
+                "membership_count",
+                "memberships_sha256",
+                "parent_component_release_id",
+                "provenance",
+            },
+            "association component release manifest",
+        )
+        if data["schema_version"] != ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version must be {ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION!r}"
+            )
+        provenance = data["provenance"]
+        if not isinstance(provenance, Mapping):
+            raise ValueError("provenance must be an object")
+        return cls(
+            component_release_id=data["component_release_id"],
+            association_release_id=data["association_release_id"],
+            component_count=data["component_count"],
+            membership_count=data["membership_count"],
+            memberships_sha256=data["memberships_sha256"],
+            parent_component_release_id=data["parent_component_release_id"],
+            provenance=AssociationProvenance.from_mapping(provenance),
+            membership_schema_version=data["membership_schema_version"],
+            memberships_path=data["memberships_path"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION,
+            "component_release_id": self.component_release_id,
+            "association_release_id": self.association_release_id,
+            "membership_schema_version": self.membership_schema_version,
+            "memberships_path": self.memberships_path,
+            "component_count": self.component_count,
+            "membership_count": self.membership_count,
+            "memberships_sha256": self.memberships_sha256,
+            "parent_component_release_id": self.parent_component_release_id,
+            "provenance": self.provenance.to_dict(),
+        }
+
+
+def load_association_component_release_manifest(
+    directory: str | os.PathLike[str],
+) -> AssociationComponentReleaseManifest:
+    """Load a component release manifest without reading its membership rows."""
+    path = Path(directory) / _RELEASE_MANIFEST
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read association component release manifest: {path}") from exc
+    if not isinstance(data, Mapping):
+        raise ValueError("association component release manifest must be an object")
+    return AssociationComponentReleaseManifest.from_mapping(data)
+
+
+def _finish_component(
+    component_id: str,
+    association_release_id: str,
+    member_count: int,
+    member_digest: Any,
+) -> None:
+    expected = _component_id(
+        association_release_id,
+        member_count=member_count,
+        members_sha256=f"sha256:{member_digest.hexdigest()}",
+    )
+    if component_id != expected:
+        raise ValueError("component_id does not match its exact release-scoped membership")
+
+
+def _validated_component_memberships(
+    directory: Path,
+    manifest: AssociationComponentReleaseManifest,
+    *,
+    parent_component_ids: set[str] | None = None,
+) -> Iterator[AssociationComponentMembership]:
+    path = directory / manifest.memberships_path
+    digest = hashlib.sha256()
+    previous_key: tuple[str, str, str] | None = None
+    current_component_id: str | None = None
+    current_parent_ids: tuple[str, ...] = ()
+    current_member_digest = hashlib.sha256()
+    current_member_count = 0
+    membership_count = 0
+    component_count = 0
+    # ponytail: exact partition validation uses O(members) memory; replace this
+    # set with an external unique index when one release outgrows local memory.
+    seen_members: set[tuple[str, str]] = set()
+
+    try:
+        handle = path.open("rb")
+    except OSError as exc:
+        raise ValueError(f"cannot read association component memberships: {path}") from exc
+    with handle:
+        for line_number, line in enumerate(handle, start=1):
+            digest.update(line)
+            if not line.endswith(b"\n"):
+                raise ValueError(
+                    f"association component membership line {line_number} is not newline-terminated"
+                )
+            try:
+                data = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"association component membership line {line_number} is not valid JSON"
+                ) from exc
+            if not isinstance(data, Mapping):
+                raise ValueError(
+                    f"association component membership line {line_number} must be an object"
+                )
+            membership = AssociationComponentMembership.from_mapping(data)
+            if membership.association_release_id != manifest.association_release_id:
+                raise ValueError(
+                    f"association component membership line {line_number} release differs "
+                    "from the manifest"
+                )
+            if membership.input_release_id not in manifest.provenance.input_release_ids:
+                raise ValueError(
+                    f"association component membership line {line_number} input release "
+                    "is absent from provenance"
+                )
+            key = (
+                membership.component_id,
+                membership.input_release_id,
+                membership.member_id,
+            )
+            if previous_key is not None and key <= previous_key:
+                raise ValueError(
+                    "association component memberships must be strictly ordered by "
+                    "component_id, input_release_id, member_id"
+                )
+            previous_key = key
+            member_key = (membership.input_release_id, membership.member_id)
+            if member_key in seen_members:
+                raise ValueError("an association member cannot belong to multiple components")
+            seen_members.add(member_key)
+
+            if current_component_id != membership.component_id:
+                if current_component_id is not None:
+                    _finish_component(
+                        current_component_id,
+                        manifest.association_release_id,
+                        current_member_count,
+                        current_member_digest,
+                    )
+                current_component_id = membership.component_id
+                current_parent_ids = membership.parent_component_ids
+                current_member_digest = hashlib.sha256()
+                current_member_count = 0
+                component_count += 1
+                missing = (
+                    set(current_parent_ids).difference(parent_component_ids)
+                    if parent_component_ids is not None
+                    else set()
+                )
+                if missing:
+                    raise ValueError("parent_component_ids contains an unknown parent component")
+            elif membership.parent_component_ids != current_parent_ids:
+                raise ValueError(
+                    "parent_component_ids must be identical for every component member"
+                )
+
+            member = AssociationComponentMember(
+                membership.input_release_id,
+                membership.member_id,
+            )
+            current_member_digest.update(_canonical_json(member.to_dict()) + b"\n")
+            current_member_count += 1
+            membership_count += 1
+            yield membership
+
+    if current_component_id is not None:
+        _finish_component(
+            current_component_id,
+            manifest.association_release_id,
+            current_member_count,
+            current_member_digest,
+        )
+    if component_count != manifest.component_count:
+        raise ValueError(
+            f"component_count mismatch: manifest has {manifest.component_count}, "
+            f"memberships have {component_count}"
+        )
+    if membership_count != manifest.membership_count:
+        raise ValueError(
+            f"membership_count mismatch: manifest has {manifest.membership_count}, "
+            f"memberships have {membership_count}"
+        )
+    actual_digest = f"sha256:{digest.hexdigest()}"
+    if actual_digest != manifest.memberships_sha256:
+        raise ValueError("memberships_sha256 does not match memberships.jsonl")
+
+
+def _verified_parent_component_ids(
+    directory: str | os.PathLike[str],
+) -> tuple[AssociationComponentReleaseManifest, set[str]]:
+    manifest = verify_association_component_release(directory)
+    component_ids = {
+        membership.component_id for membership in iter_association_component_release(directory)
+    }
+    return manifest, component_ids
+
+
+def iter_association_component_release(
+    directory: str | os.PathLike[str],
+    *,
+    parent_component_directory: str | os.PathLike[str] | None = None,
+) -> Iterator[AssociationComponentMembership]:
+    """Stream membership rows; checksum, counts, and component IDs validate at EOF."""
+    path = Path(directory)
+    manifest = load_association_component_release_manifest(path)
+    parent_component_ids: set[str] | None = None
+    if parent_component_directory is not None:
+        parent_manifest, parent_component_ids = _verified_parent_component_ids(
+            parent_component_directory
+        )
+        if manifest.parent_component_release_id != parent_manifest.component_release_id:
+            raise ValueError("parent component release does not match the manifest")
+    yield from _validated_component_memberships(
+        path,
+        manifest,
+        parent_component_ids=parent_component_ids,
+    )
+
+
+def verify_association_component_release(
+    directory: str | os.PathLike[str],
+    *,
+    association_release_directory: str | os.PathLike[str] | None = None,
+    parent_component_directory: str | os.PathLike[str] | None = None,
+) -> AssociationComponentReleaseManifest:
+    """Verify a component release and its optional association/parent inputs."""
+    path = Path(directory)
+    manifest = load_association_component_release_manifest(path)
+    association_manifest: AssociationReleaseManifest | None = None
+    if association_release_directory is not None:
+        association_manifest = verify_association_release(association_release_directory)
+        if manifest.association_release_id != association_manifest.release_id:
+            raise ValueError("association release does not match the component manifest")
+        if manifest.provenance != association_manifest.provenance:
+            raise ValueError("component provenance differs from the association release")
+
+    parent_component_ids: set[str] | None = None
+    if parent_component_directory is not None:
+        parent_manifest, parent_component_ids = _verified_parent_component_ids(
+            parent_component_directory
+        )
+        if manifest.parent_component_release_id != parent_manifest.component_release_id:
+            raise ValueError("parent component release does not match the manifest")
+        if (
+            association_manifest is not None
+            and association_manifest.parent_release_id != parent_manifest.association_release_id
+        ):
+            raise ValueError("parent component release does not match association release lineage")
+
+    for _ in _validated_component_memberships(
+        path,
+        manifest,
+        parent_component_ids=parent_component_ids,
+    ):
+        pass
+    return manifest
+
+
+def write_association_component_release(
+    components: Iterable[AssociationComponent],
+    association_release_directory: str | os.PathLike[str],
+    directory: str | os.PathLike[str],
+    *,
+    parent_component_directory: str | os.PathLike[str] | None = None,
+) -> AssociationComponentReleaseManifest:
+    """Atomically publish deterministic component membership and lineage.
+
+    Components must be strictly ordered by ``component_id``. Member order is
+    canonicalized within each component. A parent component directory is
+    required when any component declares lineage.
+    """
+    association_manifest = verify_association_release(association_release_directory)
+    parent_component_release_id: str | None = None
+    parent_component_ids: set[str] | None = None
+    if parent_component_directory is not None:
+        parent_manifest, parent_component_ids = _verified_parent_component_ids(
+            parent_component_directory
+        )
+        if association_manifest.parent_release_id != parent_manifest.association_release_id:
+            raise ValueError("parent component release does not match association release lineage")
+        parent_component_release_id = parent_manifest.component_release_id
+
+    target = Path(directory)
+    if target.exists():
+        raise FileExistsError(f"association component release path already exists: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
+
+    try:
+        digest = hashlib.sha256()
+        component_count = 0
+        membership_count = 0
+        previous_component_id: str | None = None
+        # ponytail: exact partition validation uses O(members) memory; replace
+        # this set with an external unique index for survey-scale releases.
+        seen_members: set[tuple[str, str]] = set()
+        memberships_path = temporary / _COMPONENT_MEMBERSHIPS
+        with memberships_path.open("xb") as handle:
+            for component in components:
+                if not isinstance(component, AssociationComponent):
+                    raise ValueError("components must contain AssociationComponent values")
+                if component.association_release_id != association_manifest.release_id:
+                    raise ValueError("component association release differs from the input release")
+                component_id = component.component_id
+                if previous_component_id is not None and component_id <= previous_component_id:
+                    raise ValueError(
+                        "association components must be strictly ordered by component_id"
+                    )
+                previous_component_id = component_id
+                missing_parents = set(component.parent_component_ids).difference(
+                    parent_component_ids or ()
+                )
+                if component.parent_component_ids and parent_component_ids is None:
+                    raise ValueError(
+                        "parent component release is required when component lineage is present"
+                    )
+                if missing_parents:
+                    raise ValueError("parent_component_ids contains an unknown parent component")
+
+                for member in component.members:
+                    if (
+                        member.input_release_id
+                        not in association_manifest.provenance.input_release_ids
+                    ):
+                        raise ValueError("component member input release is absent from provenance")
+                    member_key = (member.input_release_id, member.member_id)
+                    if member_key in seen_members:
+                        raise ValueError(
+                            "an association member cannot belong to multiple components"
+                        )
+                    seen_members.add(member_key)
+                    membership = AssociationComponentMembership(
+                        association_release_id=association_manifest.release_id,
+                        component_id=component_id,
+                        input_release_id=member.input_release_id,
+                        member_id=member.member_id,
+                        # ponytail: repeating lineage keeps one canonical stream;
+                        # a future schema can split it out if components become huge.
+                        parent_component_ids=component.parent_component_ids,
+                    )
+                    line = _canonical_json(membership.to_dict()) + b"\n"
+                    handle.write(line)
+                    digest.update(line)
+                    membership_count += 1
+                component_count += 1
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        memberships_sha256 = f"sha256:{digest.hexdigest()}"
+        identity = {
+            "association_release_id": association_manifest.release_id,
+            "component_count": component_count,
+            "membership_count": membership_count,
+            "memberships_sha256": memberships_sha256,
+            "parent_component_release_id": parent_component_release_id,
+            "provenance": association_manifest.provenance,
+        }
+        manifest = AssociationComponentReleaseManifest(
+            component_release_id=_component_release_id(**identity),
+            **identity,
+        )
+        manifest_path = temporary / _RELEASE_MANIFEST
+        with manifest_path.open("xb") as handle:
+            handle.write(_canonical_json(manifest.to_dict()) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if target.exists():
+            raise FileExistsError(f"association component release path already exists: {target}")
         # ponytail: one local publisher owns a target path; concurrent object-store
         # publication should use the provider's conditional-create primitive.
         temporary.rename(target)

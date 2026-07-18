@@ -69,3 +69,60 @@ files, and renames a temporary sibling directory only after successful
 validation. It refuses to replace an existing target. Producers with unsorted
 tables should use their table engine's external sort before publication rather
 than loading the release into Python memory.
+
+## Component membership and lineage
+
+`xmatch.association.component.release.v1` is an immutable sidecar to one
+verified association release. It does not change that release's two-file
+contract. Its authoritative files are:
+
+- `memberships.jsonl`: canonical rows ordered by component, input release, and
+  member ID;
+- `manifest.json`: component/membership counts and checksum, the exact
+  `association_release_id` and inherited provenance, optional parent component
+  release, and a content-derived `component_release_id`.
+
+Each member is namespaced by `input_release_id`, which must occur in the
+association provenance. A component ID covers its association release and exact
+canonical member set. The same members therefore receive a different ID in a
+new association release. Cross-release continuity is explicit instead:
+`parent_component_ids` may name zero, one, or several components in the verified
+parent component release, representing new components, continuity/splits, and
+merges respectively.
+
+```python
+from xmatch.association import (
+    AssociationComponent,
+    AssociationComponentMember,
+    verify_association_release,
+    verify_association_component_release,
+    write_association_component_release,
+)
+
+association_manifest = verify_association_release("releases/cosmos-v1")
+component = AssociationComponent(
+    association_manifest.release_id,
+    (
+        AssociationComponentMember("catalog:cosmos2020:v1", "source:101"),
+        AssociationComponentMember("catalog:specz:v1", "source:9001"),
+    ),
+)
+components = sorted([component], key=lambda item: item.component_id)
+component_manifest = write_association_component_release(
+    components,
+    "releases/cosmos-v1",
+    "components/cosmos-v1",
+)
+verified = verify_association_component_release(
+    "components/cosmos-v1",
+    association_release_directory="releases/cosmos-v1",
+)
+```
+
+For a child release, pass `parent_component_directory` to the writer and list
+the applicable parent IDs on each `AssociationComponent`. Publication rejects
+dangling parents, association/parent lineage mismatches, duplicate membership,
+mixed input releases, nondeterministic component ordering, and overwrite.
+Verification rejects byte-level tampering. It streams the file but retains one
+global membership set so it can prove that every namespaced member belongs to
+at most one component.

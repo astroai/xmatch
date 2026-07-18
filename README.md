@@ -318,7 +318,10 @@ Versioned downstream association releases use the
 [`xmatch.association.v1`](docs/association-v1.md) candidate-record contract and
 the atomic, streaming-verifiable `xmatch.association.release.v1` directory
 format. Release IDs cover the canonical JSONL checksum, record count, shared
-provenance, and optional parent release.
+provenance, and optional parent release. The companion
+`xmatch.association.component.release.v1` format publishes exact, namespaced
+component membership and explicit merge/split lineage without treating a
+component ID as stable across releases.
 
 ## HATS output
 
