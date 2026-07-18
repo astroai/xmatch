@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added — Versioned Association Contract
 
+* **`xmatch.association.component.release.v1`**: deterministic sidecar releases
+  bind exact, namespaced component membership to a verified association
+  release. Component IDs cover the association release plus canonical members;
+  manifests inherit executable provenance and bind optional parent component
+  releases, while per-component parent IDs preserve merge/split lineage.
 * **`xmatch.association.release.v1`**: deterministic release directories pair
   canonical `associations.jsonl` records with a content-addressed manifest,
   shared executable provenance, an optional parent release, and streaming
