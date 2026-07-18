@@ -18,10 +18,13 @@ ASSOCIATION_RELEASE_SCHEMA_VERSION = "xmatch.association.release.v1"
 ASSOCIATION_COMPONENT_SCHEMA_VERSION = "xmatch.association.component.v1"
 ASSOCIATION_COMPONENT_MEMBERSHIP_SCHEMA_VERSION = "xmatch.association.component.membership.v1"
 ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION = "xmatch.association.component.release.v1"
+ASSOCIATION_COMPONENT_DELTA_SCHEMA_VERSION = "xmatch.association.component.delta.v1"
+ASSOCIATION_COMPONENT_DELTA_RELEASE_SCHEMA_VERSION = "xmatch.association.component.delta.release.v1"
 
 _RELEASE_MANIFEST = "manifest.json"
 _RELEASE_RECORDS = "associations.jsonl"
 _COMPONENT_MEMBERSHIPS = "memberships.jsonl"
+_COMPONENT_DELTAS = "deltas.jsonl"
 
 
 class ScoreSemantics(str, Enum):
@@ -38,6 +41,16 @@ class AssociationDecision(str, Enum):
     CANDIDATE = "candidate"
     SELECTED = "selected"
     REJECTED = "rejected"
+
+
+class AssociationComponentDeltaKind(str, Enum):
+    """Topology change between two component releases."""
+
+    CREATED = "created"
+    CONTINUED = "continued"
+    MERGED = "merged"
+    SPLIT = "split"
+    RETIRED = "retired"
 
 
 def _text(value: Any, name: str) -> str:
@@ -1198,6 +1211,674 @@ def write_association_component_release(
             raise FileExistsError(f"association component release path already exists: {target}")
         # ponytail: one local publisher owns a target path; concurrent object-store
         # publication should use the provider's conditional-create primitive.
+        temporary.rename(target)
+        return manifest
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+
+
+def _component_partition(
+    directory: str | os.PathLike[str],
+    *,
+    parent_component_directory: str | os.PathLike[str] | None = None,
+) -> tuple[
+    AssociationComponentReleaseManifest,
+    dict[str, tuple[AssociationComponentMember, ...]],
+    dict[str, tuple[str, ...]],
+]:
+    manifest = verify_association_component_release(
+        directory,
+        parent_component_directory=parent_component_directory,
+    )
+    members: dict[str, list[AssociationComponentMember]] = {}
+    parents: dict[str, tuple[str, ...]] = {}
+    for membership in iter_association_component_release(directory):
+        members.setdefault(membership.component_id, []).append(
+            AssociationComponentMember(membership.input_release_id, membership.member_id)
+        )
+        parents[membership.component_id] = membership.parent_component_ids
+    return manifest, {key: tuple(value) for key, value in members.items()}, parents
+
+
+def construct_association_components(
+    association_release_directory: str | os.PathLike[str],
+    *,
+    source_input_release_id: str,
+    candidate_input_release_id: str,
+    included_decisions: Iterable[AssociationDecision],
+    parent_component_directory: str | os.PathLike[str] | None = None,
+) -> list[AssociationComponent]:
+    """Build deterministic connected components from an association release.
+
+    Endpoint release IDs and included decisions are required so construction
+    never guesses catalogue namespaces or scientific acceptance policy.
+    """
+    manifest = verify_association_release(association_release_directory)
+    endpoint_releases = (
+        _text(source_input_release_id, "source_input_release_id"),
+        _text(candidate_input_release_id, "candidate_input_release_id"),
+    )
+    if not set(endpoint_releases).issubset(manifest.provenance.input_release_ids):
+        raise ValueError("endpoint input release is absent from association provenance")
+    try:
+        decisions = set(included_decisions)
+    except TypeError as exc:
+        raise ValueError("included_decisions must be an iterable") from exc
+    if not all(isinstance(decision, AssociationDecision) for decision in decisions):
+        raise ValueError("included_decisions must contain AssociationDecision values")
+
+    parent_by_member: dict[AssociationComponentMember, str] = {}
+    if parent_component_directory is not None:
+        parent_manifest, parent_members, _ = _component_partition(parent_component_directory)
+        if manifest.parent_release_id != parent_manifest.association_release_id:
+            raise ValueError("parent component release does not match association release lineage")
+        for component_id, members in parent_members.items():
+            for member in members:
+                parent_by_member[member] = component_id
+
+    # ponytail: union-find retains O(nodes) state; survey-scale construction
+    # should move this exact contract behind an external graph engine.
+    roots: dict[AssociationComponentMember, AssociationComponentMember] = {}
+
+    def find(member: AssociationComponentMember) -> AssociationComponentMember:
+        root = roots.setdefault(member, member)
+        while root != roots[root]:
+            root = roots[root]
+        while member != root:
+            member, roots[member] = roots[member], root
+        return root
+
+    def union(left: AssociationComponentMember, right: AssociationComponentMember) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            left_key = (left_root.input_release_id, left_root.member_id)
+            right_key = (right_root.input_release_id, right_root.member_id)
+            if left_key < right_key:
+                roots[right_root] = left_root
+            else:
+                roots[left_root] = right_root
+
+    for record in iter_association_release(association_release_directory):
+        if record.decision not in decisions:
+            continue
+        union(
+            AssociationComponentMember(endpoint_releases[0], record.source_id),
+            AssociationComponentMember(endpoint_releases[1], record.candidate_id),
+        )
+
+    grouped: dict[AssociationComponentMember, list[AssociationComponentMember]] = {}
+    for member in roots:
+        grouped.setdefault(find(member), []).append(member)
+
+    components = [
+        AssociationComponent(
+            manifest.release_id,
+            tuple(members),
+            tuple(
+                sorted(
+                    {parent_by_member[member] for member in members if member in parent_by_member}
+                )
+            ),
+        )
+        for members in grouped.values()
+    ]
+    return sorted(components, key=lambda component: component.component_id)
+
+
+def _component_delta_id(
+    *,
+    parent_association_release_id: str,
+    parent_component_release_id: str,
+    current_association_release_id: str,
+    current_component_release_id: str,
+    kind: AssociationComponentDeltaKind,
+    parent_component_ids: tuple[str, ...],
+    current_component_ids: tuple[str, ...],
+) -> str:
+    identity = {
+        "schema_version": ASSOCIATION_COMPONENT_DELTA_SCHEMA_VERSION,
+        "parent_association_release_id": parent_association_release_id,
+        "parent_component_release_id": parent_component_release_id,
+        "current_association_release_id": current_association_release_id,
+        "current_component_release_id": current_component_release_id,
+        "kind": kind.value,
+        "parent_component_ids": list(parent_component_ids),
+        "current_component_ids": list(current_component_ids),
+    }
+    return (
+        f"{ASSOCIATION_COMPONENT_DELTA_SCHEMA_VERSION}:"
+        f"{hashlib.sha256(_canonical_json(identity)).hexdigest()}"
+    )
+
+
+@dataclass(frozen=True)
+class AssociationComponentDelta:
+    """One deterministic topology change between release-scoped components."""
+
+    parent_association_release_id: str
+    parent_component_release_id: str
+    current_association_release_id: str
+    current_component_release_id: str
+    kind: AssociationComponentDeltaKind
+    parent_component_ids: tuple[str, ...]
+    current_component_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for value, schema, name in (
+            (
+                self.parent_association_release_id,
+                ASSOCIATION_RELEASE_SCHEMA_VERSION,
+                "parent_association_release_id",
+            ),
+            (
+                self.parent_component_release_id,
+                ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION,
+                "parent_component_release_id",
+            ),
+            (
+                self.current_association_release_id,
+                ASSOCIATION_RELEASE_SCHEMA_VERSION,
+                "current_association_release_id",
+            ),
+            (
+                self.current_component_release_id,
+                ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION,
+                "current_component_release_id",
+            ),
+        ):
+            _content_id(value, schema, name)
+        if not isinstance(self.kind, AssociationComponentDeltaKind):
+            raise ValueError("kind is not defined by association component delta.v1")
+        for name in ("parent_component_ids", "current_component_ids"):
+            values = getattr(self, name)
+            if not isinstance(values, (tuple, list)):
+                raise ValueError(f"{name} must be a sequence")
+            normalized = tuple(
+                sorted(
+                    _content_id(value, ASSOCIATION_COMPONENT_SCHEMA_VERSION, name)
+                    for value in values
+                )
+            )
+            if len(set(normalized)) != len(normalized):
+                raise ValueError(f"{name} must not contain duplicates")
+            object.__setattr__(self, name, normalized)
+        counts = (len(self.parent_component_ids), len(self.current_component_ids))
+        expected = {
+            AssociationComponentDeltaKind.CREATED: (0, 1),
+            AssociationComponentDeltaKind.CONTINUED: (1, 1),
+            AssociationComponentDeltaKind.RETIRED: (1, 0),
+        }
+        if self.kind in expected and counts != expected[self.kind]:
+            raise ValueError(f"{self.kind.value} component delta has invalid endpoint counts")
+        if self.kind is AssociationComponentDeltaKind.MERGED and not (
+            counts[0] >= 2 and counts[1] == 1
+        ):
+            raise ValueError("merged component delta has invalid endpoint counts")
+        if self.kind is AssociationComponentDeltaKind.SPLIT and not (
+            counts[0] == 1 and counts[1] >= 2
+        ):
+            raise ValueError("split component delta has invalid endpoint counts")
+
+    @property
+    def delta_id(self) -> str:
+        return _component_delta_id(
+            parent_association_release_id=self.parent_association_release_id,
+            parent_component_release_id=self.parent_component_release_id,
+            current_association_release_id=self.current_association_release_id,
+            current_component_release_id=self.current_component_release_id,
+            kind=self.kind,
+            parent_component_ids=self.parent_component_ids,
+            current_component_ids=self.current_component_ids,
+        )
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationComponentDelta":
+        _exact_keys(
+            data,
+            {
+                "schema_version",
+                "delta_id",
+                "parent_association_release_id",
+                "parent_component_release_id",
+                "current_association_release_id",
+                "current_component_release_id",
+                "kind",
+                "parent_component_ids",
+                "current_component_ids",
+            },
+            "association component delta",
+        )
+        if data["schema_version"] != ASSOCIATION_COMPONENT_DELTA_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version must be {ASSOCIATION_COMPONENT_DELTA_SCHEMA_VERSION!r}"
+            )
+        for name in ("parent_component_ids", "current_component_ids"):
+            if not isinstance(data[name], list):
+                raise ValueError(f"{name} must be a list")
+        try:
+            kind = AssociationComponentDeltaKind(data["kind"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("kind is not defined by association component delta.v1") from exc
+        delta = cls(
+            parent_association_release_id=data["parent_association_release_id"],
+            parent_component_release_id=data["parent_component_release_id"],
+            current_association_release_id=data["current_association_release_id"],
+            current_component_release_id=data["current_component_release_id"],
+            kind=kind,
+            parent_component_ids=tuple(data["parent_component_ids"]),
+            current_component_ids=tuple(data["current_component_ids"]),
+        )
+        if data["delta_id"] != delta.delta_id:
+            raise ValueError("delta_id does not match the component delta identity")
+        return delta
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": ASSOCIATION_COMPONENT_DELTA_SCHEMA_VERSION,
+            "delta_id": self.delta_id,
+            "parent_association_release_id": self.parent_association_release_id,
+            "parent_component_release_id": self.parent_component_release_id,
+            "current_association_release_id": self.current_association_release_id,
+            "current_component_release_id": self.current_component_release_id,
+            "kind": self.kind.value,
+            "parent_component_ids": list(self.parent_component_ids),
+            "current_component_ids": list(self.current_component_ids),
+        }
+
+
+def _classified_component_deltas(
+    parent_component_directory: str | os.PathLike[str],
+    current_component_directory: str | os.PathLike[str],
+) -> tuple[
+    AssociationComponentReleaseManifest,
+    AssociationComponentReleaseManifest,
+    list[AssociationComponentDelta],
+]:
+    parent_manifest, parent_components, _ = _component_partition(parent_component_directory)
+    current_manifest, current_components, declared_parents = _component_partition(
+        current_component_directory,
+        parent_component_directory=parent_component_directory,
+    )
+    parent_by_member = {
+        member: component_id
+        for component_id, members in parent_components.items()
+        for member in members
+    }
+    current_parents: dict[str, set[str]] = {}
+    parent_children: dict[str, set[str]] = {
+        component_id: set() for component_id in parent_components
+    }
+    for current_id, members in current_components.items():
+        overlaps = {parent_by_member[member] for member in members if member in parent_by_member}
+        if overlaps != set(declared_parents[current_id]):
+            raise ValueError(
+                "current component lineage does not match exact parent membership overlap"
+            )
+        current_parents[current_id] = overlaps
+        for parent_id in overlaps:
+            parent_children[parent_id].add(current_id)
+
+    def delta(
+        kind: AssociationComponentDeltaKind,
+        parent_ids: tuple[str, ...],
+        current_ids: tuple[str, ...],
+    ) -> AssociationComponentDelta:
+        return AssociationComponentDelta(
+            parent_association_release_id=parent_manifest.association_release_id,
+            parent_component_release_id=parent_manifest.component_release_id,
+            current_association_release_id=current_manifest.association_release_id,
+            current_component_release_id=current_manifest.component_release_id,
+            kind=kind,
+            parent_component_ids=parent_ids,
+            current_component_ids=current_ids,
+        )
+
+    deltas: list[AssociationComponentDelta] = []
+    for current_id, parent_ids in current_parents.items():
+        if not parent_ids:
+            deltas.append(delta(AssociationComponentDeltaKind.CREATED, (), (current_id,)))
+        elif len(parent_ids) > 1:
+            deltas.append(
+                delta(
+                    AssociationComponentDeltaKind.MERGED,
+                    tuple(sorted(parent_ids)),
+                    (current_id,),
+                )
+            )
+        else:
+            parent_id = next(iter(parent_ids))
+            if len(parent_children[parent_id]) == 1:
+                deltas.append(
+                    delta(
+                        AssociationComponentDeltaKind.CONTINUED,
+                        (parent_id,),
+                        (current_id,),
+                    )
+                )
+    for parent_id, current_ids in parent_children.items():
+        if not current_ids:
+            deltas.append(delta(AssociationComponentDeltaKind.RETIRED, (parent_id,), ()))
+        elif len(current_ids) > 1:
+            deltas.append(
+                delta(
+                    AssociationComponentDeltaKind.SPLIT,
+                    (parent_id,),
+                    tuple(sorted(current_ids)),
+                )
+            )
+    return parent_manifest, current_manifest, sorted(deltas, key=lambda item: item.delta_id)
+
+
+def classify_association_component_deltas(
+    parent_component_directory: str | os.PathLike[str],
+    current_component_directory: str | os.PathLike[str],
+) -> list[AssociationComponentDelta]:
+    """Classify exact member overlap between verified component releases."""
+    return _classified_component_deltas(
+        parent_component_directory,
+        current_component_directory,
+    )[2]
+
+
+def _component_delta_release_identity(
+    *,
+    parent_association_release_id: str,
+    parent_component_release_id: str,
+    current_association_release_id: str,
+    current_component_release_id: str,
+    delta_count: int,
+    deltas_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": ASSOCIATION_COMPONENT_DELTA_RELEASE_SCHEMA_VERSION,
+        "delta_schema_version": ASSOCIATION_COMPONENT_DELTA_SCHEMA_VERSION,
+        "parent_association_release_id": parent_association_release_id,
+        "parent_component_release_id": parent_component_release_id,
+        "current_association_release_id": current_association_release_id,
+        "current_component_release_id": current_component_release_id,
+        "delta_count": delta_count,
+        "deltas_sha256": deltas_sha256,
+    }
+
+
+def _component_delta_release_id(**identity: Any) -> str:
+    digest = hashlib.sha256(
+        _canonical_json(_component_delta_release_identity(**identity))
+    ).hexdigest()
+    return f"{ASSOCIATION_COMPONENT_DELTA_RELEASE_SCHEMA_VERSION}:{digest}"
+
+
+@dataclass(frozen=True)
+class AssociationComponentDeltaReleaseManifest:
+    """Content identity for a deterministic component delta artifact."""
+
+    delta_release_id: str
+    parent_association_release_id: str
+    parent_component_release_id: str
+    current_association_release_id: str
+    current_component_release_id: str
+    delta_count: int
+    deltas_sha256: str
+    delta_schema_version: str = ASSOCIATION_COMPONENT_DELTA_SCHEMA_VERSION
+    deltas_path: str = _COMPONENT_DELTAS
+
+    def __post_init__(self) -> None:
+        if self.delta_schema_version != ASSOCIATION_COMPONENT_DELTA_SCHEMA_VERSION:
+            raise ValueError(
+                f"delta_schema_version must be {ASSOCIATION_COMPONENT_DELTA_SCHEMA_VERSION!r}"
+            )
+        if self.deltas_path != _COMPONENT_DELTAS:
+            raise ValueError(f"deltas_path must be {_COMPONENT_DELTAS!r}")
+        for value, schema, name in (
+            (
+                self.parent_association_release_id,
+                ASSOCIATION_RELEASE_SCHEMA_VERSION,
+                "parent_association_release_id",
+            ),
+            (
+                self.parent_component_release_id,
+                ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION,
+                "parent_component_release_id",
+            ),
+            (
+                self.current_association_release_id,
+                ASSOCIATION_RELEASE_SCHEMA_VERSION,
+                "current_association_release_id",
+            ),
+            (
+                self.current_component_release_id,
+                ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION,
+                "current_component_release_id",
+            ),
+        ):
+            _content_id(value, schema, name)
+        if isinstance(self.delta_count, bool) or not isinstance(self.delta_count, int):
+            raise ValueError("delta_count must be a non-negative integer")
+        if self.delta_count < 0:
+            raise ValueError("delta_count must be a non-negative integer")
+        _sha256(self.deltas_sha256, "deltas_sha256")
+        expected = _component_delta_release_id(
+            parent_association_release_id=self.parent_association_release_id,
+            parent_component_release_id=self.parent_component_release_id,
+            current_association_release_id=self.current_association_release_id,
+            current_component_release_id=self.current_component_release_id,
+            delta_count=self.delta_count,
+            deltas_sha256=self.deltas_sha256,
+        )
+        if self.delta_release_id != expected:
+            raise ValueError("delta_release_id does not match the component delta release identity")
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationComponentDeltaReleaseManifest":
+        _exact_keys(
+            data,
+            {
+                "schema_version",
+                "delta_release_id",
+                "delta_schema_version",
+                "deltas_path",
+                "parent_association_release_id",
+                "parent_component_release_id",
+                "current_association_release_id",
+                "current_component_release_id",
+                "delta_count",
+                "deltas_sha256",
+            },
+            "association component delta release manifest",
+        )
+        if data["schema_version"] != ASSOCIATION_COMPONENT_DELTA_RELEASE_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version must be {ASSOCIATION_COMPONENT_DELTA_RELEASE_SCHEMA_VERSION!r}"
+            )
+        return cls(
+            delta_release_id=data["delta_release_id"],
+            parent_association_release_id=data["parent_association_release_id"],
+            parent_component_release_id=data["parent_component_release_id"],
+            current_association_release_id=data["current_association_release_id"],
+            current_component_release_id=data["current_component_release_id"],
+            delta_count=data["delta_count"],
+            deltas_sha256=data["deltas_sha256"],
+            delta_schema_version=data["delta_schema_version"],
+            deltas_path=data["deltas_path"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": ASSOCIATION_COMPONENT_DELTA_RELEASE_SCHEMA_VERSION,
+            "delta_release_id": self.delta_release_id,
+            "delta_schema_version": self.delta_schema_version,
+            "deltas_path": self.deltas_path,
+            "parent_association_release_id": self.parent_association_release_id,
+            "parent_component_release_id": self.parent_component_release_id,
+            "current_association_release_id": self.current_association_release_id,
+            "current_component_release_id": self.current_component_release_id,
+            "delta_count": self.delta_count,
+            "deltas_sha256": self.deltas_sha256,
+        }
+
+
+def load_association_component_delta_release_manifest(
+    directory: str | os.PathLike[str],
+) -> AssociationComponentDeltaReleaseManifest:
+    """Load a component delta manifest without reading its delta rows."""
+    path = Path(directory) / _RELEASE_MANIFEST
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read association component delta manifest: {path}") from exc
+    if not isinstance(data, Mapping):
+        raise ValueError("association component delta release manifest must be an object")
+    return AssociationComponentDeltaReleaseManifest.from_mapping(data)
+
+
+def _validated_component_deltas(
+    directory: Path,
+    manifest: AssociationComponentDeltaReleaseManifest,
+) -> Iterator[AssociationComponentDelta]:
+    path = directory / manifest.deltas_path
+    digest = hashlib.sha256()
+    previous_id: str | None = None
+    count = 0
+    try:
+        handle = path.open("rb")
+    except OSError as exc:
+        raise ValueError(f"cannot read association component deltas: {path}") from exc
+    with handle:
+        for line_number, line in enumerate(handle, start=1):
+            digest.update(line)
+            if not line.endswith(b"\n"):
+                raise ValueError(
+                    f"association component delta line {line_number} is not newline-terminated"
+                )
+            try:
+                data = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"association component delta line {line_number} is not valid JSON"
+                ) from exc
+            if not isinstance(data, Mapping):
+                raise ValueError(
+                    f"association component delta line {line_number} must be an object"
+                )
+            delta = AssociationComponentDelta.from_mapping(data)
+            for field in (
+                "parent_association_release_id",
+                "parent_component_release_id",
+                "current_association_release_id",
+                "current_component_release_id",
+            ):
+                if getattr(delta, field) != getattr(manifest, field):
+                    raise ValueError(
+                        f"association component delta line {line_number} endpoint differs "
+                        "from the manifest"
+                    )
+            if previous_id is not None and delta.delta_id <= previous_id:
+                raise ValueError(
+                    "association component deltas must be strictly ordered by delta_id"
+                )
+            previous_id = delta.delta_id
+            count += 1
+            yield delta
+    if count != manifest.delta_count:
+        raise ValueError(
+            f"delta_count mismatch: manifest has {manifest.delta_count}, deltas have {count}"
+        )
+    actual_digest = f"sha256:{digest.hexdigest()}"
+    if actual_digest != manifest.deltas_sha256:
+        raise ValueError("deltas_sha256 does not match deltas.jsonl")
+
+
+def iter_association_component_delta_release(
+    directory: str | os.PathLike[str],
+) -> Iterator[AssociationComponentDelta]:
+    """Stream delta rows; checksum and count validation complete at EOF."""
+    path = Path(directory)
+    manifest = load_association_component_delta_release_manifest(path)
+    yield from _validated_component_deltas(path, manifest)
+
+
+def verify_association_component_delta_release(
+    directory: str | os.PathLike[str],
+    *,
+    parent_component_directory: str | os.PathLike[str] | None = None,
+    current_component_directory: str | os.PathLike[str] | None = None,
+) -> AssociationComponentDeltaReleaseManifest:
+    """Verify a delta artifact and, when supplied, its component endpoints."""
+    path = Path(directory)
+    manifest = load_association_component_delta_release_manifest(path)
+    actual = list(_validated_component_deltas(path, manifest))
+    if parent_component_directory is not None:
+        parent_manifest = verify_association_component_release(parent_component_directory)
+        if (
+            manifest.parent_association_release_id != parent_manifest.association_release_id
+            or manifest.parent_component_release_id != parent_manifest.component_release_id
+        ):
+            raise ValueError("parent component release does not match the delta manifest")
+    if current_component_directory is not None:
+        current_manifest = verify_association_component_release(current_component_directory)
+        if (
+            manifest.current_association_release_id != current_manifest.association_release_id
+            or manifest.current_component_release_id != current_manifest.component_release_id
+        ):
+            raise ValueError("current component release does not match the delta manifest")
+    if parent_component_directory is not None and current_component_directory is not None:
+        expected = classify_association_component_deltas(
+            parent_component_directory,
+            current_component_directory,
+        )
+        if actual != expected:
+            raise ValueError("component deltas do not match exact endpoint membership overlap")
+    return manifest
+
+
+def write_association_component_delta_release(
+    parent_component_directory: str | os.PathLike[str],
+    current_component_directory: str | os.PathLike[str],
+    directory: str | os.PathLike[str],
+) -> AssociationComponentDeltaReleaseManifest:
+    """Atomically publish deterministic deltas for two verified endpoints."""
+    parent_manifest, current_manifest, deltas = _classified_component_deltas(
+        parent_component_directory,
+        current_component_directory,
+    )
+    target = Path(directory)
+    if target.exists():
+        raise FileExistsError(f"association component delta path already exists: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
+    try:
+        digest = hashlib.sha256()
+        deltas_path = temporary / _COMPONENT_DELTAS
+        with deltas_path.open("xb") as handle:
+            for delta in deltas:
+                line = _canonical_json(delta.to_dict()) + b"\n"
+                handle.write(line)
+                digest.update(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+        identity = {
+            "parent_association_release_id": parent_manifest.association_release_id,
+            "parent_component_release_id": parent_manifest.component_release_id,
+            "current_association_release_id": current_manifest.association_release_id,
+            "current_component_release_id": current_manifest.component_release_id,
+            "delta_count": len(deltas),
+            "deltas_sha256": f"sha256:{digest.hexdigest()}",
+        }
+        manifest = AssociationComponentDeltaReleaseManifest(
+            delta_release_id=_component_delta_release_id(**identity),
+            **identity,
+        )
+        manifest_path = temporary / _RELEASE_MANIFEST
+        with manifest_path.open("xb") as handle:
+            handle.write(_canonical_json(manifest.to_dict()) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if target.exists():
+            raise FileExistsError(f"association component delta path already exists: {target}")
+        # ponytail: one local publisher owns a target path; object stores need
+        # their native conditional-create operation for concurrent publication.
         temporary.rename(target)
         return manifest
     except BaseException:

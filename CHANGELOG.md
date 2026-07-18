@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added — Versioned Association Contract
 
+* **`xmatch.association.component.delta.release.v1`**: deterministic,
+  content-addressed delta artifacts bind explicit parent/current association
+  and component release namespaces and classify exact membership overlap as
+  created, continued, merged, split, or retired. Component construction now
+  requires explicit source/candidate input releases and included decisions;
+  endpoint-aware verification recomputes classifications and rejects tampering
+  or false declared lineage.
 * **`xmatch.association.component.release.v1`**: deterministic sidecar releases
   bind exact, namespaced component membership to a verified association
   release. Component IDs cover the association release plus canonical members;
