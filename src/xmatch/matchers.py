@@ -2129,11 +2129,12 @@ def _torchsky_match(
         )
 
     crossmatch_sky = _load_torchsky_crossmatch()
+    # Pass read-only numpy arrays directly to avoid expensive deep copies
     result = crossmatch_sky(
-        left[left_src.ra_column].to_numpy().copy(),
-        left[left_src.dec_column].to_numpy().copy(),
-        right[right_src.ra_column].to_numpy().copy(),
-        right[right_src.dec_column].to_numpy().copy(),
+        left[left_src.ra_column].to_numpy(),
+        left[left_src.dec_column].to_numpy(),
+        right[right_src.ra_column].to_numpy(),
+        right[right_src.dec_column].to_numpy(),
         radius_arcsec=spec.radius_arcsec,
         find=spec.find,
     )

@@ -33,3 +33,7 @@
 ## 2026-07-08 - Optimize pseudo-label generation (LANDED)
 **Learning:** A Python loop over `np.unique(left_idx)` with per-group boolean masks and `np.argmin` is O(N × unique_left) and dominates ML feature prep on large match tables.
 **Action:** Use `np.lexsort((X[:, 0], left_idx))` then `np.unique(..., return_index=True)` on the sorted left indices to pick the minimum-separation pair per primary in O(N log N).
+
+## 2026-07-19 - Unnecessary DataFrame Copies in Torchsky Match
+**Learning:** Polars `to_numpy()` without `copy` returns a read-only numpy array. When passing DataFrame columns to external matching libraries like `torchsky` that do not mutate the input array, calling `.to_numpy().copy()` explicitly performs a deep copy which incurs massive unnecessary CPU and memory overhead for large astronomical datasets.
+**Action:** Avoid calling `.copy()` on numpy arrays obtained from Polars or Pandas when the consumer does not mutate the array. Use the read-only output natively.
