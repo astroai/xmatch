@@ -9,3 +9,7 @@
 ## 2026-07-07 - Endpoint typo suggestions on discover (LANDED)
 **Learning:** Unknown endpoint errors should suggest close matches via `difflib.get_close_matches` on a lowercased candidate pool, then map back to original casing for display.
 **Action:** Added `_suggest_endpoint` and wired it into `handle_discover` when `_resolve_discovery_endpoint` fails.
+
+## 2024-07-19 - Conditionally Rendering Optional Output Snippets
+**Learning:** Functions generating optional output strings for the CLI (like `_suggest` returning "Did you mean: ...?") can return empty strings if no matches are found. Carelessly passing these into formatting functions or string interpolations (e.g., `console.hint(f"  {suggestion}")` or `console.error(f"Error: {exc} {hint}")`) results in dangling whitespace or completely empty lines being rendered to the terminal.
+**Action:** Always verify if an optional string is truthy before rendering it to the terminal, and conditionally branch the formatting string or logging call to prevent dangling whitespace in the final output.
