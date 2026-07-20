@@ -33,3 +33,7 @@
 ## 2026-07-08 - Optimize pseudo-label generation (LANDED)
 **Learning:** A Python loop over `np.unique(left_idx)` with per-group boolean masks and `np.argmin` is O(N × unique_left) and dominates ML feature prep on large match tables.
 **Action:** Use `np.lexsort((X[:, 0], left_idx))` then `np.unique(..., return_index=True)` on the sorted left indices to pick the minimum-separation pair per primary in O(N log N).
+
+## 2026-07-20 - Fast best candidate selection using vectorized lexsort
+**Learning:** Selecting the "best" candidate (e.g. by highest reliability and lowest separation) for each primary source in astronomical matching using a python loop over unique source indices with internal boolean masks is O(N * num_primary_sources), which is effectively O(N^2) and very slow for large datasets.
+**Action:** Replace the loop with a fully vectorized approach using `np.lexsort` across all candidates simultaneously (sorting by group, then target metrics), followed by `np.unique(..., return_index=True)` on the primary group indices to extract the first/best index per group in O(N log N) time.
