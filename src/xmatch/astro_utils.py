@@ -130,17 +130,32 @@ def propagate_proper_motion(
     Proper motions are in mas/yr (``pm_ra_cosdec`` already includes cos(Dec)).
     Returns ``(ra_deg, dec_deg)``. NaN proper motions are treated as zero.
     """
+    ra = np.asarray(ra, dtype=float)
+    dec = np.asarray(dec, dtype=float)
+    pm_ra_cosdec = np.nan_to_num(np.asarray(pm_ra_cosdec, dtype=float))
+    pm_dec = np.nan_to_num(np.asarray(pm_dec, dtype=float))
+    source_epoch = np.asarray(source_epoch, dtype=float)
+    source_epoch = np.where(np.isnan(source_epoch), target_epoch, source_epoch)
+
+    torchsky_propagate = _load_torchsky_propagate_proper_motion()
+    if torchsky_propagate is not None:
+        moved_ra, moved_dec = torchsky_propagate(
+            ra,
+            dec,
+            pm_ra_cosdec,
+            pm_dec,
+            source_epoch_jyear=source_epoch,
+            target_epoch_jyear=target_epoch,
+        )
+        return _as_numpy(moved_ra), _as_numpy(moved_dec)
+
     import astropy.units as u
     from astropy.coordinates import SkyCoord
     from astropy.time import Time
 
-    pm_ra_cosdec = np.nan_to_num(np.asarray(pm_ra_cosdec, dtype=float))
-    pm_dec = np.nan_to_num(np.asarray(pm_dec, dtype=float))
-    source_epoch = np.where(np.isnan(source_epoch), target_epoch, source_epoch)
-
     coords = SkyCoord(
-        ra=np.asarray(ra, dtype=float) * u.deg,
-        dec=np.asarray(dec, dtype=float) * u.deg,
+        ra=ra * u.deg,
+        dec=dec * u.deg,
         pm_ra_cosdec=pm_ra_cosdec * u.mas / u.yr,
         pm_dec=pm_dec * u.mas / u.yr,
         obstime=Time(source_epoch, format="jyear", scale="tcb"),
@@ -148,6 +163,26 @@ def propagate_proper_motion(
     )
     moved = coords.apply_space_motion(new_obstime=Time(target_epoch, format="jyear", scale="tcb"))
     return moved.ra.deg, moved.dec.deg
+
+
+def _load_torchsky_propagate_proper_motion():
+    """Return Torchsky's tensor-native PM primitive when the extra is installed."""
+    try:
+        from torchsky.wcs import propagate_proper_motion as torchsky_propagate
+    except ImportError:
+        return None
+    return torchsky_propagate
+
+
+def _as_numpy(value) -> np.ndarray:
+    """Materialise a Torch tensor (or compatible array) as a NumPy float array."""
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "numpy"):
+        value = value.numpy()
+    return np.asarray(value, dtype=float)
 
 
 def coord_arrays(frame, ra_col: str, dec_col: str) -> Tuple[np.ndarray, np.ndarray]:

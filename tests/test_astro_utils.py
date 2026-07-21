@@ -1,9 +1,14 @@
+import astropy.units as u
 import numpy as np
 import polars as pl
 import pytest
+from astropy.coordinates import SkyCoord
+from astropy.time import Time
 
+from xmatch import astro_utils
 from xmatch.astro_utils import (
     find_coord_columns,
+    propagate_proper_motion,
     sky_extent,
     sky_extent_from_frame,
     validate_coordinates,
@@ -78,3 +83,63 @@ def test_sky_extent_lazy_accepts_lazyframe():
 def test_sky_extent_lazy_empty_frame():
     frame = pl.DataFrame({"ra": [], "dec": []}, schema={"ra": pl.Float64, "dec": pl.Float64})
     assert sky_extent_from_frame(frame, "ra", "dec") is None
+
+
+def test_proper_motion_prefers_torchsky_and_preserves_nan_semantics(monkeypatch):
+    """Torchsky receives the established finite-PM and finite-epoch contract."""
+    received = {}
+
+    def fake_torchsky(ra, dec, pmra, pmdec, *, source_epoch_jyear, target_epoch_jyear):
+        received.update(
+            ra=ra,
+            dec=dec,
+            pmra=pmra,
+            pmdec=pmdec,
+            source_epoch=source_epoch_jyear,
+            target_epoch=target_epoch_jyear,
+        )
+        return np.asarray(ra) + 0.25, np.asarray(dec) - 0.5
+
+    monkeypatch.setattr(
+        astro_utils, "_load_torchsky_propagate_proper_motion", lambda: fake_torchsky
+    )
+    ra, dec = propagate_proper_motion(
+        np.array([10.0, 20.0]),
+        np.array([89.999, -89.999]),
+        np.array([np.nan, 100.0]),
+        np.array([50.0, np.nan]),
+        np.array([np.nan, 2000.0]),
+        2025.0,
+    )
+
+    np.testing.assert_allclose(ra, [10.25, 20.25])
+    np.testing.assert_allclose(dec, [89.499, -90.499])
+    np.testing.assert_allclose(received["pmra"], [0.0, 100.0])
+    np.testing.assert_allclose(received["pmdec"], [50.0, 0.0])
+    np.testing.assert_allclose(received["source_epoch"], [2025.0, 2000.0])
+    assert received["target_epoch"] == 2025.0
+
+
+def test_proper_motion_astropy_fallback_matches_high_declination_reference(monkeypatch):
+    """The optional-backend fallback remains accurate near both celestial poles."""
+    monkeypatch.setattr(astro_utils, "_load_torchsky_propagate_proper_motion", lambda: None)
+    ra = np.array([359.9, 0.1])
+    dec = np.array([89.999, -89.999])
+    pmra = np.array([10_000.0, -10_000.0])
+    pmdec = np.array([-5_000.0, 5_000.0])
+    source_epoch = np.array([2000.0, 2000.0])
+
+    moved_ra, moved_dec = propagate_proper_motion(ra, dec, pmra, pmdec, source_epoch, 2100.0)
+    reference = SkyCoord(
+        ra=ra * u.deg,
+        dec=dec * u.deg,
+        pm_ra_cosdec=pmra * u.mas / u.yr,
+        pm_dec=pmdec * u.mas / u.yr,
+        obstime=Time(source_epoch, format="jyear", scale="tcb"),
+        frame="icrs",
+    ).apply_space_motion(new_obstime=Time(2100.0, format="jyear", scale="tcb"))
+
+    np.testing.assert_allclose(
+        ((moved_ra - reference.ra.deg + 180.0) % 360.0) - 180.0, 0.0, atol=1e-10
+    )
+    np.testing.assert_allclose(moved_dec, reference.dec.deg, atol=1e-10)
