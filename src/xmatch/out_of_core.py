@@ -27,6 +27,7 @@ _ZONE = f"{_INTERNAL_PREFIX}zone"
 _LEFT_SIGMA = f"{_INTERNAL_PREFIX}left_sigma"
 _RIGHT_SIGMA = f"{_INTERNAL_PREFIX}right_sigma"
 _RANK = f"{_INTERNAL_PREFIX}rank"
+_RESULT_GROUP = f"{_INTERNAL_PREFIX}result_group"
 _SUPPORTED_INPUT_SUFFIXES = {".csv", ".parquet"}
 _SUPPORTED_OUTPUT_SUFFIXES = {".csv", ".parquet"}
 _MIN_BUDGET = 1024
@@ -103,6 +104,7 @@ def match_to_output(
     src2: CatalogueSource,
     *,
     right_suffix: str = "_2",
+    source_tags: bool = False,
 ) -> dict[str, int]:
     """Partition, batch-match, canonicalize, and atomically stream one result."""
     if req.output_file is None:
@@ -160,10 +162,12 @@ def match_to_output(
             fragment = 0
             left_count = left_lf.select(pl.len()).collect(engine="streaming").item()
             right_count = right_lf.select(pl.len()).collect(engine="streaming").item()
-            if left_count and right_count:
+            if left_count and (right_count or req.spec.join_type in {"1or2", "all"}):
                 _stage(left_lf, left_dir, src1, _LEFT_ROW, n_dec, n_ra)
+            if right_count and (left_count or req.spec.join_type in {"1or2", "all"}):
                 _stage(right_lf, right_dir, src2, _RIGHT_ROW, n_dec, n_ra)
 
+            if left_count and right_count:
                 left_zones = _zone_paths(left_dir)
                 right_zones = _zone_paths(right_dir)
                 halo_bands = math.ceil((max_halo_arcsec / 3600.0) / (180.0 / n_dec))
@@ -208,10 +212,24 @@ def match_to_output(
                     right_suffix,
                 )
 
-            result_lf = _canonical_result(
-                pl.scan_parquet(candidates_dir / "*.parquet"),
-                effective_spec,
+            canonical = _canonical_pairs(
+                pl.scan_parquet(candidates_dir / "*.parquet"), effective_spec
             )
+            if effective_spec.join_type in {"1or2", "all"}:
+                canonical_path = root / "canonical.parquet"
+                canonical.sink_parquet(canonical_path, engine="streaming")
+                result_lf = _outer_result(
+                    pl.scan_parquet(canonical_path),
+                    left_lf,
+                    right_lf,
+                    left_dir,
+                    right_dir,
+                    root,
+                    right_suffix,
+                    source_tags=source_tags,
+                )
+            else:
+                result_lf = _public_result(canonical)
             io_utils.write_frame(result_lf, temp_out)
             os.replace(temp_out, out)
     finally:
@@ -231,8 +249,10 @@ def _validate_semantics(req: MatchRequest, src1: CatalogueSource, src2: Catalogu
         raise CrossMatchError(
             "Bounded-memory ID joins are not part of the first local spill tranche."
         )
-    if req.spec.join_type != "1and2":
-        raise CrossMatchError("Bounded-memory matching currently supports join_type='1and2' only.")
+    if req.spec.join_type not in {"1and2", "1or2", "all"}:
+        raise CrossMatchError(
+            "Bounded-memory matching currently supports join_type='1and2' or '1or2' only."
+        )
     if req.spec.matcher not in {"sky", "skyerr"}:
         raise CrossMatchError(
             "Bounded-memory matching currently supports matcher='sky' and 'skyerr' only."
@@ -417,10 +437,10 @@ def _stage(
     )
 
 
-def _zone_paths(root: Path) -> dict[int, Path]:
+def _zone_paths(root: Path, zone_column: str = _ZONE) -> dict[int, Path]:
     return {
         int(path.name.split("=", 1)[1]): path
-        for path in sorted(root.glob(f"{_ZONE}=*"))
+        for path in sorted(root.glob(f"{zone_column}=*"))
         if path.is_dir()
     }
 
@@ -580,13 +600,129 @@ def _write_empty_candidate(
     empty.with_columns(pl.lit(None, dtype=pl.Float64).alias(_RANK)).write_parquet(output)
 
 
-def _canonical_result(lf: pl.LazyFrame, spec: MatchSpec) -> pl.LazyFrame:
+def _canonical_pairs(lf: pl.LazyFrame, spec: MatchSpec) -> pl.LazyFrame:
     pair_order = [_LEFT_ROW, _RIGHT_ROW, _RANK, "sep_arcsec"]
     lf = lf.sort(pair_order).unique(subset=[_LEFT_ROW, _RIGHT_ROW], keep="first")
     if spec.find == "best":
         lf = lf.sort([_LEFT_ROW, _RANK, "sep_arcsec", _RIGHT_ROW]).unique(
             subset=[_LEFT_ROW], keep="first"
         )
-    lf = lf.sort([_LEFT_ROW, _RIGHT_ROW])
+    return lf.sort([_LEFT_ROW, _RIGHT_ROW])
+
+
+def _public_result(lf: pl.LazyFrame) -> pl.LazyFrame:
     internal = [name for name in lf.collect_schema().names() if name.startswith(_INTERNAL_PREFIX)]
     return lf.drop(internal)
+
+
+def _outer_result(
+    matched: pl.LazyFrame,
+    left_lf: pl.LazyFrame,
+    right_lf: pl.LazyFrame,
+    left_dir: Path,
+    right_dir: Path,
+    root: Path,
+    right_suffix: str,
+    *,
+    source_tags: bool,
+) -> pl.LazyFrame:
+    """Append deterministic source-order islands without global row-ID state."""
+    right_zone = f"{_ZONE}{right_suffix}"
+    left_ids_dir = root / "matched-left"
+    right_ids_dir = root / "matched-right"
+    _stage_matched_ids(matched, left_ids_dir, _LEFT_ROW, _ZONE)
+    _stage_matched_ids(matched, right_ids_dir, _RIGHT_ROW, right_zone)
+
+    left_only_dir = root / "left-only"
+    right_only_dir = root / "right-only"
+    left_only_dir.mkdir()
+    right_only_dir.mkdir()
+    _write_unmatched(left_dir, left_ids_dir, left_only_dir, _LEFT_ROW)
+
+    left_columns = set(left_lf.collect_schema().names()) | {_LEFT_ROW, _ZONE}
+    right_rename = {name: f"{name}{right_suffix}" for name in left_columns}
+    _write_unmatched(
+        right_dir,
+        right_ids_dir,
+        right_only_dir,
+        _RIGHT_ROW,
+        matched_zone_column=right_zone,
+        rename=right_rename,
+    )
+
+    empty_left = (
+        left_lf.with_row_index(_LEFT_ROW)
+        .with_columns(pl.lit(None, dtype=pl.Int64).alias(_ZONE))
+        .head(0)
+    )
+    empty_right = (
+        right_lf.with_row_index(_RIGHT_ROW)
+        .with_columns(pl.lit(None, dtype=pl.Int64).alias(_ZONE))
+        .head(0)
+    )
+    overlaps = set(empty_right.collect_schema().names()) & set(right_rename)
+    empty_right = empty_right.rename({name: right_rename[name] for name in overlaps})
+    parts = [
+        matched.with_columns(pl.lit(0, dtype=pl.Int8).alias(_RESULT_GROUP)),
+        _scan_or_empty(left_only_dir, empty_left).with_columns(
+            pl.lit(1, dtype=pl.Int8).alias(_RESULT_GROUP)
+        ),
+        _scan_or_empty(right_only_dir, empty_right).with_columns(
+            pl.lit(2, dtype=pl.Int8).alias(_RESULT_GROUP)
+        ),
+    ]
+    result = pl.concat(parts, how="diagonal_relaxed")
+    if source_tags:
+        result = result.with_columns(
+            pl.when(pl.col(_RESULT_GROUP) == 0)
+            .then(pl.lit("1+2"))
+            .when(pl.col(_RESULT_GROUP) == 1)
+            .then(pl.lit("1"))
+            .otherwise(pl.lit("2"))
+            .alias("_src_cats")
+        )
+    return _public_result(result.sort([_RESULT_GROUP, _LEFT_ROW, _RIGHT_ROW]))
+
+
+def _stage_matched_ids(
+    matched: pl.LazyFrame,
+    target: Path,
+    row_column: str,
+    zone_column: str,
+) -> None:
+    target.mkdir()
+    matched.select(row_column, zone_column).sink_parquet(
+        pl.PartitionBy(target, key=zone_column, include_key=True),
+        mkdir=True,
+        maintain_order=True,
+        engine="streaming",
+    )
+
+
+def _write_unmatched(
+    source_dir: Path,
+    matched_ids_dir: Path,
+    target: Path,
+    row_column: str,
+    *,
+    matched_zone_column: str = _ZONE,
+    rename: Optional[dict[str, str]] = None,
+) -> None:
+    matched_zones = _zone_paths(matched_ids_dir, matched_zone_column)
+    for zone, source_path in _zone_paths(source_dir).items():
+        source = _scan_partition(source_path)
+        matched_path = matched_zones.get(zone)
+        if matched_path is not None:
+            # ponytail: the anti-join holds IDs for one sky zone; if a single zone
+            # exceeds RAM, subpartition these markers by original row-ID range.
+            matched_ids = _scan_partition(matched_path).select(row_column).unique()
+            source = source.join(matched_ids, on=row_column, how="anti")
+        if rename:
+            overlaps = set(source.collect_schema().names()) & set(rename)
+            source = source.rename({name: rename[name] for name in overlaps})
+        source.sink_parquet(target / f"{zone:08d}.parquet", engine="streaming")
+
+
+def _scan_or_empty(root: Path, empty: pl.LazyFrame) -> pl.LazyFrame:
+    paths = sorted(root.glob("*.parquet"))
+    return pl.scan_parquet(paths) if paths else empty

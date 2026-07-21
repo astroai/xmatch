@@ -66,6 +66,160 @@ def test_forced_spill_matches_in_memory_and_cleans_scratch(tmp_path):
     )
 
 
+def test_forced_spill_outer_matches_eager_with_unmatched_islands(tmp_path):
+    padding = "o" * 600
+    left = pl.DataFrame(
+        {
+            "id": [0, 1, 2],
+            "ra": [10.0, 20.0, 30.0],
+            "dec": [0.00002, 1.0, -0.00002],
+            "left_value": ["matched", "left-only", "boundary"],
+            "pad": [padding] * 3,
+        }
+    )
+    right = pl.DataFrame(
+        {
+            "id": [10, 11, 12],
+            "ra": [10.00001, 40.0, 30.00001],
+            "dec": [-0.00002, 2.0, 0.00002],
+            "right_value": ["matched", "right-only", "boundary"],
+            "pad": [padding] * 3,
+        }
+    )
+    p1, p2 = tmp_path / "outer-left.parquet", tmp_path / "outer-right.csv"
+    left.write_parquet(p1)
+    right.write_csv(p2)
+    cm = CrossMatch()
+    expected = cm.crossmatch(p1, p2, radius_arcsec=1.0, join_type="1or2", engine="fast")
+    output = tmp_path / "outer.parquet"
+    scratch = tmp_path / "scratch"
+
+    cm.crossmatch(
+        p1,
+        p2,
+        output_file=output,
+        radius_arcsec=1.0,
+        join_type="1or2",
+        engine="fast",
+        memory_budget_bytes=1024,
+        scratch_dir=scratch,
+        partition_order=2,
+    )
+
+    actual = pl.read_parquet(output)
+    assert actual.equals(expected)
+    assert actual["left_value"].to_list() == ["matched", "boundary", "left-only", None]
+    assert actual["right_value"].to_list() == ["matched", "boundary", None, "right-only"]
+    assert list(scratch.iterdir()) == []
+    assert cm.last_spill_stats is not None
+    assert cm.last_spill_stats["peak_proxy_bytes"] <= max(
+        cm.last_spill_stats["memory_budget_bytes"],
+        cm.last_spill_stats["minimum_batch_proxy_bytes"],
+    )
+    second = tmp_path / "outer-order4.parquet"
+    cm.crossmatch(
+        p1,
+        p2,
+        output_file=second,
+        radius_arcsec=1.0,
+        join_type="1or2",
+        engine="fast",
+        memory_budget_bytes=1024,
+        partition_order=4,
+    )
+    assert (
+        hashlib.sha256(output.read_bytes()).digest() == hashlib.sha256(second.read_bytes()).digest()
+    )
+
+
+def test_forced_spill_two_catalogue_union_matches_eager_tags(tmp_path):
+    p1, p2 = _catalogues(tmp_path)
+    right = pl.read_parquet(p2).with_columns(
+        pl.when(pl.col("id") == 23).then(999.0).otherwise(pl.col("ra")).alias("ra")
+    )
+    right.write_parquet(p2)
+    cm = CrossMatch()
+    expected = cm.union_match([p1, p2], radius_arcsec=1.0, engine="fast")
+    output = tmp_path / "union.parquet"
+
+    result = cm.union_match(
+        [p1, p2],
+        output_file=output,
+        radius_arcsec=1.0,
+        engine="fast",
+        memory_budget_bytes=4096,
+        partition_order=2,
+    )
+
+    assert result is None
+    assert pl.read_parquet(output).equals(expected)
+    assert set(expected["_src_cats"]) == {"1+2", "1", "2"}
+
+
+@pytest.mark.parametrize("empty_side", ["left", "right"])
+def test_forced_spill_outer_preserves_nonempty_side(tmp_path, empty_side):
+    padding = "e" * 1200
+    empty = pl.DataFrame(
+        schema={"id": pl.Int64, "ra": pl.Float64, "dec": pl.Float64, "pad": pl.String}
+    )
+    populated = pl.DataFrame(
+        {"id": [1, 2], "ra": [10.0, 20.0], "dec": [0.0, 1.0], "pad": [padding] * 2}
+    )
+    left, right = (empty, populated) if empty_side == "left" else (populated, empty)
+    p1, p2 = tmp_path / "left.parquet", tmp_path / "right.parquet"
+    left.write_parquet(p1)
+    right.write_parquet(p2)
+    expected = CrossMatch().crossmatch(p1, p2, radius_arcsec=1.0, join_type="1or2", engine="fast")
+    output = tmp_path / "empty-side.parquet"
+
+    CrossMatch().crossmatch(
+        p1,
+        p2,
+        output_file=output,
+        radius_arcsec=1.0,
+        join_type="1or2",
+        engine="fast",
+        memory_budget_bytes=1024,
+        partition_order=2,
+    )
+
+    assert pl.read_parquet(output).equals(expected)
+
+
+def test_forced_spill_outer_find_all_matches_eager(tmp_path):
+    padding = "a" * 600
+    left = pl.DataFrame({"id": [1, 2], "ra": [10.0, 20.0], "dec": [0.0, 0.0], "pad": [padding] * 2})
+    right = pl.DataFrame(
+        {
+            "id": [10, 11, 12],
+            "ra": [10.00001, 9.99999, 30.0],
+            "dec": [0.0, 0.0, 0.0],
+            "pad": [padding] * 3,
+        }
+    )
+    p1, p2 = tmp_path / "all-left.csv", tmp_path / "all-right.csv"
+    left.write_csv(p1)
+    right.write_csv(p2)
+    expected = CrossMatch().crossmatch(
+        p1, p2, radius_arcsec=1.0, find="all", join_type="1or2", engine="fast"
+    )
+    output = tmp_path / "all-outer.parquet"
+
+    CrossMatch().crossmatch(
+        p1,
+        p2,
+        output_file=output,
+        radius_arcsec=1.0,
+        find="all",
+        join_type="1or2",
+        engine="fast",
+        memory_budget_bytes=1024,
+        partition_order=2,
+    )
+
+    assert pl.read_parquet(output).equals(expected)
+
+
 @pytest.mark.parametrize("find", ["best", "all"])
 def test_spill_is_deterministic_with_equal_distance_ties(tmp_path, find):
     padding = "z" * 600
@@ -149,7 +303,8 @@ def test_uncertainty_halo_matches_exact_astropy_path(tmp_path):
     assert pl.read_parquet(output).sort("id").equals(expected)
 
 
-def test_spill_failure_is_atomic_and_cleans_scratch(tmp_path, monkeypatch):
+@pytest.mark.parametrize("join_type", ["1and2", "1or2"])
+def test_spill_failure_is_atomic_and_cleans_scratch(tmp_path, monkeypatch, join_type):
     p1, p2 = _catalogues(tmp_path)
     output = tmp_path / "matches.parquet"
     output.write_bytes(b"original")
@@ -165,6 +320,7 @@ def test_spill_failure_is_atomic_and_cleans_scratch(tmp_path, monkeypatch):
             p2,
             output_file=output,
             radius_arcsec=1.0,
+            join_type=join_type,
             engine="fast",
             memory_budget_bytes=4096,
             scratch_dir=scratch,

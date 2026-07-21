@@ -191,12 +191,14 @@ for command-specific options.
 (`--radius` applies only to `sky`). `skyellipse` currently behaves like `skyerr`
 (correlation is not yet modelled).
 
-`--memory-budget-bytes` enables the first bounded-memory tranche when the
-projected inputs exceed the budget. It currently accepts two local CSV/Parquet
-catalogues, `sky` or `skyerr`, inner output, and Parquet/CSV output. Scratch
-partitions are removed after success or failure and the final file is replaced
-atomically. Large FITS, N-way/union, outer/anti, probabilistic, proper-motion,
-and advanced-filter requests fail explicitly instead of silently collecting.
+`--memory-budget-bytes` enables bounded-memory matching when the projected
+inputs exceed the budget. It currently accepts two local CSV/Parquet catalogues,
+`sky` or `skyerr`, inner or full-outer (`--join 1or2`) output, and Parquet/CSV
+output. A two-catalogue `--union` uses the same spill path and adds `_src_cats`;
+N-way union is not yet supported. Scratch partitions are removed after success
+or failure and the final file is replaced atomically. Large FITS, anti/one-sided
+outer joins, probabilistic, proper-motion, and advanced-filter requests fail
+explicitly instead of silently collecting.
 `--partition-order auto` is normally appropriate; set an integer only for
 reproducible partition-layout experiments.
 

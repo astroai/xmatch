@@ -716,10 +716,29 @@ class CrossMatch:
             **params,
         )
         if req.memory_budget_bytes is not None:
-            raise CrossMatchError(
-                "Bounded-memory matching currently supports pairwise local CSV/Parquet only; "
-                "N-way and union matching are not yet supported."
-            )
+            if union_match and len(catalogues) == 2:
+                from .out_of_core import match_to_output, preflight_request, spill_required
+
+                self.last_spill_stats = None
+                preflight_request(req)
+                left = self.resolve_source(req.cat1, req.side1.as_dict())
+                right = self.resolve_source(req.cat2, req.side2.as_dict())
+                if left.is_local and right.is_local and spill_required(req, left, right):
+                    spill_req = replace(req, output_file=output_file, lazy=False)
+                    self.last_spill_stats = match_to_output(
+                        spill_req, left, right, source_tags=True
+                    )
+                    return None
+            elif len(catalogues) > 2:
+                raise CrossMatchError(
+                    "Bounded-memory union matching currently supports exactly two local "
+                    "CSV/Parquet catalogues; N-way spill matching is not yet supported."
+                )
+            else:
+                raise CrossMatchError(
+                    "Bounded-memory matching currently supports pairwise crossmatch or "
+                    "two-catalogue union output only."
+                )
 
         # Resolve ALL sources up front.
         sources: List[CatalogueSource] = []
