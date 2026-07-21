@@ -1,3 +1,5 @@
+import sys
+from types import SimpleNamespace
 from unittest import mock
 
 import polars as pl
@@ -31,6 +33,47 @@ def test_roundtrip_fits(tmp_path, sample):
     back = io_utils.scan_frame(path).collect()
     assert set(back.columns) == {"id", "ra", "dec"}
     assert back.height == 2
+
+
+def test_fits_read_prefers_torchfits_polars(tmp_path, sample, monkeypatch):
+    """The optional Torchfits backend feeds its Polars frame through unchanged."""
+    path = tmp_path / "x.fits"
+    fake_table = mock.Mock()
+    fake_table.read_polars.return_value = SimpleNamespace(frame=sample)
+    monkeypatch.setitem(sys.modules, "torchfits", SimpleNamespace(table=fake_table))
+
+    back = io_utils.scan_frame(path).collect()
+
+    fake_table.read_polars.assert_called_once_with(str(path), hdu=1)
+    assert back.equals(sample)
+
+
+def test_roundtrip_fits_with_torchfits_when_installed(tmp_path, sample):
+    """Exercise the real optional backend in environments that provide it."""
+    torchfits = pytest.importorskip("torchfits")
+    path = tmp_path / "x.fits"
+    io_utils.write_frame(sample, path)
+    with mock.patch.object(
+        torchfits.table, "read_polars", wraps=torchfits.table.read_polars
+    ) as read:
+        back = io_utils.scan_frame(path).collect()
+
+    read.assert_called_once_with(str(path), hdu=1)
+    assert back.sort("id").equals(sample.sort("id"))
+
+
+def test_fits_read_falls_back_to_astropy_when_torchfits_rejects(tmp_path, sample, monkeypatch):
+    """Unsupported Torchfits input retains the established Astropy path."""
+    path = tmp_path / "x.fits"
+    io_utils.write_frame(sample, path)
+    fake_table = mock.Mock()
+    fake_table.read_polars.side_effect = RuntimeError("unsupported FITS variant")
+    monkeypatch.setitem(sys.modules, "torchfits", SimpleNamespace(table=fake_table))
+
+    back = io_utils.scan_frame(path).collect()
+
+    assert fake_table.read_polars.call_count == 2
+    assert back.sort("id").equals(sample.sort("id"))
 
 
 def test_frame_columns_lazy_no_collect(tmp_path, sample):

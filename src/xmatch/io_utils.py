@@ -146,9 +146,28 @@ def polars_to_astropy(frame: FrameLike):
 
 
 def _read_fits(path: Path) -> pl.DataFrame:
+    """Read a local FITS table with Torchfits, falling back to Astropy.
+
+    Torchfits keeps the local catalogue path Arrow/Polars-native.  Astropy
+    remains the compatibility fallback for FITS variants not yet supported by
+    Torchfits and when the optional ``torchfits`` extra is not installed.
+    """
+    last_err = None
+    try:
+        from torchfits import table as torchfits_table
+    except ImportError:
+        torchfits_table = None
+
+    if torchfits_table is not None:
+        for hdu in (1, 0):
+            try:
+                return torchfits_table.read_polars(str(path), hdu=hdu).frame
+            except Exception as exc:  # try next HDU, then Astropy fallback
+                last_err = exc
+        logger.debug("Torchfits could not read %s (%s); falling back to Astropy.", path, last_err)
+
     from astropy.table import Table
 
-    last_err = None
     for hdu in (1, 0):
         try:
             table = Table.read(path, hdu=hdu)
@@ -162,7 +181,8 @@ def scan_frame(path: Union[str, Path]) -> pl.LazyFrame:
     """Return a ``LazyFrame`` for a local catalogue file.
 
     Parquet and CSV are scanned lazily (projection/predicate push-down). FITS
-    reads are inherently eager through astropy and then exposed as a lazy frame.
+    reads are eager and then exposed as a lazy frame; they use optional
+    Torchfits first and Astropy as a compatibility fallback.
     """
     p = Path(path)
     suffix = p.suffix.lower()
