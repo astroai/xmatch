@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added — Versioned Association Contract
 
+* **`xmatch.association.member.equivalence.release.v1`**: atomic,
+  content-addressed, bijective crosswalks bind explicit member-identity
+  assertions to direct parent/current association releases. Component
+  construction and delta verification can consume the artifact to preserve
+  continuity across intentional input-release namespace changes; Xmatch never
+  infers equivalence from bare IDs.
 * **`xmatch.association.component.delta.release.v1`**: deterministic,
   content-addressed delta artifacts bind explicit parent/current association
   and component release namespaces and classify exact membership overlap as

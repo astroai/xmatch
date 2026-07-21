@@ -127,6 +127,48 @@ Verification rejects byte-level tampering. It streams the file but retains one
 global membership set so it can prove that every namespaced member belongs to
 at most one component.
 
+## Intentional input-release namespace changes
+
+`xmatch.association.member.equivalence.release.v1` records reviewed identity
+assertions when a catalogue is republished under a different
+`input_release_id`. Its `equivalences.jsonl` rows map one fully namespaced
+parent member to one fully namespaced current member; the manifest binds the
+direct parent/current association releases, row count, and canonical byte
+checksum. Both sides must be unique, so catalogue splits, merges, or uncertain
+matches cannot be mislabeled as identity equivalence. Xmatch never infers these
+rows from equal bare IDs.
+
+```python
+from xmatch.association import (
+    AssociationComponentMember,
+    AssociationMemberEquivalence,
+    write_association_member_equivalence_release,
+)
+
+equivalences = [
+    AssociationMemberEquivalence(
+        parent_association_release_id,
+        current_association_release_id,
+        AssociationComponentMember("catalog:cosmos:dr1", "source:101"),
+        AssociationComponentMember("catalog:cosmos:dr2", "object:000101"),
+    )
+]
+equivalences.sort(key=lambda item: item.equivalence_id)
+write_association_member_equivalence_release(
+    equivalences,
+    "releases/cosmos-v1",
+    "releases/cosmos-v2",
+    "member-equivalences/cosmos-v1-to-v2",
+)
+```
+
+The writer requires direct association-release lineage, validates both member
+namespaces against endpoint provenance, rejects non-bijective crosswalks, and
+publishes atomically. Verification can rebind the artifact to both association
+release directories. Physical identity remains a scientific input that the
+producer must justify and review; content addressing proves which assertions
+were used, not that the assertions are astrophysically true.
+
 ## Deterministic construction and release deltas
 
 `construct_association_components` builds connected components directly from a
@@ -134,7 +176,9 @@ verified association release. Callers must supply both endpoint input-release
 IDs and the exact `AssociationDecision` values to include; the constructor does
 not infer catalogue namespaces or acceptance policy. If a verified parent
 component release is supplied, exact namespaced-member overlap becomes each
-new component's declared parent lineage.
+new component's declared parent lineage. When input-release namespaces changed,
+pass the reviewed `member_equivalence_directory` to construction, delta
+publication, and endpoint-aware delta verification.
 
 ```python
 from xmatch.association import (
@@ -150,25 +194,29 @@ components = construct_association_components(
     candidate_input_release_id="catalog:specz:dr1",
     included_decisions=(AssociationDecision.SELECTED,),
     parent_component_directory="components/cosmos-v1",
+    member_equivalence_directory="member-equivalences/cosmos-v1-to-v2",
 )
 
 delta_manifest = write_association_component_delta_release(
     "components/cosmos-v1",
     "components/cosmos-v2",
     "component-deltas/cosmos-v1-to-v2",
+    member_equivalence_directory="member-equivalences/cosmos-v1-to-v2",
 )
 verified = verify_association_component_delta_release(
     "component-deltas/cosmos-v1-to-v2",
     parent_component_directory="components/cosmos-v1",
     current_component_directory="components/cosmos-v2",
+    member_equivalence_directory="member-equivalences/cosmos-v1-to-v2",
 )
 ```
 
 `xmatch.association.component.delta.release.v1` contains canonical
 `deltas.jsonl` rows plus a content-addressed `manifest.json`. Every row names
 the parent and current association-release and component-release endpoints.
-Classification uses the exact overlap graph: zero-degree current or parent
-components are `created` or `retired`, isolated one-to-one edges are
+Classification uses exact namespaced overlap plus any supplied, verified
+member-equivalence crosswalk: zero-degree current or parent components are
+`created` or `retired`, isolated one-to-one edges are
 `continued`, and many-to-one or one-to-many edges are `merged` or `split`.
 Many-to-many changes emit both merge and split events. Publication rejects
 declared lineage that differs from exact membership overlap. Verification

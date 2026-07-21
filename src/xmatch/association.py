@@ -20,11 +20,16 @@ ASSOCIATION_COMPONENT_MEMBERSHIP_SCHEMA_VERSION = "xmatch.association.component.
 ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION = "xmatch.association.component.release.v1"
 ASSOCIATION_COMPONENT_DELTA_SCHEMA_VERSION = "xmatch.association.component.delta.v1"
 ASSOCIATION_COMPONENT_DELTA_RELEASE_SCHEMA_VERSION = "xmatch.association.component.delta.release.v1"
+ASSOCIATION_MEMBER_EQUIVALENCE_SCHEMA_VERSION = "xmatch.association.member.equivalence.v1"
+ASSOCIATION_MEMBER_EQUIVALENCE_RELEASE_SCHEMA_VERSION = (
+    "xmatch.association.member.equivalence.release.v1"
+)
 
 _RELEASE_MANIFEST = "manifest.json"
 _RELEASE_RECORDS = "associations.jsonl"
 _COMPONENT_MEMBERSHIPS = "memberships.jsonl"
 _COMPONENT_DELTAS = "deltas.jsonl"
+_MEMBER_EQUIVALENCES = "equivalences.jsonl"
 
 
 class ScoreSemantics(str, Enum):
@@ -594,6 +599,471 @@ class AssociationComponentMember:
             "input_release_id": self.input_release_id,
             "member_id": self.member_id,
         }
+
+
+def _member_equivalence_id(
+    *,
+    parent_association_release_id: str,
+    current_association_release_id: str,
+    parent_member: AssociationComponentMember,
+    current_member: AssociationComponentMember,
+) -> str:
+    identity = {
+        "schema_version": ASSOCIATION_MEMBER_EQUIVALENCE_SCHEMA_VERSION,
+        "parent_association_release_id": parent_association_release_id,
+        "current_association_release_id": current_association_release_id,
+        "parent_member": parent_member.to_dict(),
+        "current_member": current_member.to_dict(),
+    }
+    return (
+        f"{ASSOCIATION_MEMBER_EQUIVALENCE_SCHEMA_VERSION}:"
+        f"{hashlib.sha256(_canonical_json(identity)).hexdigest()}"
+    )
+
+
+@dataclass(frozen=True)
+class AssociationMemberEquivalence:
+    """A reviewed one-to-one member identity across input-release namespaces."""
+
+    parent_association_release_id: str
+    current_association_release_id: str
+    parent_member: AssociationComponentMember
+    current_member: AssociationComponentMember
+
+    def __post_init__(self) -> None:
+        _content_id(
+            self.parent_association_release_id,
+            ASSOCIATION_RELEASE_SCHEMA_VERSION,
+            "parent_association_release_id",
+        )
+        _content_id(
+            self.current_association_release_id,
+            ASSOCIATION_RELEASE_SCHEMA_VERSION,
+            "current_association_release_id",
+        )
+        if not isinstance(self.parent_member, AssociationComponentMember):
+            raise ValueError("parent_member must be AssociationComponentMember")
+        if not isinstance(self.current_member, AssociationComponentMember):
+            raise ValueError("current_member must be AssociationComponentMember")
+        if self.parent_member.input_release_id == self.current_member.input_release_id:
+            raise ValueError("member equivalence requires an input-release namespace change")
+
+    @property
+    def equivalence_id(self) -> str:
+        return _member_equivalence_id(
+            parent_association_release_id=self.parent_association_release_id,
+            current_association_release_id=self.current_association_release_id,
+            parent_member=self.parent_member,
+            current_member=self.current_member,
+        )
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationMemberEquivalence":
+        _exact_keys(
+            data,
+            {
+                "schema_version",
+                "equivalence_id",
+                "parent_association_release_id",
+                "current_association_release_id",
+                "parent_member",
+                "current_member",
+            },
+            "association member equivalence",
+        )
+        if data["schema_version"] != ASSOCIATION_MEMBER_EQUIVALENCE_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version must be {ASSOCIATION_MEMBER_EQUIVALENCE_SCHEMA_VERSION!r}"
+            )
+        if not isinstance(data["parent_member"], Mapping) or not isinstance(
+            data["current_member"], Mapping
+        ):
+            raise ValueError("parent_member and current_member must be objects")
+        equivalence = cls(
+            parent_association_release_id=data["parent_association_release_id"],
+            current_association_release_id=data["current_association_release_id"],
+            parent_member=AssociationComponentMember.from_mapping(data["parent_member"]),
+            current_member=AssociationComponentMember.from_mapping(data["current_member"]),
+        )
+        if data["equivalence_id"] != equivalence.equivalence_id:
+            raise ValueError("equivalence_id does not match the member equivalence identity")
+        return equivalence
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": ASSOCIATION_MEMBER_EQUIVALENCE_SCHEMA_VERSION,
+            "equivalence_id": self.equivalence_id,
+            "parent_association_release_id": self.parent_association_release_id,
+            "current_association_release_id": self.current_association_release_id,
+            "parent_member": self.parent_member.to_dict(),
+            "current_member": self.current_member.to_dict(),
+        }
+
+
+def _member_equivalence_release_identity(
+    *,
+    parent_association_release_id: str,
+    current_association_release_id: str,
+    equivalence_count: int,
+    equivalences_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": ASSOCIATION_MEMBER_EQUIVALENCE_RELEASE_SCHEMA_VERSION,
+        "equivalence_schema_version": ASSOCIATION_MEMBER_EQUIVALENCE_SCHEMA_VERSION,
+        "parent_association_release_id": parent_association_release_id,
+        "current_association_release_id": current_association_release_id,
+        "equivalence_count": equivalence_count,
+        "equivalences_sha256": equivalences_sha256,
+    }
+
+
+def _member_equivalence_release_id(**identity: Any) -> str:
+    digest = hashlib.sha256(
+        _canonical_json(_member_equivalence_release_identity(**identity))
+    ).hexdigest()
+    return f"{ASSOCIATION_MEMBER_EQUIVALENCE_RELEASE_SCHEMA_VERSION}:{digest}"
+
+
+@dataclass(frozen=True)
+class AssociationMemberEquivalenceReleaseManifest:
+    """Content identity for a reviewed, bijective member crosswalk."""
+
+    equivalence_release_id: str
+    parent_association_release_id: str
+    current_association_release_id: str
+    equivalence_count: int
+    equivalences_sha256: str
+    equivalence_schema_version: str = ASSOCIATION_MEMBER_EQUIVALENCE_SCHEMA_VERSION
+    equivalences_path: str = _MEMBER_EQUIVALENCES
+
+    def __post_init__(self) -> None:
+        if self.equivalence_schema_version != ASSOCIATION_MEMBER_EQUIVALENCE_SCHEMA_VERSION:
+            raise ValueError(
+                "equivalence_schema_version must be "
+                f"{ASSOCIATION_MEMBER_EQUIVALENCE_SCHEMA_VERSION!r}"
+            )
+        if self.equivalences_path != _MEMBER_EQUIVALENCES:
+            raise ValueError(f"equivalences_path must be {_MEMBER_EQUIVALENCES!r}")
+        _content_id(
+            self.parent_association_release_id,
+            ASSOCIATION_RELEASE_SCHEMA_VERSION,
+            "parent_association_release_id",
+        )
+        _content_id(
+            self.current_association_release_id,
+            ASSOCIATION_RELEASE_SCHEMA_VERSION,
+            "current_association_release_id",
+        )
+        if (
+            isinstance(self.equivalence_count, bool)
+            or not isinstance(self.equivalence_count, int)
+            or self.equivalence_count < 0
+        ):
+            raise ValueError("equivalence_count must be a non-negative integer")
+        _sha256(self.equivalences_sha256, "equivalences_sha256")
+        expected = _member_equivalence_release_id(
+            parent_association_release_id=self.parent_association_release_id,
+            current_association_release_id=self.current_association_release_id,
+            equivalence_count=self.equivalence_count,
+            equivalences_sha256=self.equivalences_sha256,
+        )
+        if self.equivalence_release_id != expected:
+            raise ValueError(
+                "equivalence_release_id does not match the member equivalence release identity"
+            )
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationMemberEquivalenceReleaseManifest":
+        _exact_keys(
+            data,
+            {
+                "schema_version",
+                "equivalence_release_id",
+                "equivalence_schema_version",
+                "equivalences_path",
+                "parent_association_release_id",
+                "current_association_release_id",
+                "equivalence_count",
+                "equivalences_sha256",
+            },
+            "association member equivalence release manifest",
+        )
+        if data["schema_version"] != ASSOCIATION_MEMBER_EQUIVALENCE_RELEASE_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version must be {ASSOCIATION_MEMBER_EQUIVALENCE_RELEASE_SCHEMA_VERSION!r}"
+            )
+        return cls(
+            equivalence_release_id=data["equivalence_release_id"],
+            parent_association_release_id=data["parent_association_release_id"],
+            current_association_release_id=data["current_association_release_id"],
+            equivalence_count=data["equivalence_count"],
+            equivalences_sha256=data["equivalences_sha256"],
+            equivalence_schema_version=data["equivalence_schema_version"],
+            equivalences_path=data["equivalences_path"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": ASSOCIATION_MEMBER_EQUIVALENCE_RELEASE_SCHEMA_VERSION,
+            "equivalence_release_id": self.equivalence_release_id,
+            "equivalence_schema_version": self.equivalence_schema_version,
+            "equivalences_path": self.equivalences_path,
+            "parent_association_release_id": self.parent_association_release_id,
+            "current_association_release_id": self.current_association_release_id,
+            "equivalence_count": self.equivalence_count,
+            "equivalences_sha256": self.equivalences_sha256,
+        }
+
+
+def load_association_member_equivalence_release_manifest(
+    directory: str | os.PathLike[str],
+) -> AssociationMemberEquivalenceReleaseManifest:
+    """Load an equivalence manifest without reading its crosswalk rows."""
+    path = Path(directory) / _RELEASE_MANIFEST
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read association member equivalence manifest: {path}") from exc
+    if not isinstance(data, Mapping):
+        raise ValueError("association member equivalence release manifest must be an object")
+    return AssociationMemberEquivalenceReleaseManifest.from_mapping(data)
+
+
+def _validated_member_equivalences(
+    directory: Path,
+    manifest: AssociationMemberEquivalenceReleaseManifest,
+) -> Iterator[AssociationMemberEquivalence]:
+    path = directory / manifest.equivalences_path
+    digest = hashlib.sha256()
+    previous_id: str | None = None
+    count = 0
+    # ponytail: bijection validation is O(rows) memory; use an external unique
+    # index when crosswalk releases outgrow one host.
+    parent_members: set[AssociationComponentMember] = set()
+    current_members: set[AssociationComponentMember] = set()
+    try:
+        handle = path.open("rb")
+    except OSError as exc:
+        raise ValueError(f"cannot read association member equivalences: {path}") from exc
+    with handle:
+        for line_number, line in enumerate(handle, start=1):
+            digest.update(line)
+            if not line.endswith(b"\n"):
+                raise ValueError(
+                    f"association member equivalence line {line_number} is not newline-terminated"
+                )
+            try:
+                data = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"association member equivalence line {line_number} is not valid JSON"
+                ) from exc
+            if not isinstance(data, Mapping):
+                raise ValueError(
+                    f"association member equivalence line {line_number} must be an object"
+                )
+            equivalence = AssociationMemberEquivalence.from_mapping(data)
+            if (
+                equivalence.parent_association_release_id != manifest.parent_association_release_id
+                or equivalence.current_association_release_id
+                != manifest.current_association_release_id
+            ):
+                raise ValueError(
+                    f"association member equivalence line {line_number} endpoint differs "
+                    "from the manifest"
+                )
+            if previous_id is not None and equivalence.equivalence_id <= previous_id:
+                raise ValueError(
+                    "association member equivalences must be strictly ordered by equivalence_id"
+                )
+            if equivalence.parent_member in parent_members:
+                raise ValueError("a parent member cannot have multiple current equivalents")
+            if equivalence.current_member in current_members:
+                raise ValueError("a current member cannot have multiple parent equivalents")
+            previous_id = equivalence.equivalence_id
+            parent_members.add(equivalence.parent_member)
+            current_members.add(equivalence.current_member)
+            count += 1
+            yield equivalence
+    if count != manifest.equivalence_count:
+        raise ValueError(
+            "equivalence_count mismatch: manifest has "
+            f"{manifest.equivalence_count}, equivalences have {count}"
+        )
+    if f"sha256:{digest.hexdigest()}" != manifest.equivalences_sha256:
+        raise ValueError("equivalences_sha256 does not match equivalences.jsonl")
+
+
+def iter_association_member_equivalence_release(
+    directory: str | os.PathLike[str],
+) -> Iterator[AssociationMemberEquivalence]:
+    """Stream equivalences; checksum, ordering, and bijection validate at EOF."""
+    path = Path(directory)
+    manifest = load_association_member_equivalence_release_manifest(path)
+    yield from _validated_member_equivalences(path, manifest)
+
+
+def verify_association_member_equivalence_release(
+    directory: str | os.PathLike[str],
+    *,
+    parent_association_release_directory: str | os.PathLike[str] | None = None,
+    current_association_release_directory: str | os.PathLike[str] | None = None,
+) -> AssociationMemberEquivalenceReleaseManifest:
+    """Stream-verify a member crosswalk and optional association endpoints.
+
+    Bijection validation retains the two endpoint-member sets; endpoint checks
+    otherwise consume the crosswalk one row at a time.
+    """
+    path = Path(directory)
+    manifest = load_association_member_equivalence_release_manifest(path)
+    parent_manifest: AssociationReleaseManifest | None = None
+    current_manifest: AssociationReleaseManifest | None = None
+    if parent_association_release_directory is not None:
+        parent_manifest = verify_association_release(parent_association_release_directory)
+        if manifest.parent_association_release_id != parent_manifest.release_id:
+            raise ValueError("parent association release does not match the equivalence manifest")
+    if current_association_release_directory is not None:
+        current_manifest = verify_association_release(current_association_release_directory)
+        if manifest.current_association_release_id != current_manifest.release_id:
+            raise ValueError("current association release does not match the equivalence manifest")
+    if (
+        parent_manifest is not None
+        and current_manifest is not None
+        and current_manifest.parent_release_id != parent_manifest.release_id
+    ):
+        raise ValueError("association releases are not direct parent/current lineage")
+    for equivalence in _validated_member_equivalences(path, manifest):
+        if (
+            parent_manifest is not None
+            and equivalence.parent_member.input_release_id
+            not in parent_manifest.provenance.input_release_ids
+        ):
+            raise ValueError("parent member input release is absent from parent provenance")
+        if (
+            current_manifest is not None
+            and equivalence.current_member.input_release_id
+            not in current_manifest.provenance.input_release_ids
+        ):
+            raise ValueError("current member input release is absent from current provenance")
+    return manifest
+
+
+def write_association_member_equivalence_release(
+    equivalences: Iterable[AssociationMemberEquivalence],
+    parent_association_release_directory: str | os.PathLike[str],
+    current_association_release_directory: str | os.PathLike[str],
+    directory: str | os.PathLike[str],
+) -> AssociationMemberEquivalenceReleaseManifest:
+    """Atomically publish a deterministic, bijective member crosswalk.
+
+    Rows must be strictly ordered by ``equivalence_id``. Equivalence is an
+    explicit reviewed assertion; this writer never infers it from bare IDs.
+    """
+    parent_manifest = verify_association_release(parent_association_release_directory)
+    current_manifest = verify_association_release(current_association_release_directory)
+    if current_manifest.parent_release_id != parent_manifest.release_id:
+        raise ValueError("association releases are not direct parent/current lineage")
+
+    target = Path(directory)
+    if target.exists():
+        raise FileExistsError(f"association member equivalence path already exists: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
+    try:
+        digest = hashlib.sha256()
+        count = 0
+        previous_id: str | None = None
+        parent_members: set[AssociationComponentMember] = set()
+        current_members: set[AssociationComponentMember] = set()
+        path = temporary / _MEMBER_EQUIVALENCES
+        with path.open("xb") as handle:
+            for equivalence in equivalences:
+                if not isinstance(equivalence, AssociationMemberEquivalence):
+                    raise ValueError(
+                        "equivalences must contain AssociationMemberEquivalence values"
+                    )
+                if (
+                    equivalence.parent_association_release_id != parent_manifest.release_id
+                    or equivalence.current_association_release_id != current_manifest.release_id
+                ):
+                    raise ValueError("member equivalence differs from association endpoints")
+                if (
+                    equivalence.parent_member.input_release_id
+                    not in parent_manifest.provenance.input_release_ids
+                ):
+                    raise ValueError("parent member input release is absent from parent provenance")
+                if (
+                    equivalence.current_member.input_release_id
+                    not in current_manifest.provenance.input_release_ids
+                ):
+                    raise ValueError(
+                        "current member input release is absent from current provenance"
+                    )
+                if previous_id is not None and equivalence.equivalence_id <= previous_id:
+                    raise ValueError(
+                        "association member equivalences must be strictly ordered by equivalence_id"
+                    )
+                if equivalence.parent_member in parent_members:
+                    raise ValueError("a parent member cannot have multiple current equivalents")
+                if equivalence.current_member in current_members:
+                    raise ValueError("a current member cannot have multiple parent equivalents")
+                previous_id = equivalence.equivalence_id
+                parent_members.add(equivalence.parent_member)
+                current_members.add(equivalence.current_member)
+                line = _canonical_json(equivalence.to_dict()) + b"\n"
+                handle.write(line)
+                digest.update(line)
+                count += 1
+            handle.flush()
+            os.fsync(handle.fileno())
+        identity = {
+            "parent_association_release_id": parent_manifest.release_id,
+            "current_association_release_id": current_manifest.release_id,
+            "equivalence_count": count,
+            "equivalences_sha256": f"sha256:{digest.hexdigest()}",
+        }
+        manifest = AssociationMemberEquivalenceReleaseManifest(
+            equivalence_release_id=_member_equivalence_release_id(**identity),
+            **identity,
+        )
+        manifest_path = temporary / _RELEASE_MANIFEST
+        with manifest_path.open("xb") as handle:
+            handle.write(_canonical_json(manifest.to_dict()) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if target.exists():
+            raise FileExistsError(f"association member equivalence path already exists: {target}")
+        # ponytail: one local publisher owns a target path; object stores need
+        # their native conditional-create primitive for concurrent publication.
+        temporary.rename(target)
+        return manifest
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+
+
+def _current_to_parent_equivalences(
+    directory: str | os.PathLike[str],
+    *,
+    parent_association_release_id: str,
+    current_association_release_id: str,
+    parent_input_release_ids: tuple[str, ...],
+    current_input_release_ids: tuple[str, ...],
+) -> dict[AssociationComponentMember, AssociationComponentMember]:
+    manifest = verify_association_member_equivalence_release(directory)
+    if (
+        manifest.parent_association_release_id != parent_association_release_id
+        or manifest.current_association_release_id != current_association_release_id
+    ):
+        raise ValueError("member equivalence release does not match component endpoints")
+    result: dict[AssociationComponentMember, AssociationComponentMember] = {}
+    for equivalence in iter_association_member_equivalence_release(directory):
+        if equivalence.parent_member.input_release_id not in parent_input_release_ids:
+            raise ValueError("parent member input release is absent from parent provenance")
+        if equivalence.current_member.input_release_id not in current_input_release_ids:
+            raise ValueError("current member input release is absent from current provenance")
+        result[equivalence.current_member] = equivalence.parent_member
+    return result
 
 
 def _component_id(
@@ -1248,6 +1718,7 @@ def construct_association_components(
     candidate_input_release_id: str,
     included_decisions: Iterable[AssociationDecision],
     parent_component_directory: str | os.PathLike[str] | None = None,
+    member_equivalence_directory: str | os.PathLike[str] | None = None,
 ) -> list[AssociationComponent]:
     """Build deterministic connected components from an association release.
 
@@ -1269,6 +1740,9 @@ def construct_association_components(
         raise ValueError("included_decisions must contain AssociationDecision values")
 
     parent_by_member: dict[AssociationComponentMember, str] = {}
+    current_to_parent: dict[AssociationComponentMember, AssociationComponentMember] = {}
+    if member_equivalence_directory is not None and parent_component_directory is None:
+        raise ValueError("member equivalence requires a parent component release")
     if parent_component_directory is not None:
         parent_manifest, parent_members, _ = _component_partition(parent_component_directory)
         if manifest.parent_release_id != parent_manifest.association_release_id:
@@ -1276,6 +1750,14 @@ def construct_association_components(
         for component_id, members in parent_members.items():
             for member in members:
                 parent_by_member[member] = component_id
+        if member_equivalence_directory is not None:
+            current_to_parent = _current_to_parent_equivalences(
+                member_equivalence_directory,
+                parent_association_release_id=parent_manifest.association_release_id,
+                current_association_release_id=manifest.release_id,
+                parent_input_release_ids=parent_manifest.provenance.input_release_ids,
+                current_input_release_ids=manifest.provenance.input_release_ids,
+            )
 
     # ponytail: union-find retains O(nodes) state; survey-scale construction
     # should move this exact contract behind an external graph engine.
@@ -1318,7 +1800,12 @@ def construct_association_components(
             tuple(members),
             tuple(
                 sorted(
-                    {parent_by_member[member] for member in members if member in parent_by_member}
+                    {
+                        parent_by_member[parent_member]
+                        for member in members
+                        if (parent_member := current_to_parent.get(member, member))
+                        in parent_by_member
+                    }
                 )
             ),
         )
@@ -1491,6 +1978,8 @@ class AssociationComponentDelta:
 def _classified_component_deltas(
     parent_component_directory: str | os.PathLike[str],
     current_component_directory: str | os.PathLike[str],
+    *,
+    member_equivalence_directory: str | os.PathLike[str] | None = None,
 ) -> tuple[
     AssociationComponentReleaseManifest,
     AssociationComponentReleaseManifest,
@@ -1506,12 +1995,25 @@ def _classified_component_deltas(
         for component_id, members in parent_components.items()
         for member in members
     }
+    current_to_parent: dict[AssociationComponentMember, AssociationComponentMember] = {}
+    if member_equivalence_directory is not None:
+        current_to_parent = _current_to_parent_equivalences(
+            member_equivalence_directory,
+            parent_association_release_id=parent_manifest.association_release_id,
+            current_association_release_id=current_manifest.association_release_id,
+            parent_input_release_ids=parent_manifest.provenance.input_release_ids,
+            current_input_release_ids=current_manifest.provenance.input_release_ids,
+        )
     current_parents: dict[str, set[str]] = {}
     parent_children: dict[str, set[str]] = {
         component_id: set() for component_id in parent_components
     }
     for current_id, members in current_components.items():
-        overlaps = {parent_by_member[member] for member in members if member in parent_by_member}
+        overlaps = {
+            parent_by_member[parent_member]
+            for member in members
+            if (parent_member := current_to_parent.get(member, member)) in parent_by_member
+        }
         if overlaps != set(declared_parents[current_id]):
             raise ValueError(
                 "current component lineage does not match exact parent membership overlap"
@@ -1574,11 +2076,14 @@ def _classified_component_deltas(
 def classify_association_component_deltas(
     parent_component_directory: str | os.PathLike[str],
     current_component_directory: str | os.PathLike[str],
+    *,
+    member_equivalence_directory: str | os.PathLike[str] | None = None,
 ) -> list[AssociationComponentDelta]:
-    """Classify exact member overlap between verified component releases."""
+    """Classify exact or explicitly equivalent member overlap."""
     return _classified_component_deltas(
         parent_component_directory,
         current_component_directory,
+        member_equivalence_directory=member_equivalence_directory,
     )[2]
 
 
@@ -1804,6 +2309,7 @@ def verify_association_component_delta_release(
     *,
     parent_component_directory: str | os.PathLike[str] | None = None,
     current_component_directory: str | os.PathLike[str] | None = None,
+    member_equivalence_directory: str | os.PathLike[str] | None = None,
 ) -> AssociationComponentDeltaReleaseManifest:
     """Verify a delta artifact and, when supplied, its component endpoints."""
     path = Path(directory)
@@ -1827,6 +2333,7 @@ def verify_association_component_delta_release(
         expected = classify_association_component_deltas(
             parent_component_directory,
             current_component_directory,
+            member_equivalence_directory=member_equivalence_directory,
         )
         if actual != expected:
             raise ValueError("component deltas do not match exact endpoint membership overlap")
@@ -1837,11 +2344,14 @@ def write_association_component_delta_release(
     parent_component_directory: str | os.PathLike[str],
     current_component_directory: str | os.PathLike[str],
     directory: str | os.PathLike[str],
+    *,
+    member_equivalence_directory: str | os.PathLike[str] | None = None,
 ) -> AssociationComponentDeltaReleaseManifest:
     """Atomically publish deterministic deltas for two verified endpoints."""
     parent_manifest, current_manifest, deltas = _classified_component_deltas(
         parent_component_directory,
         current_component_directory,
+        member_equivalence_directory=member_equivalence_directory,
     )
     target = Path(directory)
     if target.exists():

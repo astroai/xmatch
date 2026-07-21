@@ -324,7 +324,9 @@ component membership and explicit merge/split lineage without treating a
 component ID as stable across releases. Deterministic constructors require
 explicit endpoint namespaces and decision policy; content-addressed component
 delta releases classify created, continued, merged, split, and retired topology
-from exact membership overlap.
+from exact membership overlap. A separate bijective, content-addressed member
+equivalence release preserves reviewed continuity across intentional
+input-release namespace changes without guessing from bare catalogue IDs.
 
 ## HATS output
 
