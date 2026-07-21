@@ -11,8 +11,10 @@ directory**, or the **name of a configured remote catalogue** (TAP service or th
 CDS XMatch service). xmatch auto-detects the type, the coordinate columns, and the
 matching strategy.
 
-Internally all catalogue data flows through [polars](https://pola.rs) `LazyFrame`s;
-results stream straight to disk so large matches never need to fit in memory.
+Internally all catalogue data flows through [polars](https://pola.rs) `LazyFrame`s.
+Pairwise local CSV/Parquet matches can use an explicit memory budget to stage
+and stream deterministic partitions instead of materialising either catalogue
+or the final result.
 Results can be saved as Parquet, CSV, FITS, or **HATS** (hierarchical tiling)
 for efficient spatial queries on massive catalogues.
 
@@ -146,6 +148,10 @@ xmatch match gaia desils_noao --matcher skyerr --max-error 3.0 -o out.parquet
 # Pick the in-process cKDTree engine (no Java) and stream matches to disk
 xmatch match a.parquet b.parquet --engine fast -r 1.0 -o matches.parquet
 
+# Force bounded-memory local matching through a chosen scratch filesystem
+xmatch match a.parquet b.parquet -r 1.0 -o matches.parquet \
+  --memory-budget-bytes 1073741824 --scratch-dir /scratch/$USER/xmatch
+
 # Compute an assumed-prior p_match posterior from a photometric prior
 xmatch match a.parquet b.parquet --engine fast --probabilistic --priors g_mag,r_mag -o matches.parquet
 
@@ -184,6 +190,15 @@ for command-specific options.
 `separation ≤ max_error · (err₁ + err₂)` using the catalogues' positional errors
 (`--radius` applies only to `sky`). `skyellipse` currently behaves like `skyerr`
 (correlation is not yet modelled).
+
+`--memory-budget-bytes` enables the first bounded-memory tranche when the
+projected inputs exceed the budget. It currently accepts two local CSV/Parquet
+catalogues, `sky` or `skyerr`, inner output, and Parquet/CSV output. Scratch
+partitions are removed after success or failure and the final file is replaced
+atomically. Large FITS, N-way/union, outer/anti, probabilistic, proper-motion,
+and advanced-filter requests fail explicitly instead of silently collecting.
+`--partition-order auto` is normally appropriate; set an integer only for
+reproducible partition-layout experiments.
 
 ### Shell tab completion
 

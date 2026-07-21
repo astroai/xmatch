@@ -83,7 +83,7 @@ warn_return_any = false
 disable_error_code = ["import-untyped", "union-attr", "arg-type", "index"]
 
 [tool.codespell]
-ignore-words-list = "activ,strat,oen,suh,vas,mye,fo,hte,ue,nax,ags,bu,acn,vew,ecept,ure,ege,edn,whe,inh,ths,proceedure,eazy,clen,acess,astroid,degress,som,sompz,slac,ges,recal,litterature,ned,aas,alph,legac"
+ignore-words-list = "activ,strat,oen,suh,vas,mye,fo,hte,ue,nax,ags,bu,acn,vew,ecept,ure,ege,edn,whe,inh,ths,proceedure,eazy,clen,acess,astroid,degress,som,sompz,slac,ges,recal,litterature,ned,aas,alph,legac,desig,bund,fof"
 skip = "*.ipynb,pyproject.toml,*.json,pixi.lock,paper/*.cls"
 
 [tool.black]

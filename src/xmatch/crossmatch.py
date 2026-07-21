@@ -97,6 +97,7 @@ class CrossMatch:
         self.n_workers = kwargs.get("n_workers", multiprocessing.cpu_count())
 
         self.auth_config = auth.load_auth_config()
+        self.last_spill_stats: Optional[Dict[str, int]] = None
         self._validate_config()
         logger.info("CrossMatch initialised from %s", self.config_file)
 
@@ -247,6 +248,10 @@ class CrossMatch:
             src = src.with_frame(lf)
             src.name = name
         src.id_column = overrides.get("id_column")
+        src.ra_err_column = overrides.get("ra_err_column")
+        src.dec_err_column = overrides.get("dec_err_column")
+        src.pos_err_units = overrides.get("pos_err_units") or "arcsec"
+        src.default_pos_error_arcsec = overrides.get("default_pos_error_arcsec")
         # Apply explicit overrides first; fall back to auto-detection. Note that
         # we no longer raise on missing RA/Dec here so ``id_join`` flows can
         # operate on tables without spatial columns; the hard error is now
@@ -710,6 +715,11 @@ class CrossMatch:
             lazy=True,
             **params,
         )
+        if req.memory_budget_bytes is not None:
+            raise CrossMatchError(
+                "Bounded-memory matching currently supports pairwise local CSV/Parquet only; "
+                "N-way and union matching are not yet supported."
+            )
 
         # Resolve ALL sources up front.
         sources: List[CatalogueSource] = []
@@ -1136,8 +1146,20 @@ class CrossMatch:
         :meth:`_dispatch` so the CLI can render a spinner during TAP/CDS
         downloads.
         """
+        if req.memory_budget_bytes is not None:
+            from .out_of_core import preflight_request
+
+            preflight_request(req)
+        self.last_spill_stats = None
         src1 = self.resolve_source(req.cat1, req.side1.as_dict())
         src2 = self.resolve_source(req.cat2, req.side2.as_dict())
+
+        if req.memory_budget_bytes is not None and src1.is_local and src2.is_local:
+            from .out_of_core import match_to_output, spill_required
+
+            if spill_required(req, src1, src2):
+                self.last_spill_stats = match_to_output(req, src1, src2)
+                return None
 
         result_lf = self._dispatch(src1, src2, req, progress_cb=progress_cb)
 

@@ -628,6 +628,9 @@ def _build_params(args) -> dict:
         filter_expr=args.filter_expr,
         extra_distance_cols=extra_distance,
         batch_size=args.batch_size,
+        memory_budget_bytes=args.memory_budget_bytes,
+        scratch_dir=args.scratch_dir,
+        partition_order=args.partition_order,
         lr_magnitude_column=args.lr_magnitude_column,
         lr_q=args.lr_q,
         ml_color_columns=ml_color_columns,
@@ -687,6 +690,20 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         dest="batch_size",
         type=int,
         help="HEALPix pixel groups per batch for out-of-core processing.",
+    )
+    g_out.add_argument(
+        "--memory-budget-bytes",
+        type=int,
+        help="Spill pairwise local CSV/Parquet matching above this memory budget.",
+    )
+    g_out.add_argument(
+        "--scratch-dir",
+        help="Parent directory for bounded-memory partition files.",
+    )
+    g_out.add_argument(
+        "--partition-order",
+        default="auto",
+        help="Sky-zone partition order (non-negative integer or 'auto').",
     )
 
     g_geom = parser.add_argument_group("Geometry (sky match)")
@@ -949,6 +966,20 @@ def _build_match_subparser() -> argparse.ArgumentParser:
         dest="batch_size",
         type=int,
         help="HEALPix pixel groups per batch for out-of-core processing.",
+    )
+    g_out.add_argument(
+        "--memory-budget-bytes",
+        type=int,
+        help="Spill pairwise local CSV/Parquet matching above this memory budget.",
+    )
+    g_out.add_argument(
+        "--scratch-dir",
+        help="Parent directory for bounded-memory partition files.",
+    )
+    g_out.add_argument(
+        "--partition-order",
+        default="auto",
+        help="Sky-zone partition order (non-negative integer or 'auto').",
     )
 
     g_geom = parser.add_argument_group("Geometry (sky match)")
@@ -2020,7 +2051,7 @@ def _split_subcommand(argv: Sequence[str]) -> tuple[Optional[str], List[str]]:
         if tok.startswith("-"):
             continue
         if tok in SUBCOMMANDS:
-            return tok, list(argv[:i] + argv[i + 1 :])
+            return tok, list(argv[:i]) + list(argv[i + 1 :])
         return None, list(argv)
     return None, list(argv)
 

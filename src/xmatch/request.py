@@ -50,13 +50,33 @@ class SideOverrides:
     id_column: Optional[str] = None
     """Identifier column name on this side."""
 
+    ra_err_column: Optional[str] = None
+    """Right-ascension uncertainty column for local ``skyerr`` matching."""
+
+    dec_err_column: Optional[str] = None
+    """Declination uncertainty column for local ``skyerr`` matching."""
+
+    pos_err_units: Optional[str] = None
+    """Units for local positional-error columns (arcsec, mas, arcmin, or deg)."""
+
+    default_pos_error_arcsec: Optional[float] = None
+    """Fallback one-axis positional error for local rows, in arcseconds."""
+
     columns: Optional[List[str]] = None
     """Columns to select on this side (defaults to ``CatalogueSource.default_columns``)."""
 
     def as_dict(self) -> Dict[str, Any]:
         """Return a dict suitable for ``resolve_source(…, overrides=…)``."""
         d: Dict[str, Any] = {}
-        for field_name in ("ra_column", "dec_column", "id_column"):
+        for field_name in (
+            "ra_column",
+            "dec_column",
+            "id_column",
+            "ra_err_column",
+            "dec_err_column",
+            "pos_err_units",
+            "default_pos_error_arcsec",
+        ):
             val = getattr(self, field_name)
             if val is not None:
                 d[field_name] = val
@@ -87,6 +107,15 @@ class MatchRequest:
 
     lazy: bool = False
     """Return a ``pl.LazyFrame`` instead of collecting eagerly."""
+
+    memory_budget_bytes: Optional[int] = None
+    """Enable bounded-memory local matching when projected inputs exceed this many bytes."""
+
+    scratch_dir: Optional[Union[str, Path]] = None
+    """Parent directory for temporary partitioned Parquet datasets."""
+
+    partition_order: Union[str, int] = "auto"
+    """Sky-zone order used by bounded-memory matching, or ``"auto"``."""
 
     # ---------------------------------------------------------------- matching
     engine: str = "auto"
@@ -172,6 +201,9 @@ class MatchRequest:
             spec=spec,
             output_file=output_file,
             lazy=lazy,
+            memory_budget_bytes=params.get("memory_budget_bytes"),
+            scratch_dir=params.get("scratch_dir"),
+            partition_order=params.get("partition_order", "auto"),
             engine=params.get("engine", "auto"),
             id_join=bool(params.get("id_join")),
             id_column_1=params.get("id_column_1"),
@@ -180,12 +212,20 @@ class MatchRequest:
                 ra_column=params.get("ra_column_1"),
                 dec_column=params.get("dec_column_1"),
                 id_column=params.get("id_column_1"),
+                ra_err_column=params.get("ra_err_column_1"),
+                dec_err_column=params.get("dec_err_column_1"),
+                pos_err_units=params.get("pos_err_units_1"),
+                default_pos_error_arcsec=params.get("default_pos_error_arcsec_1"),
                 columns=_parse_columns(params.get("columns_1")),
             ),
             side2=SideOverrides(
                 ra_column=params.get("ra_column_2"),
                 dec_column=params.get("dec_column_2"),
                 id_column=params.get("id_column_2"),
+                ra_err_column=params.get("ra_err_column_2"),
+                dec_err_column=params.get("dec_err_column_2"),
+                pos_err_units=params.get("pos_err_units_2"),
+                default_pos_error_arcsec=params.get("default_pos_error_arcsec_2"),
                 columns=_parse_columns(params.get("columns_2")),
             ),
             ra=params.get("ra"),
