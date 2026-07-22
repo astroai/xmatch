@@ -9,6 +9,7 @@ from xmatch import astro_utils
 from xmatch.astro_utils import (
     find_coord_columns,
     propagate_proper_motion,
+    propagate_proper_motion_with_jacobian,
     propagate_space_motion,
     propagate_space_motion_with_jacobian,
     sky_extent,
@@ -120,6 +121,34 @@ def test_proper_motion_prefers_torchsky_and_preserves_nan_semantics(monkeypatch)
     np.testing.assert_allclose(received["pmdec"], [50.0, 0.0])
     np.testing.assert_allclose(received["source_epoch"], [2025.0, 2000.0])
     assert received["target_epoch"] == 2025.0
+
+
+def test_proper_motion_jacobian_adapter_preserves_batch(monkeypatch):
+    expected_jacobian = np.broadcast_to(np.eye(4)[:2], (2, 2, 4)).copy()
+
+    def fake_torchsky(*values, source_epoch_jyear, target_epoch_jyear):
+        ra, dec = values[:2]
+        return (np.asarray(ra) + 1.0, np.asarray(dec) - 2.0), expected_jacobian
+
+    monkeypatch.setattr(
+        astro_utils,
+        "_load_torchsky_propagate_proper_motion_with_jacobian",
+        lambda: fake_torchsky,
+    )
+    result = propagate_proper_motion_with_jacobian(
+        np.array([10.0, 20.0]),
+        np.array([30.0, 40.0]),
+        np.array([1.0, 2.0]),
+        np.array([3.0, 4.0]),
+        np.array([2016.0, 2016.0]),
+        2026.0,
+    )
+
+    assert result is not None
+    ra, dec, jacobian = result
+    np.testing.assert_allclose(ra, [11.0, 21.0])
+    np.testing.assert_allclose(dec, [28.0, 38.0])
+    np.testing.assert_allclose(jacobian, expected_jacobian)
 
 
 def test_proper_motion_astropy_fallback_matches_high_declination_reference(monkeypatch):

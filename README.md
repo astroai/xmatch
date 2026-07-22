@@ -217,7 +217,10 @@ matching stale coordinates. For `skyellipse`, Gaia ESA and NOIRLab sources
 also transport the published correlated five-parameter astrometric covariance
 to the target epoch with Torchsky's local phase-space Jacobian. Radial velocity
 affects the trajectory but is conditioned on its measured value: Gaia does not
-publish a joint astrometry/RV covariance, so Xmatch does not invent one.
+publish a joint astrometry/RV covariance, so Xmatch does not invent one. Rows
+without complete distance/RV still transport the correlated position/proper-
+motion subspace through Torchsky's angular model; this explicitly excludes
+unknown perspective acceleration instead of assigning a made-up RV.
 
 ### Shell tab completion
 

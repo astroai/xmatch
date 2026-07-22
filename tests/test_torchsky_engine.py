@@ -6,7 +6,10 @@ import numpy as np
 import polars as pl
 import pytest
 
-from xmatch.astro_utils import propagate_space_motion_with_jacobian
+from xmatch.astro_utils import (
+    propagate_proper_motion_with_jacobian,
+    propagate_space_motion_with_jacobian,
+)
 from xmatch.matchers import MatchSpec, sky_match
 from xmatch.sources import CatalogueSource
 
@@ -46,6 +49,18 @@ def test_torchsky_space_motion_jacobian_adapter() -> None:
     np.testing.assert_allclose(dec, [4.765463779109472], atol=1e-10)
     assert jacobian.shape == (1, 6, 6)
     assert np.isfinite(jacobian).all()
+
+    angular = propagate_proper_motion_with_jacobian(
+        np.array([269.452075]),
+        np.array([4.693391]),
+        np.array([-801.551]),
+        np.array([10_362.394]),
+        np.array([2000.0]),
+        2025.0,
+    )
+    assert angular is not None
+    assert angular[2].shape == (1, 2, 4)
+    assert np.isfinite(angular[2]).all()
 
 
 def test_torchsky_engine_matches_fast_nearest_neighbours() -> None:

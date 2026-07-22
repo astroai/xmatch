@@ -427,6 +427,74 @@ def test_proper_motion_transports_gaia_covariance(monkeypatch):
     np.testing.assert_allclose(moved["dec"], [22.0])
 
 
+def test_angular_motion_transports_gaia_covariance_without_rv(monkeypatch):
+    from xmatch import astro_utils
+    from xmatch.matchers import _apply_proper_motion, _pos_covariance
+    from xmatch.sources import ASTROMETRIC_COVARIANCE_KEYS
+
+    covariance_columns = {key: key for key in ASTROMETRIC_COVARIANCE_KEYS}
+    row = {
+        "ra": [10.0],
+        "dec": [20.0],
+        "pmra": [100.0],
+        "pmdec": [50.0],
+        "epoch": [2016.0],
+        "parallax": [100.0],
+        "rv": [np.nan],
+        "ra_error": [1.0],
+        "dec_error": [1.5],
+        "parallax_error": [0.5],
+        "pmra_error": [2.0],
+        "pmdec_error": [3.0],
+    }
+    for key in ASTROMETRIC_COVARIANCE_KEYS[5:]:
+        row[key] = [0.5 if key == "ra_pmra_corr" else 0.0]
+    frame = pl.DataFrame(row)
+    source = _src(
+        "gaia",
+        ra_err_column="ra_error",
+        dec_err_column="dec_error",
+        corr_column="ra_dec_corr",
+        pos_err_units="mas",
+        pm_ra_column="pmra",
+        pm_dec_column="pmdec",
+        epoch_column="epoch",
+        parallax_column="parallax",
+        radial_velocity_column="rv",
+        astrometric_covariance_columns=covariance_columns,
+    )
+
+    def fake_with_jacobian(ra, dec, *args):
+        jacobian = np.eye(4)[:2][None, ...]
+        jacobian[:, 0, 2] = 10.0
+        jacobian[:, 1, 3] = 10.0
+        return np.asarray(ra) + 1.0, np.asarray(dec) + 2.0, jacobian
+
+    monkeypatch.setattr(
+        astro_utils,
+        "propagate_proper_motion_with_jacobian",
+        fake_with_jacobian,
+    )
+    moved, _ = _apply_proper_motion(
+        frame,
+        pl.DataFrame({"ra": [0.0], "dec": [0.0]}),
+        source,
+        _src("reference"),
+        target_epoch=2026.0,
+        propagate_covariance=True,
+        fallback_policy="error",
+    )
+    covariance = _pos_covariance(moved, source)
+
+    assert covariance is not None
+    east, north, rho = covariance
+    np.testing.assert_allclose(east, [421.0e-6])
+    np.testing.assert_allclose(north, [902.25e-6])
+    np.testing.assert_allclose(rho, [0.0])
+    np.testing.assert_allclose(moved["ra"], [11.0])
+    np.testing.assert_allclose(moved["dec"], [22.0])
+
+
 def test_invalid_gaia_covariance_row_is_not_zero_imputed():
     from xmatch.matchers import _astrometric_covariance_mas
     from xmatch.sources import ASTROMETRIC_COVARIANCE_KEYS
@@ -447,8 +515,35 @@ def test_invalid_gaia_covariance_row_is_not_zero_imputed():
     )
 
     assert result is not None
-    _covariance, valid = result
-    assert not valid[0]
+    _covariance, valid_6d, valid_angular = result
+    assert not valid_6d[0]
+    assert not valid_angular[0]
+
+
+def test_angular_covariance_remains_valid_without_parallax_uncertainty():
+    from xmatch.matchers import _astrometric_covariance_mas
+    from xmatch.sources import ASTROMETRIC_COVARIANCE_KEYS
+
+    covariance_columns = {key: key for key in ASTROMETRIC_COVARIANCE_KEYS}
+    row = {
+        "ra_error": [1.0],
+        "dec_error": [1.0],
+        "parallax_error": [np.nan],
+        "pmra_error": [1.0],
+        "pmdec_error": [1.0],
+    }
+    for key in ASTROMETRIC_COVARIANCE_KEYS[5:]:
+        row[key] = [np.nan if "parallax" in key else 0.0]
+    result = _astrometric_covariance_mas(
+        pl.DataFrame(row),
+        _src("gaia", astrometric_covariance_columns=covariance_columns),
+    )
+
+    assert result is not None
+    covariance, valid_6d, valid_angular = result
+    assert not valid_6d[0]
+    assert valid_angular[0]
+    np.testing.assert_allclose(covariance[0, :4, :4], np.eye(4))
 
 
 def test_proper_motion_empty_frame_preserves_schema():

@@ -174,6 +174,38 @@ def _load_torchsky_propagate_proper_motion():
     return torchsky_propagate
 
 
+def propagate_proper_motion_with_jacobian(
+    ra: np.ndarray,
+    dec: np.ndarray,
+    pm_ra_cosdec: np.ndarray,
+    pm_dec: np.ndarray,
+    source_epoch: np.ndarray,
+    target_epoch: float,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Return Torchsky angular positions and local 2x4 Jacobians if available."""
+    torchsky_propagate = _load_torchsky_propagate_proper_motion_with_jacobian()
+    if torchsky_propagate is None:
+        return None
+    values = [
+        np.asarray(value, dtype=float) for value in (ra, dec, pm_ra_cosdec, pm_dec, source_epoch)
+    ]
+    propagated, jacobian = torchsky_propagate(
+        *values[:4],
+        source_epoch_jyear=values[4],
+        target_epoch_jyear=target_epoch,
+    )
+    return _as_numpy(propagated[0]), _as_numpy(propagated[1]), _as_numpy(jacobian)
+
+
+def _load_torchsky_propagate_proper_motion_with_jacobian():
+    """Return Torchsky's angular-motion Jacobian primitive when available."""
+    try:
+        from torchsky.wcs import propagate_proper_motion_with_jacobian
+    except ImportError:
+        return None
+    return propagate_proper_motion_with_jacobian
+
+
 def propagate_space_motion(
     ra: np.ndarray,
     dec: np.ndarray,

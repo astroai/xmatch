@@ -482,7 +482,7 @@ def _arcsec_to_chord(arcsec: float) -> float:
 def _astrometric_covariance_mas(
     df: pl.DataFrame,
     src: CatalogueSource,
-) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Build Gaia-style five-parameter covariances in Torchsky order.
 
     The returned covariance order is ``(alpha*, delta, pmra, pmdec,
@@ -538,7 +538,20 @@ def _astrometric_covariance_mas(
     # Gaia publishes (alpha*, delta, parallax, pmra, pmdec); Torchsky's local
     # state orders proper motion before parallax.
     order = np.array([0, 1, 3, 4, 2])
-    return covariance[:, order][:, :, order], valid
+    ordered_covariance = covariance[:, order][:, :, order]
+    angular_covariance = ordered_covariance[:, :4, :4]
+    angular_errors = errors[:, [0, 1, 3, 4]]
+    angular_valid = np.isfinite(angular_errors).all(axis=1) & (angular_errors > 0.0).all(axis=1)
+    angular_valid &= np.isfinite(angular_covariance).all(axis=(1, 2))
+    safe_angular_covariance = angular_covariance.copy()
+    safe_angular_covariance[~angular_valid] = np.eye(4)
+    angular_eigenvalues = np.linalg.eigvalsh(safe_angular_covariance)
+    angular_scale = np.maximum(
+        np.max(np.diagonal(safe_angular_covariance, axis1=1, axis2=2), axis=1),
+        1.0,
+    )
+    angular_valid &= angular_eigenvalues[:, 0] >= -1e-10 * angular_scale
+    return ordered_covariance, valid, angular_valid
 
 
 def _apply_proper_motion(
@@ -559,6 +572,7 @@ def _apply_proper_motion(
     """
     from .astro_utils import (
         propagate_proper_motion,
+        propagate_proper_motion_with_jacobian,
         propagate_space_motion,
         propagate_space_motion_with_jacobian,
     )
@@ -641,17 +655,17 @@ def _apply_proper_motion(
         propagated_covariance = None
         covariance_data = _astrometric_covariance_mas(df, src) if propagate_covariance else None
         if covariance_data is not None:
-            covariance, covariance_valid = covariance_data
-            covariance_rows = complete & covariance_valid
-            if np.any(covariance_rows):
+            covariance, covariance_valid_6d, covariance_valid_angular = covariance_data
+            covariance_rows_6d = complete & covariance_valid_6d
+            if np.any(covariance_rows_6d):
                 result = propagate_space_motion_with_jacobian(
-                    ra_arr[covariance_rows],
-                    dec_arr[covariance_rows],
-                    pmra[covariance_rows],
-                    pmde[covariance_rows],
-                    parallax[covariance_rows],
-                    radial_velocity[covariance_rows],
-                    epoch_arr[covariance_rows],
+                    ra_arr[covariance_rows_6d],
+                    dec_arr[covariance_rows_6d],
+                    pmra[covariance_rows_6d],
+                    pmde[covariance_rows_6d],
+                    parallax[covariance_rows_6d],
+                    radial_velocity[covariance_rows_6d],
+                    epoch_arr[covariance_rows_6d],
                     target_epoch,
                 )
                 if result is None:
@@ -664,13 +678,13 @@ def _apply_proper_motion(
                     logger.warning("%s; retaining reference-epoch ellipses.", message)
                 else:
                     moved_ra, moved_dec, jacobian = result
-                    new_ra[covariance_rows] = moved_ra
-                    new_dec[covariance_rows] = moved_dec
-                    covariance_done[covariance_rows] = True
+                    new_ra[covariance_rows_6d] = moved_ra
+                    new_dec[covariance_rows_6d] = moved_dec
+                    covariance_done[covariance_rows_6d] = True
                     position_jacobian = jacobian[:, :2, :5]
                     target_covariance = (
                         position_jacobian
-                        @ covariance[covariance_rows]
+                        @ covariance[covariance_rows_6d]
                         @ np.swapaxes(position_jacobian, -1, -2)
                     )
                     target_covariance = 0.5 * (
@@ -678,9 +692,53 @@ def _apply_proper_motion(
                     )
                     target_covariance /= 1_000_000.0  # mas² to arcsec²
                     propagated_covariance = np.full((df.height, 2, 2), np.nan)
-                    propagated_covariance[covariance_rows] = target_covariance
+                    propagated_covariance[covariance_rows_6d] = target_covariance
 
-        angular = ~complete
+            angular_state_valid = (
+                ~complete
+                & covariance_valid_angular
+                & np.isfinite(ra_arr)
+                & np.isfinite(dec_arr)
+                & np.isfinite(pmra)
+                & np.isfinite(pmde)
+                & np.isfinite(epoch_arr)
+            )
+            if np.any(angular_state_valid):
+                result = propagate_proper_motion_with_jacobian(
+                    ra_arr[angular_state_valid],
+                    dec_arr[angular_state_valid],
+                    pmra[angular_state_valid],
+                    pmde[angular_state_valid],
+                    epoch_arr[angular_state_valid],
+                    target_epoch,
+                )
+                if result is None:
+                    message = (
+                        "target-epoch skyellipse covariance propagation requires "
+                        "Torchsky propagate_proper_motion_with_jacobian"
+                    )
+                    if fallback_policy == "error":
+                        raise CrossMatchError(message)
+                    logger.warning("%s; retaining reference-epoch ellipses.", message)
+                else:
+                    moved_ra, moved_dec, position_jacobian = result
+                    new_ra[angular_state_valid] = moved_ra
+                    new_dec[angular_state_valid] = moved_dec
+                    covariance_done[angular_state_valid] = True
+                    target_covariance = (
+                        position_jacobian
+                        @ covariance[angular_state_valid, :4, :4]
+                        @ np.swapaxes(position_jacobian, -1, -2)
+                    )
+                    target_covariance = 0.5 * (
+                        target_covariance + np.swapaxes(target_covariance, -1, -2)
+                    )
+                    target_covariance /= 1_000_000.0
+                    if propagated_covariance is None:
+                        propagated_covariance = np.full((df.height, 2, 2), np.nan)
+                    propagated_covariance[angular_state_valid] = target_covariance
+
+        angular = ~complete & ~covariance_done
         if np.any(angular):
             moved_ra, moved_dec = propagate_proper_motion(
                 ra_arr[angular],

@@ -49,7 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and correlation fields even under restrictive column selections. RV affects
   the mean trajectory but remains conditioned on its measured value because
   Gaia publishes no joint astrometry/RV covariance; incomplete or non-PSD
-  rows retain the existing reference-epoch/floor behavior.
+  rows retain the existing reference-epoch/floor behavior. Rows without a
+  complete distance/RV state use Torchsky's 2x4 angular-motion Jacobian, so the
+  published position/proper-motion covariance still reaches the match epoch
+  without an invented radial velocity.
 * **Six-dimensional epoch propagation**: catalogue sources can map parallax
   and radial-velocity columns. Rows with a complete finite physical state use
   Torchsky's perspective-acceleration/light-time propagation; incomplete rows
