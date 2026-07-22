@@ -9,6 +9,7 @@ from xmatch import astro_utils
 from xmatch.astro_utils import (
     find_coord_columns,
     propagate_proper_motion,
+    propagate_space_motion,
     sky_extent,
     sky_extent_from_frame,
     validate_coordinates,
@@ -138,6 +139,65 @@ def test_proper_motion_astropy_fallback_matches_high_declination_reference(monke
         obstime=Time(source_epoch, format="jyear", scale="tcb"),
         frame="icrs",
     ).apply_space_motion(new_obstime=Time(2100.0, format="jyear", scale="tcb"))
+
+    np.testing.assert_allclose(
+        ((moved_ra - reference.ra.deg + 180.0) % 360.0) - 180.0, 0.0, atol=1e-10
+    )
+    np.testing.assert_allclose(moved_dec, reference.dec.deg, atol=1e-10)
+
+
+def test_space_motion_prefers_torchsky(monkeypatch):
+    received = {}
+
+    def fake_torchsky(*values, source_epoch_jyear, target_epoch_jyear):
+        received["values"] = values
+        received["source_epoch"] = source_epoch_jyear
+        received["target_epoch"] = target_epoch_jyear
+        ra, dec = values[:2]
+        return np.asarray(ra) + 1.0, np.asarray(dec) - 2.0, *values[2:6]
+
+    monkeypatch.setattr(astro_utils, "_load_torchsky_propagate_space_motion", lambda: fake_torchsky)
+    ra, dec = propagate_space_motion(
+        np.array([10.0]),
+        np.array([20.0]),
+        np.array([100.0]),
+        np.array([50.0]),
+        np.array([100.0]),
+        np.array([20.0]),
+        np.array([2000.0]),
+        2025.0,
+    )
+
+    np.testing.assert_allclose(ra, [11.0])
+    np.testing.assert_allclose(dec, [18.0])
+    np.testing.assert_allclose(received["values"][4], [100.0])
+    np.testing.assert_allclose(received["values"][5], [20.0])
+    assert received["target_epoch"] == 2025.0
+
+
+def test_space_motion_astropy_fallback_matches_reference(monkeypatch):
+    monkeypatch.setattr(astro_utils, "_load_torchsky_propagate_space_motion", lambda: None)
+    ra = np.array([269.452075])
+    dec = np.array([4.693391])
+    pmra = np.array([-801.551])
+    pmdec = np.array([10_362.394])
+    parallax = np.array([548.31])
+    radial_velocity = np.array([-110.6])
+    source_epoch = np.array([2000.0])
+
+    moved_ra, moved_dec = propagate_space_motion(
+        ra, dec, pmra, pmdec, parallax, radial_velocity, source_epoch, 2025.0
+    )
+    reference = SkyCoord(
+        ra=ra * u.deg,
+        dec=dec * u.deg,
+        pm_ra_cosdec=pmra * u.mas / u.yr,
+        pm_dec=pmdec * u.mas / u.yr,
+        distance=(1000.0 / parallax) * u.pc,
+        radial_velocity=radial_velocity * u.km / u.s,
+        obstime=Time(source_epoch, format="jyear", scale="tcb"),
+        frame="icrs",
+    ).apply_space_motion(new_obstime=Time(2025.0, format="jyear", scale="tcb"))
 
     np.testing.assert_allclose(
         ((moved_ra - reference.ra.deg + 180.0) % 360.0) - 180.0, 0.0, atol=1e-10

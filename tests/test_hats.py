@@ -7,6 +7,7 @@ import pytest
 
 from xmatch import CatalogueSource, CrossMatch, MatchSpec, hats_source, io_utils
 from xmatch.exceptions import CrossMatchError
+from xmatch.request import MatchRequest
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,19 @@ def test_hats_crossmatch_unsupported_join_type_raises():
             src2,
             MatchSpec(radius_arcsec=1.0, join_type="all"),
         )
+
+
+def test_hats_target_epoch_fails_instead_of_matching_unpropagated_coordinates():
+    src1 = CatalogueSource(
+        name="hats1", is_local=False, access_method="hats", access_identifier="/tmp/fake"
+    )
+    src2 = CatalogueSource(
+        name="hats2", is_local=False, access_method="hats", access_identifier="/tmp/fake"
+    )
+    request = MatchRequest("hats1", "hats2", spec=MatchSpec(radius_arcsec=1.0, target_epoch=2025.0))
+
+    with pytest.raises(CrossMatchError, match="target-epoch propagation is not yet supported"):
+        CrossMatch()._dispatch(src1, src2, request)
 
 
 # ---------------------------------------------------------------------------

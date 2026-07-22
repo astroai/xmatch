@@ -3,6 +3,7 @@ import polars as pl
 import pytest
 
 from xmatch import stilts
+from xmatch.exceptions import CrossMatchError
 from xmatch.matchers import MatchSpec, id_join, sky_match
 from xmatch.sources import CatalogueSource
 
@@ -302,6 +303,96 @@ def test_proper_motion_nan_pm_treated_as_zero(pm_frames):
     )
     # NaN PM → no shift
     assert abs(new_left["ra"][0] - left["ra"][0]) < 1e-10
+
+
+def test_proper_motion_uses_6d_only_for_complete_physical_rows(monkeypatch):
+    from xmatch import astro_utils
+    from xmatch.matchers import _apply_proper_motion
+
+    angular_calls = []
+    space_calls = []
+
+    def fake_angular(ra, dec, *args):
+        angular_calls.append((np.asarray(ra), np.asarray(dec)))
+        return np.asarray(ra) + 1.0, np.asarray(dec) + 1.0
+
+    def fake_space(ra, dec, *args):
+        space_calls.append((np.asarray(ra), np.asarray(dec)))
+        return np.asarray(ra) + 10.0, np.asarray(dec) + 10.0
+
+    monkeypatch.setattr(astro_utils, "propagate_proper_motion", fake_angular)
+    monkeypatch.setattr(astro_utils, "propagate_space_motion", fake_space)
+    left = pl.DataFrame(
+        {
+            "ra": [10.0, 20.0, 30.0, 40.0],
+            "dec": [1.0, 2.0, 3.0, 4.0],
+            "pmra": [100.0, 100.0, 100.0, 1.0e9],
+            "pmdec": [50.0, 50.0, 50.0, 50.0],
+            "epoch": [2000.0] * 4,
+            "parallax": [100.0, 100.0, -1.0, 1.0],
+            "rv": [20.0, np.nan, 20.0, 20.0],
+            "tag": ["complete", "missing-rv", "negative-parallax", "impossible"],
+        }
+    )
+    source = _src(
+        "gaia",
+        pm_ra_column="pmra",
+        pm_dec_column="pmdec",
+        epoch_column="epoch",
+        parallax_column="parallax",
+        radial_velocity_column="rv",
+    )
+
+    moved, _ = _apply_proper_motion(
+        left,
+        pl.DataFrame({"ra": [0.0], "dec": [0.0]}),
+        source,
+        _src("reference"),
+        target_epoch=2025.0,
+    )
+
+    assert len(angular_calls) == 1
+    assert len(space_calls) == 1
+    np.testing.assert_allclose(space_calls[0][0], [10.0])
+    np.testing.assert_allclose(moved["ra"], [20.0, 21.0, 31.0, 41.0])
+    assert moved["tag"].to_list() == left["tag"].to_list()
+    np.testing.assert_allclose(moved["parallax"], left["parallax"])
+
+
+def test_proper_motion_empty_frame_preserves_schema():
+    from xmatch.matchers import _apply_proper_motion
+
+    empty = pl.DataFrame(
+        schema={
+            "ra": pl.Float64,
+            "dec": pl.Float64,
+            "pmra": pl.Float64,
+            "pmdec": pl.Float64,
+            "epoch": pl.Float64,
+        }
+    )
+    source = _src("empty", pm_ra_column="pmra", pm_dec_column="pmdec", epoch_column="epoch")
+    moved, _ = _apply_proper_motion(
+        empty,
+        pl.DataFrame({"ra": [0.0], "dec": [0.0]}),
+        source,
+        _src("reference"),
+        target_epoch=2025.0,
+    )
+    assert moved.schema == empty.schema
+
+
+def test_proper_motion_rejects_nonfinite_target_epoch(pm_frames):
+    left, right = pm_frames
+    source = _src("a", pm_ra_column="pmra", pm_dec_column="pmdec", epoch_column="ref_epoch")
+    with pytest.raises(CrossMatchError, match="target_epoch must be finite"):
+        sky_match(
+            source,
+            _src("b"),
+            left.lazy(),
+            right.lazy(),
+            MatchSpec(target_epoch=np.nan),
+        )
 
 
 def test_proper_motion_no_pm_columns_returns_unchanged(pm_frames):

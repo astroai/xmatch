@@ -97,6 +97,9 @@ measurements as publication-grade evidence.
   on the unconditional union of both catalogues and combined with the joint
   positional kernel.
 - ID joins (relational joins on identifier columns) via polars.
+- Common-epoch matching with `--target-epoch`: complete parallax/RV rows use
+  six-dimensional Torchsky propagation, while incomplete rows retain angular
+  proper-motion propagation without imputing missing physical quantities.
 - All standard join modes: inner, outer, left/right-outer, and anti joins.
 - Returns an eager polars `DataFrame` by default, or a `LazyFrame` on request.
 
@@ -201,6 +204,16 @@ outer joins, probabilistic, proper-motion, and advanced-filter requests fail
 explicitly instead of silently collecting.
 `--partition-order auto` is normally appropriate; set an integer only for
 reproducible partition-layout experiments.
+
+`--target-epoch` uses the kinematic column mappings declared by each catalogue.
+`pm_ra_column` and `pm_dec_column` are in mas/yr, `parallax_column` is in mas,
+and `radial_velocity_column` is in km/s. A row uses full space motion only when
+all values and its source epoch are finite and parallax is positive; every
+other row stays on the angular path. Only the in-memory coordinates used for
+matching move to the target epoch—the returned PM, parallax, RV, and epoch
+columns remain the original catalogue measurements. Target-epoch matching
+currently fails explicitly for HATS and bounded-memory execution rather than
+matching unpropagated positions.
 
 ### Shell tab completion
 

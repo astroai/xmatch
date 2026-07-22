@@ -192,6 +192,7 @@ _HATS_TEST_NAMES: tuple[str, ...] = (
     "test_require_lsdb_raises_with_helpful_message",
     "test_read_hats_no_path",
     "test_hats_crossmatch_unsupported_join_type_raises",
+    "test_hats_target_epoch_fails_instead_of_matching_unpropagated_coordinates",
     "test_hats_crossmatch_passes_n_neighbors_best",
     "test_hats_crossmatch_passes_n_neighbors_all",
     "test_hats_crossmatch_find_all_multi_row_rename",
@@ -307,14 +308,14 @@ def test_changelog_smoke_pm_drift_test_count() -> None:
 def test_changelog_smoke_hats_test_count() -> None:
     """Pin the count of HATS tests documented in CHANGELOG.md.
 
-    The v0.5 ``[Unreleased]`` section claims "**16 HATS tests**
+    The v0.5 ``[Unreleased]`` section claims "**17 HATS tests**
     (``tests/test_hats.py``) — fully mocked (no LSDB required),
     covering alias resolution, crossmatch parameter passthrough, multi-row
     ``find='all'`` results, join type validation, local-frame conversion,
     column renaming, and ``crossmatch_multi`` routing."
 
     This guard uses the keyword ``hats.py`` (a substring of every test ID
-    in that file) so it matches all 16 ``tests/test_hats.py`` functions
+    in that file) so it matches all 17 ``tests/test_hats.py`` functions
     regardless of whether their function name contains ``hats`` (e.g.
     ``test_lsdb_available_false`` and
     ``test_require_lsdb_raises_with_helpful_message`` do not).
@@ -324,19 +325,19 @@ def test_changelog_smoke_hats_test_count() -> None:
     ``tests/test_hats.py``.  If a contributor adds a *new* HATS-related
     test to a different file (e.g.
     ``tests/test_matchers.py::test_hats_crossmatch_xyz``), the guard
-    still returns 16 and silently passes while CHANGELOG.md should
-    claim 17.  Such cross-file additions are out of scope; the guard
+    still returns 17 and silently passes while CHANGELOG.md should
+    claim 18.  Such cross-file additions are out of scope; the guard
     tracks the invariant "all HATS tests live in tests/test_hats.py"
     implied by the current CHANGELOG wording.
     """
     collected = _collect_test_names("hats.py")
     count = len(collected)
 
-    assert count == 16, (
-        f"Expected 16 HATS tests in CHANGELOG (all in tests/test_hats.py), "
+    assert count == 17, (
+        f"Expected 17 HATS tests in CHANGELOG (all in tests/test_hats.py), "
         f"but pytest collected {count}. "
         f"Update tests/test_hats.py and the CHANGELOG.md bullet:\n\n"
-        f"  * 'Added — HATS / LSDB Integration': 16 HATS tests\n\n"
+        f"  * 'Added — HATS / LSDB Integration': 17 HATS tests\n\n"
         f"Collected {count} test(s):\n  " + "\n  ".join(collected) + "\n\n"
         "If you intentionally changed the inventory, update both the test "
         "file and CHANGELOG.md, then update the count here."
@@ -347,11 +348,11 @@ def test_changelog_smoke_hats_named_in_bullets() -> None:
     """Static complement to the count-based HATS guard.
 
     While ``test_changelog_smoke_hats_test_count`` only checks the *count*
-    of HATS tests (16), this guard asserts the 16 specific test names
+    of HATS tests (17), this guard asserts the 17 specific test names
     listed in CHANGELOG's "Added — HATS / LSDB Integration" bullet
     exist verbatim in **both** the source file and the CHANGELOG text.
     Together they form a bidirectional exact-match check that catches
-    renames AND file moves even when the count stays at 16.
+    renames AND file moves even when the count stays at 17.
 
     Two failure modes are caught here, both invisible to the count guard:
 
@@ -361,7 +362,7 @@ def test_changelog_smoke_hats_named_in_bullets() -> None:
     2. **Edit drift.**  A contributor removes a name from CHANGELOG but
        the corresponding test still exists.  Reverse check fails.
 
-    The 16 test names are listed inline so a contributor reading this
+    The 17 test names are listed inline so a contributor reading this
     guard can audit them alongside the inventory without consulting
     CHANGELOG.md separately.
 
@@ -370,7 +371,7 @@ def test_changelog_smoke_hats_named_in_bullets() -> None:
     ``hats.py``; the count guard uses ``-k 'hats.py'`` (with the dot) so
     this guard is not silently included in the count.  Renaming this
     test to ``test_changelog_smoke_hats.py_names_listed`` would inflate
-    the count to 17.
+    the count to 18.
 
     !!! File-path coupling (intentional) — see module-level Constraint #2 !!!
     Reads ``tests/test_hats.py`` directly.  If HATS tests reorganise to

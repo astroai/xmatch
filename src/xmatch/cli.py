@@ -404,6 +404,8 @@ OUTDATED_CATALOGUE_FIELDS: frozenset[str] = frozenset(
         "dec_err_column",
         "pm_ra_column",
         "pm_dec_column",
+        "parallax_column",
+        "radial_velocity_column",
         "epoch_column",
         "pos_err_units",
         "default_pos_error_arcsec",
@@ -1644,6 +1646,10 @@ def describe(cm: CrossMatch, name: str, console: Console) -> bool:
     if cat.get("pm_ra_column") or cat.get("pm_dec_column"):
         sys.stdout.write("\n")
         console.dim_print("  (proper-motion columns available)")
+    if cat.get("parallax_column"):
+        kv("Parallax column", cat["parallax_column"])
+    if cat.get("radial_velocity_column"):
+        kv("Radial velocity", cat["radial_velocity_column"])
     return True
 
 

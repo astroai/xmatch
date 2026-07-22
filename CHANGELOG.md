@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added — New Match Features
 
+* **Six-dimensional epoch propagation**: catalogue sources can map parallax
+  and radial-velocity columns. Rows with a complete finite physical state use
+  Torchsky's perspective-acceleration/light-time propagation; incomplete rows
+  retain the existing angular proper-motion path without distance or velocity
+  imputation.
 * **Proper motion correction**: `MatchSpec.target_epoch` propagates RA/Dec to a
   common Julian-year epoch using per-row `pm_ra_column` / `pm_dec_column` +
   `epoch_column` (or catalogue-level `epoch`). NaN proper motions treated as
@@ -131,13 +136,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `right_suffix`; `crossmatch_multi` handles HATS catalogues at any position
   (including 3+); download loop guards against HATS sources.
 * **`_dist_arcsec` missing warning**: logs a warning when LSDB result lacks the
-  expected column (e.g., future API change).* **16 HATS tests** (`tests/test_hats.py`): fully mocked (no LSDB required),
-covering alias resolution, crossmatch parameter passthrough, multi-row
-`find="all"` results, join type validation, local-frame conversion,
-column renaming, and `crossmatch_multi` routing.  Names verified by
-the bidirectional static-scan guards in `tests/test_ci_smoke.py`:
+  expected column (e.g., future API change).
+* **17 HATS tests** (`tests/test_hats.py`): fully mocked (no LSDB required),
+  covering alias resolution, crossmatch parameter passthrough, multi-row
+  `find="all"` results, join type validation, target-epoch rejection,
+  local-frame conversion, column renaming, and `crossmatch_multi` routing.
+  Names verified by the bidirectional static-scan guards in
+  `tests/test_ci_smoke.py`:
 `test_lsdb_available_false`, `test_require_lsdb_raises_with_helpful_message`,
 `test_read_hats_no_path`, `test_hats_crossmatch_unsupported_join_type_raises`,
+`test_hats_target_epoch_fails_instead_of_matching_unpropagated_coordinates`,
 `test_hats_crossmatch_passes_n_neighbors_best`,
 `test_hats_crossmatch_passes_n_neighbors_all`,
 `test_hats_crossmatch_find_all_multi_row_rename`,
@@ -179,7 +187,7 @@ names are pinned by the bidirectional static-scan guards in
 
 ### Notes
 
-* 92 non-slow tests pass; 9 slow (real-catalogue) tests pass; 16 HATS tests;
+* 92 non-slow tests pass; 9 slow (real-catalogue) tests pass; 17 HATS tests;
   2 Data Lab tests. Zero regressions across Gaia DR3, AllWISE, USNO-B1.0.
 * No breaking changes — all existing APIs unchanged.
 

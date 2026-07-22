@@ -49,6 +49,111 @@ def test_local_vs_remote_forwards_correct_side_columns(cm, monkeypatch):
     assert captured["columns"] == ["ra", "dec", "source_id"]
 
 
+def test_target_epoch_forces_remote_space_motion_columns(cm, monkeypatch):
+    import xmatch.remote_tap as rt
+
+    captured = {}
+
+    def fake_download(src, **kwargs):
+        captured["columns"] = kwargs.get("columns")
+        return pl.DataFrame()
+
+    monkeypatch.setattr(rt, "download_from_tap", fake_download)
+    src = cm.resolve_source("gaia", {})
+    req = MatchRequest(
+        "gaia",
+        "gaia",
+        spec=MatchSpec(target_epoch=2025.0),
+        ra=10.0,
+        dec=5.0,
+        radius_deg=0.01,
+    )
+    req.side1.columns = ["source_id"]
+
+    cm._download_remote(src, req, prefix="1")
+
+    assert set(captured["columns"]) == {
+        "source_id",
+        "ra",
+        "dec",
+        "pmra",
+        "pmdec",
+        "ref_epoch",
+        "parallax",
+        "radial_velocity",
+    }
+
+
+def test_target_epoch_bypasses_unpropagated_tap_self_join(cm, monkeypatch):
+    import xmatch.remote_tap as rt
+
+    src1 = cm.resolve_source("gaia", {})
+    src2 = cm.resolve_source("gaia", {})
+    req = MatchRequest(
+        "gaia",
+        "gaia",
+        spec=MatchSpec(target_epoch=2025.0),
+        ra=10.0,
+        dec=5.0,
+        radius_deg=0.01,
+    )
+    downloads = []
+
+    def fail_self_join(*args, **kwargs):
+        raise AssertionError("target-epoch matching must not use server-side coordinates")
+
+    def fake_download(src, req, **kwargs):
+        downloads.append(src.name)
+        return pl.DataFrame({"ra": [], "dec": []})
+
+    def fake_local_match(*args, **kwargs):
+        return pl.DataFrame({"ok": [True]}).lazy()
+
+    monkeypatch.setattr(rt, "tap_self_join", fail_self_join)
+    monkeypatch.setattr(cm, "_download_remote", fake_download)
+    monkeypatch.setattr(cm, "_local_match", fake_local_match)
+
+    result = cm._remote_vs_remote(src1, src2, req).collect()
+
+    assert result["ok"].to_list() == [True]
+    assert downloads == ["gaia_esa", "gaia_esa"]
+
+
+def test_target_epoch_bypasses_unpropagated_cds_xmatch(cm, monkeypatch):
+    import xmatch.remote_cds as rc
+
+    local = cm.resolve_source(pl.DataFrame({"ra": [10.0], "dec": [5.0]}), {})
+    remote = cm.resolve_source("gaia_cds", {})
+    request = MatchRequest(
+        pl.DataFrame({"ra": [10.0], "dec": [5.0]}),
+        "gaia_cds",
+        spec=MatchSpec(target_epoch=2025.0),
+        ra=10.0,
+        dec=5.0,
+        radius_deg=0.01,
+    )
+    downloads = []
+
+    def fail_cds_xmatch(*args, **kwargs):
+        raise AssertionError("target-epoch matching must not use server-side coordinates")
+
+    def fake_download(src, req, **kwargs):
+        downloads.append(src.name)
+        return pl.DataFrame({"RA_ICRS": [], "DE_ICRS": []})
+
+    def fake_local_match(*args, **kwargs):
+        return pl.DataFrame({"ok": [True]}).lazy()
+
+    monkeypatch.setattr(rc, "cds_xmatch_local_remote", fail_cds_xmatch)
+    monkeypatch.setattr(cm, "_download_remote", fake_download)
+    monkeypatch.setattr(cm, "_local_match", fake_local_match)
+
+    result = cm._local_vs_remote(local, remote, request).collect()
+
+    assert result["ok"].to_list() == [True]
+    assert downloads == ["gaia_cds"]
+
+
 def test_download_remote_requires_region_when_no_local(cm):
     from xmatch.exceptions import CrossMatchError
 

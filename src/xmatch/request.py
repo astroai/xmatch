@@ -62,6 +62,24 @@ class SideOverrides:
     default_pos_error_arcsec: Optional[float] = None
     """Fallback one-axis positional error for local rows, in arcseconds."""
 
+    epoch: Optional[float] = None
+    """Catalogue-level Julian-year epoch."""
+
+    epoch_column: Optional[str] = None
+    """Per-row Julian-year epoch column."""
+
+    pm_ra_column: Optional[str] = None
+    """Cosine-weighted right-ascension proper-motion column, in mas/yr."""
+
+    pm_dec_column: Optional[str] = None
+    """Declination proper-motion column, in mas/yr."""
+
+    parallax_column: Optional[str] = None
+    """Parallax column, in mas, for complete space-motion propagation."""
+
+    radial_velocity_column: Optional[str] = None
+    """Barycentric radial-velocity column, in km/s."""
+
     columns: Optional[List[str]] = None
     """Columns to select on this side (defaults to ``CatalogueSource.default_columns``)."""
 
@@ -76,6 +94,12 @@ class SideOverrides:
             "dec_err_column",
             "pos_err_units",
             "default_pos_error_arcsec",
+            "epoch",
+            "epoch_column",
+            "pm_ra_column",
+            "pm_dec_column",
+            "parallax_column",
+            "radial_velocity_column",
         ):
             val = getattr(self, field_name)
             if val is not None:
@@ -216,6 +240,12 @@ class MatchRequest:
                 dec_err_column=params.get("dec_err_column_1"),
                 pos_err_units=params.get("pos_err_units_1"),
                 default_pos_error_arcsec=params.get("default_pos_error_arcsec_1"),
+                epoch=params.get("epoch_1"),
+                epoch_column=params.get("epoch_column_1"),
+                pm_ra_column=params.get("pm_ra_column_1"),
+                pm_dec_column=params.get("pm_dec_column_1"),
+                parallax_column=params.get("parallax_column_1"),
+                radial_velocity_column=params.get("radial_velocity_column_1"),
                 columns=_parse_columns(params.get("columns_1")),
             ),
             side2=SideOverrides(
@@ -226,6 +256,12 @@ class MatchRequest:
                 dec_err_column=params.get("dec_err_column_2"),
                 pos_err_units=params.get("pos_err_units_2"),
                 default_pos_error_arcsec=params.get("default_pos_error_arcsec_2"),
+                epoch=params.get("epoch_2"),
+                epoch_column=params.get("epoch_column_2"),
+                pm_ra_column=params.get("pm_ra_column_2"),
+                pm_dec_column=params.get("pm_dec_column_2"),
+                parallax_column=params.get("parallax_column_2"),
+                radial_velocity_column=params.get("radial_velocity_column_2"),
                 columns=_parse_columns(params.get("columns_2")),
             ),
             ra=params.get("ra"),

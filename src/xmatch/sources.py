@@ -37,6 +37,8 @@ class CatalogueSource:
     epoch_column: Optional[str] = None
     pm_ra_column: Optional[str] = None
     pm_dec_column: Optional[str] = None
+    parallax_column: Optional[str] = None
+    radial_velocity_column: Optional[str] = None
 
     # Remote access metadata.
     access_method: Optional[str] = None  # None | "tap" | "cds_xmatch" | "hats"

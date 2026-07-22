@@ -174,6 +174,69 @@ def _load_torchsky_propagate_proper_motion():
     return torchsky_propagate
 
 
+def propagate_space_motion(
+    ra: np.ndarray,
+    dec: np.ndarray,
+    pm_ra_cosdec: np.ndarray,
+    pm_dec: np.ndarray,
+    parallax: np.ndarray,
+    radial_velocity: np.ndarray,
+    source_epoch: np.ndarray,
+    target_epoch: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Propagate complete finite ICRS states to a common Julian-year epoch.
+
+    Parallax is in mas and radial velocity in km/s. Callers must route missing
+    or non-positive-distance rows through :func:`propagate_proper_motion`.
+    """
+    values = [
+        np.asarray(value, dtype=float)
+        for value in (
+            ra,
+            dec,
+            pm_ra_cosdec,
+            pm_dec,
+            parallax,
+            radial_velocity,
+            source_epoch,
+        )
+    ]
+    torchsky_propagate = _load_torchsky_propagate_space_motion()
+    if torchsky_propagate is not None:
+        result = torchsky_propagate(
+            *values[:6],
+            source_epoch_jyear=values[6],
+            target_epoch_jyear=target_epoch,
+        )
+        return _as_numpy(result[0]), _as_numpy(result[1])
+
+    import astropy.units as u
+    from astropy.coordinates import SkyCoord
+    from astropy.time import Time
+
+    coords = SkyCoord(
+        ra=values[0] * u.deg,
+        dec=values[1] * u.deg,
+        pm_ra_cosdec=values[2] * u.mas / u.yr,
+        pm_dec=values[3] * u.mas / u.yr,
+        distance=(1000.0 / values[4]) * u.pc,
+        radial_velocity=values[5] * u.km / u.s,
+        obstime=Time(values[6], format="jyear", scale="tcb"),
+        frame="icrs",
+    )
+    moved = coords.apply_space_motion(new_obstime=Time(target_epoch, format="jyear", scale="tcb"))
+    return moved.ra.deg, moved.dec.deg
+
+
+def _load_torchsky_propagate_space_motion():
+    """Return Torchsky's complete space-motion primitive when installed."""
+    try:
+        from torchsky.wcs import propagate_space_motion as torchsky_propagate
+    except ImportError:
+        return None
+    return torchsky_propagate
+
+
 def _as_numpy(value) -> np.ndarray:
     """Materialise a Torch tensor (or compatible array) as a NumPy float array."""
     if hasattr(value, "detach"):

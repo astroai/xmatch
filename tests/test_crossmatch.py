@@ -49,6 +49,43 @@ def test_resolve_source_remote_alias(cm):
     assert src.name == "gaia_esa"
 
 
+def test_gaia_source_exposes_complete_space_motion_metadata(cm):
+    src = cm.resolve_source("gaia", {})
+    assert src.parallax_column == "parallax"
+    assert src.radial_velocity_column == "radial_velocity"
+    assert "parallax" in src.default_columns
+    assert "radial_velocity" in src.default_columns
+
+
+def test_local_source_preserves_space_motion_overrides(cm):
+    frame = pl.DataFrame(
+        {
+            "ra": [1.0],
+            "dec": [2.0],
+            "pmra": [3.0],
+            "pmdec": [4.0],
+            "epoch": [2016.0],
+            "parallax": [5.0],
+            "rv": [6.0],
+        }
+    )
+    src = cm.resolve_source(
+        frame,
+        {
+            "pm_ra_column": "pmra",
+            "pm_dec_column": "pmdec",
+            "epoch_column": "epoch",
+            "parallax_column": "parallax",
+            "radial_velocity_column": "rv",
+        },
+    )
+    assert src.pm_ra_column == "pmra"
+    assert src.pm_dec_column == "pmdec"
+    assert src.epoch_column == "epoch"
+    assert src.parallax_column == "parallax"
+    assert src.radial_velocity_column == "rv"
+
+
 def test_resolve_source_datalab_alias(cm):
     """Data Lab catalogue aliases resolve to TAP-backed CatalogueSource."""
     for alias, expected_name, expected_table, expect_ra, expect_dec in [

@@ -141,6 +141,12 @@ class CrossMatch:
                 raise ConfigError(
                     f"Catalogue '{name}' references unknown service '{cat['service_id']}'."
                 )
+            for field_name in ("parallax_column", "radial_velocity_column"):
+                value = cat.get(field_name)
+                if value is not None and (not isinstance(value, str) or not value.strip()):
+                    raise ConfigError(
+                        f"Catalogue '{name}' has invalid '{field_name}'; expected a column name."
+                    )
 
         for alias, target in self.aliases_config.items():
             if target not in self.catalogues_config:
@@ -252,6 +258,12 @@ class CrossMatch:
         src.dec_err_column = overrides.get("dec_err_column")
         src.pos_err_units = overrides.get("pos_err_units") or "arcsec"
         src.default_pos_error_arcsec = overrides.get("default_pos_error_arcsec")
+        src.epoch = overrides.get("epoch")
+        src.epoch_column = overrides.get("epoch_column")
+        src.pm_ra_column = overrides.get("pm_ra_column")
+        src.pm_dec_column = overrides.get("pm_dec_column")
+        src.parallax_column = overrides.get("parallax_column")
+        src.radial_velocity_column = overrides.get("radial_velocity_column")
         # Apply explicit overrides first; fall back to auto-detection. Note that
         # we no longer raise on missing RA/Dec here so ``id_join`` flows can
         # operate on tables without spatial columns; the hard error is now
@@ -281,10 +293,13 @@ class CrossMatch:
             corr_column=cfg.get("corr_column"),
             pos_err_units=cfg.get("pos_err_units", "arcsec"),
             default_pos_error_arcsec=cfg.get("default_pos_error_arcsec"),
-            epoch=cfg.get("epoch"),
-            epoch_column=cfg.get("epoch_column"),
-            pm_ra_column=cfg.get("pm_ra_column"),
-            pm_dec_column=cfg.get("pm_dec_column"),
+            epoch=overrides.get("epoch") if "epoch" in overrides else cfg.get("epoch"),
+            epoch_column=overrides.get("epoch_column") or cfg.get("epoch_column"),
+            pm_ra_column=overrides.get("pm_ra_column") or cfg.get("pm_ra_column"),
+            pm_dec_column=overrides.get("pm_dec_column") or cfg.get("pm_dec_column"),
+            parallax_column=overrides.get("parallax_column") or cfg.get("parallax_column"),
+            radial_velocity_column=overrides.get("radial_velocity_column")
+            or cfg.get("radial_velocity_column"),
             access_method=cfg.get("access_method"),
             archive=cfg.get("_archive_name"),
             access_identifier=cfg.get("access_identifier") or cfg.get("table_name"),
@@ -302,6 +317,12 @@ class CrossMatch:
             ra_column=overrides.get("ra_column"),
             dec_column=overrides.get("dec_column"),
             id_column=overrides.get("id_column"),
+            epoch=overrides.get("epoch"),
+            epoch_column=overrides.get("epoch_column"),
+            pm_ra_column=overrides.get("pm_ra_column"),
+            pm_dec_column=overrides.get("pm_dec_column"),
+            parallax_column=overrides.get("parallax_column"),
+            radial_velocity_column=overrides.get("radial_velocity_column"),
         )
 
     # --------------------------------------------------------------- execution
@@ -1204,6 +1225,10 @@ class CrossMatch:
         progress_cb: Optional[Callable[[str], None]] = None,
     ) -> pl.LazyFrame:
         if src1.access_method == "hats" or src2.access_method == "hats":
+            if req.spec.target_epoch is not None:
+                raise CrossMatchError(
+                    "target-epoch propagation is not yet supported by the HATS/LSDB engine"
+                )
             from . import hats_source
 
             lf1 = src1.lazy() if src1.is_local else None
@@ -1274,7 +1299,11 @@ class CrossMatch:
         local_lf = local.lazy()
         remote_prefix = "2" if src1.is_local else "1"
 
-        if remote.access_method == "cds_xmatch" and not req.id_join:
+        if (
+            remote.access_method == "cds_xmatch"
+            and not req.id_join
+            and req.spec.target_epoch is None
+        ):
             from .remote_cds import cds_xmatch_local_remote
 
             result = cds_xmatch_local_remote(local, remote, local_lf, req.spec)
@@ -1306,6 +1335,7 @@ class CrossMatch:
             and src2.access_method == "tap"
             and src1.tap_url == src2.tap_url
             and not req.id_join
+            and req.spec.target_epoch is None
         ):
             from .remote_tap import tap_self_join
 
@@ -1355,6 +1385,19 @@ class CrossMatch:
         columns = (
             req.side1.columns if prefix == "1" else req.side2.columns if prefix == "2" else None
         )
+        if req.spec.target_epoch is not None:
+            required = (
+                src.ra_column,
+                src.dec_column,
+                src.pm_ra_column,
+                src.pm_dec_column,
+                src.epoch_column,
+                src.parallax_column,
+                src.radial_velocity_column,
+            )
+            columns = list(
+                dict.fromkeys([*(columns or src.default_columns or []), *filter(None, required)])
+            )
         auth_session = self.auth_config.get_auth_session(src.archive)
         if src.access_method == "tap":
             from .remote_tap import download_from_tap

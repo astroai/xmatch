@@ -436,7 +436,7 @@ def _apply_proper_motion(
     information are available on a side.  Returns the (possibly modified)
     pair.
     """
-    from .astro_utils import propagate_proper_motion
+    from .astro_utils import propagate_proper_motion, propagate_space_motion
 
     has_left_pm = bool(
         left_src.pm_ra_column
@@ -453,6 +453,8 @@ def _apply_proper_motion(
         return left, right
 
     def _propagate_side(df: pl.DataFrame, src: CatalogueSource, label: str) -> pl.DataFrame:
+        if df.is_empty():
+            return df
         if not (src.pm_ra_column and src.pm_dec_column):
             logger.debug("No PM columns on %s side; skipping.", label)
             return df
@@ -473,18 +475,85 @@ def _apply_proper_motion(
         pmra = df[src.pm_ra_column].to_numpy().astype(float)
         pmde = df[src.pm_dec_column].to_numpy().astype(float)
 
-        new_ra, new_dec = propagate_proper_motion(
-            ra_arr,
-            dec_arr,
-            pmra,
-            pmde,
-            epoch_arr,
-            target_epoch,
+        complete = np.zeros(df.height, dtype=bool)
+        parallax = radial_velocity = None
+        has_6d_columns = bool(
+            src.parallax_column
+            and src.radial_velocity_column
+            and src.parallax_column in df.columns
+            and src.radial_velocity_column in df.columns
         )
+        if has_6d_columns:
+            parallax = df[src.parallax_column].to_numpy().astype(float)
+            radial_velocity = df[src.radial_velocity_column].to_numpy().astype(float)
+            complete = (
+                np.isfinite(ra_arr)
+                & np.isfinite(dec_arr)
+                & np.isfinite(pmra)
+                & np.isfinite(pmde)
+                & np.isfinite(epoch_arr)
+                & np.isfinite(parallax)
+                & (parallax > 0.0)
+                & np.isfinite(radial_velocity)
+            )
+            transverse_speed = (
+                4.740470463 * np.hypot(pmra, pmde) / np.where(parallax > 0.0, parallax, np.nan)
+            )
+            admissible = np.hypot(transverse_speed, radial_velocity) < 0.5 * 299_792.458
+            rejected = complete & ~admissible
+            if np.any(rejected):
+                logger.warning(
+                    "6D space-motion propagation %s: %d physically inconsistent rows "
+                    "kept on the angular path",
+                    label,
+                    int(rejected.sum()),
+                )
+            complete &= admissible
+
+        new_ra = ra_arr.copy()
+        new_dec = dec_arr.copy()
+        angular = ~complete
+        if np.any(angular):
+            moved_ra, moved_dec = propagate_proper_motion(
+                ra_arr[angular],
+                dec_arr[angular],
+                pmra[angular],
+                pmde[angular],
+                epoch_arr[angular],
+                target_epoch,
+            )
+            new_ra[angular] = moved_ra
+            new_dec[angular] = moved_dec
+        if np.any(complete):
+            assert parallax is not None and radial_velocity is not None
+            try:
+                moved_ra, moved_dec = propagate_space_motion(
+                    ra_arr[complete],
+                    dec_arr[complete],
+                    pmra[complete],
+                    pmde[complete],
+                    parallax[complete],
+                    radial_velocity[complete],
+                    epoch_arr[complete],
+                    target_epoch,
+                )
+            except ValueError as exc:
+                raise CrossMatchError(
+                    f"6D space-motion propagation failed for {int(complete.sum())} "
+                    f"complete {label} rows: {exc}"
+                ) from exc
+            new_ra[complete] = moved_ra
+            new_dec[complete] = moved_dec
+            logger.debug(
+                "6D space-motion propagation %s: %d/%d rows",
+                label,
+                int(complete.sum()),
+                df.height,
+            )
         logger.info(
             "PM propagation %s: max ΔRA=%.4f arcsec, max ΔDec=%.4f arcsec",
             label,
-            float(np.nanmax(np.abs(new_ra - ra_arr))) * 3600.0,
+            float(np.nanmax(np.abs((new_ra - ra_arr + 180.0) % 360.0 - 180.0))) * 3600.0,
             float(np.nanmax(np.abs(new_dec - dec_arr))) * 3600.0,
         )
         return df.with_columns(
@@ -2692,6 +2761,8 @@ def sky_match(
 
     # --- proper motion propagation (common to all engines) -----------------
     if spec.target_epoch is not None:
+        if not math.isfinite(float(spec.target_epoch)):
+            raise CrossMatchError("target_epoch must be finite")
         left_eager = left_lf.collect()
         right_eager = right_lf.collect()
         left_eager, right_eager = _apply_proper_motion(

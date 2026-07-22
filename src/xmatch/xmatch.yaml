@@ -112,9 +112,11 @@ catalogues:
     dec_column: "DE_ICRS"
     id_column: "Source" # Add ID column
     # Default columns: VizieR names. pmRA/pmDE are in mas/yr
-    default_columns: ["Source", "RA_ICRS", "DE_ICRS", "pmRA", "pmDE", "Plx", "Gmag", "Epoch"]
+    default_columns: ["Source", "RA_ICRS", "DE_ICRS", "pmRA", "pmDE", "Plx", "RV", "Gmag", "Epoch"]
     pm_ra_column: "pmRA"
     pm_dec_column: "pmDE"
+    parallax_column: "Plx"
+    radial_velocity_column: "RV"
     epoch_column: "Epoch"
     # Positional Error Configuration (check VizieR column names)
     ra_err_column: "e_RA_ICRS"
@@ -286,9 +288,11 @@ catalogues:
     ra_column: "ra" # Assuming same names as ESA
     dec_column: "dec"
     id_column: "source_id" # Add ID column
-    default_columns: ["source_id", "ra", "dec", "pmra", "pmdec", "parallax", "phot_g_mean_mag", "ref_epoch"]
+    default_columns: ["source_id", "ra", "dec", "pmra", "pmdec", "parallax", "radial_velocity", "phot_g_mean_mag", "ref_epoch"]
     pm_ra_column: "pmra"
     pm_dec_column: "pmdec"
+    parallax_column: "parallax"
+    radial_velocity_column: "radial_velocity"
     epoch_column: "ref_epoch"
     ra_err_column: "ra_error"
     dec_err_column: "dec_error"
@@ -347,9 +351,11 @@ catalogues:
     ra_column: "ra"
     dec_column: "dec"
     id_column: "source_id"
-    default_columns: ["source_id", "ra", "dec", "pmra", "pmdec", "parallax", "phot_g_mean_mag", "ref_epoch"]
+    default_columns: ["source_id", "ra", "dec", "pmra", "pmdec", "parallax", "radial_velocity", "phot_g_mean_mag", "ref_epoch"]
     pm_ra_column: "pmra"
     pm_dec_column: "pmdec"
+    parallax_column: "parallax"
+    radial_velocity_column: "radial_velocity"
     epoch_column: "ref_epoch"
     ra_err_column: "ra_error"
     dec_err_column: "dec_error"
