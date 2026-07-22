@@ -21,9 +21,9 @@ column. ``id_join`` is a pure polars relational join and is engine-agnostic.
 Match criteria:
 
 * ``sky`` – pairs within ``radius_arcsec``.
-* ``skyerr`` / ``skyellipse`` – pairs with ``sep <= max_error * (e_left + e_right)``
-  where ``e = hypot(ra_err, dec_err)`` (floored by the catalogue default).
-  Correlation is not yet modelled, so ``skyellipse`` behaves like ``skyerr``.
+* ``skyerr`` – radial N-sigma matching from per-row positional errors.
+* ``skyellipse`` – full local 2D Mahalanobis matching, including declared
+  correlations and target-epoch transported covariance when available.
 
 Tier 3 — Bayesian probabilistic qualification: when ``MatchSpec.prior_columns``
 is non-empty (and the catalogue has those columns), every matched pair is
@@ -49,13 +49,17 @@ import numpy as np
 import polars as pl
 
 from .exceptions import CrossMatchError
-from .sources import CatalogueSource
+from .sources import ASTROMETRIC_COVARIANCE_KEYS, CatalogueSource
 
 logger = logging.getLogger(__name__)
 
 SEP_COLUMN = "sep_arcsec"
 PMATCH_COLUMN = "p_match"
 _RIGHT_SUFFIX = "_2"
+_PROPAGATED_COV_EE = "_propagated_cov_ee_arcsec2"
+_PROPAGATED_COV_NN = "_propagated_cov_nn_arcsec2"
+_PROPAGATED_COV_EN = "_propagated_cov_en_arcsec2"
+_PROPAGATED_COV_PREFIX = "_propagated_cov_"
 
 _UNIT_TO_ARCSEC = {"arcsec": 1.0, "mas": 1e-3, "deg": 3600.0, "arcmin": 60.0}
 
@@ -201,14 +205,30 @@ def _build_result(
             pl.DataFrame({"macauff_prob": np.asarray(macauff_prob, dtype=float)})
         )
 
-    # Drop internal per-row PM drift column from output (if present).
-    drift_cols = [c for c in matched.columns if c.startswith(_PM_DRIFT_COLUMN)]
-    if drift_cols:
-        matched = matched.drop(drift_cols)
+    # Drop internal uncertainty-transport columns from output (if present).
+    internal_cols = [
+        c
+        for c in matched.columns
+        if c.startswith(_PM_DRIFT_COLUMN) or c.startswith(_PROPAGATED_COV_PREFIX)
+    ]
+    if internal_cols:
+        matched = matched.drop(internal_cols)
 
     # Also sanitise left/right so unmatched rows don't leak the column.
-    left = left.drop([c for c in left.columns if c.startswith(_PM_DRIFT_COLUMN)])
-    right = right.drop([c for c in right.columns if c.startswith(_PM_DRIFT_COLUMN)])
+    left = left.drop(
+        [
+            c
+            for c in left.columns
+            if c.startswith(_PM_DRIFT_COLUMN) or c.startswith(_PROPAGATED_COV_PREFIX)
+        ]
+    )
+    right = right.drop(
+        [
+            c
+            for c in right.columns
+            if c.startswith(_PM_DRIFT_COLUMN) or c.startswith(_PROPAGATED_COV_PREFIX)
+        ]
+    )
 
     jt = spec.join_type
     parts = []
@@ -291,7 +311,6 @@ def _pos_covariance(
     information is available on this side.
     """
     factor = _UNIT_TO_ARCSEC.get((src.pos_err_units or "arcsec").lower(), 1.0)
-    factor * factor
     floor = (
         float(src.default_pos_error_arcsec) if src.default_pos_error_arcsec is not None else None
     )
@@ -300,6 +319,7 @@ def _pos_covariance(
     if _PM_DRIFT_COLUMN in df.columns:
         drift_sq = np.nan_to_num(df[_PM_DRIFT_COLUMN].to_numpy().astype(float), nan=0.0) ** 2
 
+    result = None
     if src.ra_err_column in df.columns and src.dec_err_column in df.columns:
         ra_e = df[src.ra_err_column].to_numpy().astype(float) * factor
         de_e = df[src.dec_err_column].to_numpy().astype(float) * factor
@@ -320,20 +340,56 @@ def _pos_covariance(
             )
         else:
             rho = np.zeros(df.height, dtype=float)
-        return sigma_sq_ra, sigma_sq_dec, rho
-    if floor is not None:
+        result = sigma_sq_ra, sigma_sq_dec, rho
+    elif floor is not None:
         floor_sq = floor * floor
         sigma_sq_ra = np.full(df.height, floor_sq)
         sigma_sq_dec = np.full(df.height, floor_sq)
         if drift_sq is not None:
             sigma_sq_ra = sigma_sq_ra + drift_sq
             sigma_sq_dec = sigma_sq_dec + drift_sq
-        return sigma_sq_ra, sigma_sq_dec, np.zeros(df.height, dtype=float)
+        result = sigma_sq_ra, sigma_sq_dec, np.zeros(df.height, dtype=float)
     # When only per-row drift is available (no error columns, no floor),
     # use drift as the sole positional uncertainty.
-    if drift_sq is not None:
-        return drift_sq, drift_sq, np.zeros(df.height, dtype=float)
-    return None
+    elif drift_sq is not None:
+        result = drift_sq, drift_sq, np.zeros(df.height, dtype=float)
+
+    propagated_columns = (_PROPAGATED_COV_EE, _PROPAGATED_COV_NN, _PROPAGATED_COV_EN)
+    if all(column in df.columns for column in propagated_columns):
+        ee = df[_PROPAGATED_COV_EE].to_numpy().astype(float).copy()
+        nn = df[_PROPAGATED_COV_NN].to_numpy().astype(float).copy()
+        en = df[_PROPAGATED_COV_EN].to_numpy().astype(float)
+        if floor is not None:
+            ee = np.maximum(ee, floor * floor)
+            nn = np.maximum(nn, floor * floor)
+        if drift_sq is not None:
+            ee += drift_sq
+            nn += drift_sq
+        valid = (
+            np.isfinite(ee)
+            & np.isfinite(nn)
+            & np.isfinite(en)
+            & (ee >= 0.0)
+            & (nn >= 0.0)
+            & (ee * nn >= en * en)
+        )
+        if result is None:
+            sigma_sq_ra = np.full(df.height, np.nan)
+            sigma_sq_dec = np.full(df.height, np.nan)
+            rho = np.full(df.height, np.nan)
+        else:
+            sigma_sq_ra, sigma_sq_dec, rho = result
+        sigma_sq_ra[valid] = ee[valid]
+        sigma_sq_dec[valid] = nn[valid]
+        denominator = np.sqrt(ee[valid] * nn[valid])
+        rho[valid] = np.divide(
+            en[valid],
+            denominator,
+            out=np.zeros_like(en[valid]),
+            where=denominator > 0.0,
+        )
+        result = sigma_sq_ra, sigma_sq_dec, rho
+    return result
 
 
 def _skyellipse_search_chord_max(
@@ -423,12 +479,77 @@ def _arcsec_to_chord(arcsec: float) -> float:
 # --------------------------------------------------------------------------- #
 # proper motion correction
 # --------------------------------------------------------------------------- #
+def _astrometric_covariance_mas(
+    df: pl.DataFrame,
+    src: CatalogueSource,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Build Gaia-style five-parameter covariances in Torchsky order.
+
+    The returned covariance order is ``(alpha*, delta, pmra, pmdec,
+    parallax)``. Errors use Gaia's native mas / mas-per-year units.
+    """
+    columns = src.astrometric_covariance_columns
+    if not columns or set(columns) != set(ASTROMETRIC_COVARIANCE_KEYS):
+        return None
+    if any(column not in df.columns for column in columns.values()):
+        return None
+
+    gaia_parameters = ("ra", "dec", "parallax", "pmra", "pmdec")
+    errors = np.stack(
+        [
+            df[columns[f"{parameter}_error"]].to_numpy().astype(float)
+            for parameter in gaia_parameters
+        ],
+        axis=-1,
+    )
+    covariance = np.zeros((df.height, 5, 5), dtype=float)
+    diagonal = np.arange(5)
+    covariance[:, diagonal, diagonal] = errors * errors
+    correlation_keys = {
+        (0, 1): "ra_dec_corr",
+        (0, 2): "ra_parallax_corr",
+        (0, 3): "ra_pmra_corr",
+        (0, 4): "ra_pmdec_corr",
+        (1, 2): "dec_parallax_corr",
+        (1, 3): "dec_pmra_corr",
+        (1, 4): "dec_pmdec_corr",
+        (2, 3): "parallax_pmra_corr",
+        (2, 4): "parallax_pmdec_corr",
+        (3, 4): "pmra_pmdec_corr",
+    }
+    correlations = []
+    for (left, right), key in correlation_keys.items():
+        correlation = df[columns[key]].to_numpy().astype(float)
+        correlations.append(correlation)
+        cross = correlation * errors[:, left] * errors[:, right]
+        covariance[:, left, right] = cross
+        covariance[:, right, left] = cross
+
+    valid = np.isfinite(errors).all(axis=1) & (errors > 0.0).all(axis=1)
+    correlation_values = np.stack(correlations, axis=-1)
+    valid &= np.isfinite(correlation_values).all(axis=1)
+    valid &= (np.abs(correlation_values) <= 1.0).all(axis=1)
+    safe_covariance = covariance.copy()
+    safe_covariance[~valid] = np.eye(5)
+    eigenvalues = np.linalg.eigvalsh(safe_covariance)
+    scale = np.maximum(np.max(np.diagonal(safe_covariance, axis1=1, axis2=2), axis=1), 1.0)
+    valid &= eigenvalues[:, 0] >= -1e-10 * scale
+
+    # Gaia publishes (alpha*, delta, parallax, pmra, pmdec); Torchsky's local
+    # state orders proper motion before parallax.
+    order = np.array([0, 1, 3, 4, 2])
+    return covariance[:, order][:, :, order], valid
+
+
 def _apply_proper_motion(
     left: pl.DataFrame,
     right: pl.DataFrame,
     left_src: CatalogueSource,
     right_src: CatalogueSource,
     target_epoch: float,
+    *,
+    propagate_covariance: bool = False,
+    fallback_policy: str = "warn",
 ) -> Tuple[pl.DataFrame, pl.DataFrame]:
     """Propagate coordinates to ``target_epoch`` using per-row PM + epoch.
 
@@ -436,7 +557,11 @@ def _apply_proper_motion(
     information are available on a side.  Returns the (possibly modified)
     pair.
     """
-    from .astro_utils import propagate_proper_motion, propagate_space_motion
+    from .astro_utils import (
+        propagate_proper_motion,
+        propagate_space_motion,
+        propagate_space_motion_with_jacobian,
+    )
 
     has_left_pm = bool(
         left_src.pm_ra_column
@@ -512,6 +637,49 @@ def _apply_proper_motion(
 
         new_ra = ra_arr.copy()
         new_dec = dec_arr.copy()
+        covariance_done = np.zeros(df.height, dtype=bool)
+        propagated_covariance = None
+        covariance_data = _astrometric_covariance_mas(df, src) if propagate_covariance else None
+        if covariance_data is not None:
+            covariance, covariance_valid = covariance_data
+            covariance_rows = complete & covariance_valid
+            if np.any(covariance_rows):
+                result = propagate_space_motion_with_jacobian(
+                    ra_arr[covariance_rows],
+                    dec_arr[covariance_rows],
+                    pmra[covariance_rows],
+                    pmde[covariance_rows],
+                    parallax[covariance_rows],
+                    radial_velocity[covariance_rows],
+                    epoch_arr[covariance_rows],
+                    target_epoch,
+                )
+                if result is None:
+                    message = (
+                        "target-epoch skyellipse covariance propagation requires "
+                        "Torchsky propagate_space_motion_with_jacobian"
+                    )
+                    if fallback_policy == "error":
+                        raise CrossMatchError(message)
+                    logger.warning("%s; retaining reference-epoch ellipses.", message)
+                else:
+                    moved_ra, moved_dec, jacobian = result
+                    new_ra[covariance_rows] = moved_ra
+                    new_dec[covariance_rows] = moved_dec
+                    covariance_done[covariance_rows] = True
+                    position_jacobian = jacobian[:, :2, :5]
+                    target_covariance = (
+                        position_jacobian
+                        @ covariance[covariance_rows]
+                        @ np.swapaxes(position_jacobian, -1, -2)
+                    )
+                    target_covariance = 0.5 * (
+                        target_covariance + np.swapaxes(target_covariance, -1, -2)
+                    )
+                    target_covariance /= 1_000_000.0  # mas² to arcsec²
+                    propagated_covariance = np.full((df.height, 2, 2), np.nan)
+                    propagated_covariance[covariance_rows] = target_covariance
+
         angular = ~complete
         if np.any(angular):
             moved_ra, moved_dec = propagate_proper_motion(
@@ -524,26 +692,28 @@ def _apply_proper_motion(
             )
             new_ra[angular] = moved_ra
             new_dec[angular] = moved_dec
-        if np.any(complete):
+        complete_without_covariance = complete & ~covariance_done
+        if np.any(complete_without_covariance):
             assert parallax is not None and radial_velocity is not None
             try:
                 moved_ra, moved_dec = propagate_space_motion(
-                    ra_arr[complete],
-                    dec_arr[complete],
-                    pmra[complete],
-                    pmde[complete],
-                    parallax[complete],
-                    radial_velocity[complete],
-                    epoch_arr[complete],
+                    ra_arr[complete_without_covariance],
+                    dec_arr[complete_without_covariance],
+                    pmra[complete_without_covariance],
+                    pmde[complete_without_covariance],
+                    parallax[complete_without_covariance],
+                    radial_velocity[complete_without_covariance],
+                    epoch_arr[complete_without_covariance],
                     target_epoch,
                 )
             except ValueError as exc:
                 raise CrossMatchError(
-                    f"6D space-motion propagation failed for {int(complete.sum())} "
+                    f"6D space-motion propagation failed for "
+                    f"{int(complete_without_covariance.sum())} "
                     f"complete {label} rows: {exc}"
                 ) from exc
-            new_ra[complete] = moved_ra
-            new_dec[complete] = moved_dec
+            new_ra[complete_without_covariance] = moved_ra
+            new_dec[complete_without_covariance] = moved_dec
             logger.debug(
                 "6D space-motion propagation %s: %d/%d rows",
                 label,
@@ -556,10 +726,19 @@ def _apply_proper_motion(
             float(np.nanmax(np.abs((new_ra - ra_arr + 180.0) % 360.0 - 180.0))) * 3600.0,
             float(np.nanmax(np.abs(new_dec - dec_arr))) * 3600.0,
         )
-        return df.with_columns(
+        columns = [
             pl.Series(src.ra_column, new_ra),
             pl.Series(src.dec_column, new_dec),
-        )
+        ]
+        if propagated_covariance is not None:
+            columns.extend(
+                (
+                    pl.Series(_PROPAGATED_COV_EE, propagated_covariance[:, 0, 0]),
+                    pl.Series(_PROPAGATED_COV_NN, propagated_covariance[:, 1, 1]),
+                    pl.Series(_PROPAGATED_COV_EN, propagated_covariance[:, 0, 1]),
+                )
+            )
+        return df.with_columns(columns)
 
     left = _propagate_side(left, left_src, "left")
     right = _propagate_side(right, right_src, "right")
@@ -2771,6 +2950,8 @@ def sky_match(
             left_src,
             right_src,
             float(spec.target_epoch),
+            propagate_covariance=spec.matcher == "skyellipse",
+            fallback_policy=spec.fallback_policy,
         )
         # PM drift prior: inflate errors for sides without measured PMs.
         if spec.pm_prior:

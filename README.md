@@ -189,10 +189,10 @@ xmatch --describe gaia   # legacy alias kept for backwards compatibility
 Run `xmatch --help` for the full top-level summary, and `xmatch <cmd> --help`
 for command-specific options.
 
-`--matcher` / `--max-error`: with `skyerr`/`skyellipse` a pair matches when
-`separation ≤ max_error · (err₁ + err₂)` using the catalogues' positional errors
-(`--radius` applies only to `sky`). `skyellipse` currently behaves like `skyerr`
-(correlation is not yet modelled).
+`--matcher` / `--max-error`: `skyerr` applies a radial N-sigma criterion from
+the catalogues' positional errors, while `skyellipse` applies the full local
+2D Mahalanobis criterion, including declared RA/Dec correlations (`--radius`
+applies only to `sky`).
 
 `--memory-budget-bytes` enables bounded-memory matching when the projected
 inputs exceed the budget. It currently accepts two local CSV/Parquet catalogues,
@@ -213,7 +213,11 @@ other row stays on the angular path. Only the in-memory coordinates used for
 matching move to the target epoch—the returned PM, parallax, RV, and epoch
 columns remain the original catalogue measurements. Target-epoch matching
 currently fails explicitly for HATS and bounded-memory execution rather than
-matching unpropagated positions.
+matching stale coordinates. For `skyellipse`, Gaia ESA and NOIRLab sources
+also transport the published correlated five-parameter astrometric covariance
+to the target epoch with Torchsky's local phase-space Jacobian. Radial velocity
+affects the trajectory but is conditioned on its measured value: Gaia does not
+publish a joint astrometry/RV covariance, so Xmatch does not invent one.
 
 ### Shell tab completion
 

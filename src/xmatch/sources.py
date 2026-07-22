@@ -10,11 +10,29 @@ are materialised by the relevant backend (TAP/CDS/HATS) during execution.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import polars as pl
 
 from . import io_utils
+
+ASTROMETRIC_COVARIANCE_KEYS = (
+    "ra_error",
+    "dec_error",
+    "parallax_error",
+    "pmra_error",
+    "pmdec_error",
+    "ra_dec_corr",
+    "ra_parallax_corr",
+    "ra_pmra_corr",
+    "ra_pmdec_corr",
+    "dec_parallax_corr",
+    "dec_pmra_corr",
+    "dec_pmdec_corr",
+    "parallax_pmra_corr",
+    "parallax_pmdec_corr",
+    "pmra_pmdec_corr",
+)
 
 
 @dataclass
@@ -29,6 +47,7 @@ class CatalogueSource:
     ra_err_column: Optional[str] = None
     dec_err_column: Optional[str] = None
     corr_column: Optional[str] = None
+    astrometric_covariance_columns: Optional[Dict[str, str]] = None
     pos_err_units: str = "arcsec"
     default_pos_error_arcsec: Optional[float] = None
 

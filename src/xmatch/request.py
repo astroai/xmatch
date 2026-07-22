@@ -56,6 +56,12 @@ class SideOverrides:
     dec_err_column: Optional[str] = None
     """Declination uncertainty column for local ``skyerr`` matching."""
 
+    corr_column: Optional[str] = None
+    """RA/Dec uncertainty correlation column for ``skyellipse`` matching."""
+
+    astrometric_covariance_columns: Optional[Dict[str, str]] = None
+    """Canonical Gaia-style five-parameter error/correlation column mapping."""
+
     pos_err_units: Optional[str] = None
     """Units for local positional-error columns (arcsec, mas, arcmin, or deg)."""
 
@@ -92,6 +98,8 @@ class SideOverrides:
             "id_column",
             "ra_err_column",
             "dec_err_column",
+            "corr_column",
+            "astrometric_covariance_columns",
             "pos_err_units",
             "default_pos_error_arcsec",
             "epoch",
@@ -238,6 +246,8 @@ class MatchRequest:
                 id_column=params.get("id_column_1"),
                 ra_err_column=params.get("ra_err_column_1"),
                 dec_err_column=params.get("dec_err_column_1"),
+                corr_column=params.get("corr_column_1"),
+                astrometric_covariance_columns=params.get("astrometric_covariance_columns_1"),
                 pos_err_units=params.get("pos_err_units_1"),
                 default_pos_error_arcsec=params.get("default_pos_error_arcsec_1"),
                 epoch=params.get("epoch_1"),
@@ -254,6 +264,8 @@ class MatchRequest:
                 id_column=params.get("id_column_2"),
                 ra_err_column=params.get("ra_err_column_2"),
                 dec_err_column=params.get("dec_err_column_2"),
+                corr_column=params.get("corr_column_2"),
+                astrometric_covariance_columns=params.get("astrometric_covariance_columns_2"),
                 pos_err_units=params.get("pos_err_units_2"),
                 default_pos_error_arcsec=params.get("default_pos_error_arcsec_2"),
                 epoch=params.get("epoch_2"),

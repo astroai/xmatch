@@ -55,6 +55,8 @@ def test_gaia_source_exposes_complete_space_motion_metadata(cm):
     assert src.radial_velocity_column == "radial_velocity"
     assert "parallax" in src.default_columns
     assert "radial_velocity" in src.default_columns
+    assert src.astrometric_covariance_columns is not None
+    assert src.astrometric_covariance_columns["pmra_pmdec_corr"] == "pmra_pmdec_corr"
 
 
 def test_local_source_preserves_space_motion_overrides(cm):

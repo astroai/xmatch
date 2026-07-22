@@ -42,7 +42,7 @@ from .matchers import (
     sky_match,
 )
 from .request import MatchRequest
-from .sources import CatalogueSource
+from .sources import ASTROMETRIC_COVARIANCE_KEYS, CatalogueSource
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +146,22 @@ class CrossMatch:
                 if value is not None and (not isinstance(value, str) or not value.strip()):
                     raise ConfigError(
                         f"Catalogue '{name}' has invalid '{field_name}'; expected a column name."
+                    )
+            covariance_columns = cat.get("astrometric_covariance_columns")
+            if covariance_columns is not None:
+                if not isinstance(covariance_columns, dict) or set(covariance_columns) != set(
+                    ASTROMETRIC_COVARIANCE_KEYS
+                ):
+                    raise ConfigError(
+                        f"Catalogue '{name}' has invalid astrometric_covariance_columns; "
+                        f"expected exactly {list(ASTROMETRIC_COVARIANCE_KEYS)}."
+                    )
+                if not all(
+                    isinstance(value, str) and value.strip()
+                    for value in covariance_columns.values()
+                ):
+                    raise ConfigError(
+                        f"Catalogue '{name}' has empty astrometric covariance column names."
                     )
 
         for alias, target in self.aliases_config.items():
@@ -256,6 +272,8 @@ class CrossMatch:
         src.id_column = overrides.get("id_column")
         src.ra_err_column = overrides.get("ra_err_column")
         src.dec_err_column = overrides.get("dec_err_column")
+        src.corr_column = overrides.get("corr_column")
+        src.astrometric_covariance_columns = overrides.get("astrometric_covariance_columns")
         src.pos_err_units = overrides.get("pos_err_units") or "arcsec"
         src.default_pos_error_arcsec = overrides.get("default_pos_error_arcsec")
         src.epoch = overrides.get("epoch")
@@ -288,9 +306,11 @@ class CrossMatch:
             ra_column=overrides.get("ra_column") or cfg.get("ra_column"),
             dec_column=overrides.get("dec_column") or cfg.get("dec_column"),
             id_column=overrides.get("id_column") or cfg.get("id_column"),
-            ra_err_column=cfg.get("ra_err_column"),
-            dec_err_column=cfg.get("dec_err_column"),
-            corr_column=cfg.get("corr_column"),
+            ra_err_column=overrides.get("ra_err_column") or cfg.get("ra_err_column"),
+            dec_err_column=overrides.get("dec_err_column") or cfg.get("dec_err_column"),
+            corr_column=overrides.get("corr_column") or cfg.get("corr_column"),
+            astrometric_covariance_columns=overrides.get("astrometric_covariance_columns")
+            or cfg.get("astrometric_covariance_columns"),
             pos_err_units=cfg.get("pos_err_units", "arcsec"),
             default_pos_error_arcsec=cfg.get("default_pos_error_arcsec"),
             epoch=overrides.get("epoch") if "epoch" in overrides else cfg.get("epoch"),
@@ -323,6 +343,7 @@ class CrossMatch:
             pm_dec_column=overrides.get("pm_dec_column"),
             parallax_column=overrides.get("parallax_column"),
             radial_velocity_column=overrides.get("radial_velocity_column"),
+            astrometric_covariance_columns=overrides.get("astrometric_covariance_columns"),
         )
 
     # --------------------------------------------------------------- execution
@@ -1385,16 +1406,24 @@ class CrossMatch:
         columns = (
             req.side1.columns if prefix == "1" else req.side2.columns if prefix == "2" else None
         )
+        required: List[Optional[str]] = []
+        if req.spec.matcher in {"skyerr", "skyellipse"}:
+            required.extend((src.ra_err_column, src.dec_err_column, src.corr_column))
         if req.spec.target_epoch is not None:
-            required = (
-                src.ra_column,
-                src.dec_column,
-                src.pm_ra_column,
-                src.pm_dec_column,
-                src.epoch_column,
-                src.parallax_column,
-                src.radial_velocity_column,
+            required.extend(
+                (
+                    src.ra_column,
+                    src.dec_column,
+                    src.pm_ra_column,
+                    src.pm_dec_column,
+                    src.epoch_column,
+                    src.parallax_column,
+                    src.radial_velocity_column,
+                )
             )
+            if req.spec.matcher == "skyellipse" and src.astrometric_covariance_columns:
+                required.extend(src.astrometric_covariance_columns.values())
+        if required:
             columns = list(
                 dict.fromkeys([*(columns or src.default_columns or []), *filter(None, required)])
             )

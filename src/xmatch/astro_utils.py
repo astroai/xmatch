@@ -237,6 +237,54 @@ def _load_torchsky_propagate_space_motion():
     return torchsky_propagate
 
 
+def propagate_space_motion_with_jacobian(
+    ra: np.ndarray,
+    dec: np.ndarray,
+    pm_ra_cosdec: np.ndarray,
+    pm_dec: np.ndarray,
+    parallax: np.ndarray,
+    radial_velocity: np.ndarray,
+    source_epoch: np.ndarray,
+    target_epoch: float,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Return Torchsky-propagated positions and local 6D Jacobians.
+
+    ``None`` means the installed Torchsky does not yet provide the Jacobian
+    primitive. There is deliberately no Astropy finite-difference fallback on
+    this survey-scale path.
+    """
+    torchsky_propagate = _load_torchsky_propagate_space_motion_with_jacobian()
+    if torchsky_propagate is None:
+        return None
+    values = [
+        np.asarray(value, dtype=float)
+        for value in (
+            ra,
+            dec,
+            pm_ra_cosdec,
+            pm_dec,
+            parallax,
+            radial_velocity,
+            source_epoch,
+        )
+    ]
+    propagated, jacobian = torchsky_propagate(
+        *values[:6],
+        source_epoch_jyear=values[6],
+        target_epoch_jyear=target_epoch,
+    )
+    return _as_numpy(propagated[0]), _as_numpy(propagated[1]), _as_numpy(jacobian)
+
+
+def _load_torchsky_propagate_space_motion_with_jacobian():
+    """Return Torchsky's local phase-space Jacobian primitive when available."""
+    try:
+        from torchsky.wcs import propagate_space_motion_with_jacobian
+    except ImportError:
+        return None
+    return propagate_space_motion_with_jacobian
+
+
 def _as_numpy(value) -> np.ndarray:
     """Materialise a Torch tensor (or compatible array) as a NumPy float array."""
     if hasattr(value, "detach"):

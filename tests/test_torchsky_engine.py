@@ -6,9 +6,11 @@ import numpy as np
 import polars as pl
 import pytest
 
+from xmatch.astro_utils import propagate_space_motion_with_jacobian
 from xmatch.matchers import MatchSpec, sky_match
 from xmatch.sources import CatalogueSource
 
+pytest.importorskip("torch")
 pytest.importorskip("torchsky")
 
 
@@ -20,6 +22,30 @@ def _source(name: str, id_column: str) -> CatalogueSource:
         ra_column="ra",
         dec_column="dec",
     )
+
+
+def test_torchsky_space_motion_jacobian_adapter() -> None:
+    import torchsky.wcs
+
+    if not hasattr(torchsky.wcs, "propagate_space_motion_with_jacobian"):
+        pytest.skip("installed Torchsky predates the local phase-space Jacobian API")
+    result = propagate_space_motion_with_jacobian(
+        np.array([269.452075]),
+        np.array([4.693391]),
+        np.array([-801.551]),
+        np.array([10_362.394]),
+        np.array([548.31]),
+        np.array([-110.6]),
+        np.array([2000.0]),
+        2025.0,
+    )
+
+    assert result is not None
+    ra, dec, jacobian = result
+    np.testing.assert_allclose(ra, [269.44648069352934], atol=1e-10)
+    np.testing.assert_allclose(dec, [4.765463779109472], atol=1e-10)
+    assert jacobian.shape == (1, 6, 6)
+    assert np.isfinite(jacobian).all()
 
 
 def test_torchsky_engine_matches_fast_nearest_neighbours() -> None:

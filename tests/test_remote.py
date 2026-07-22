@@ -84,6 +84,36 @@ def test_target_epoch_forces_remote_space_motion_columns(cm, monkeypatch):
     }
 
 
+def test_target_epoch_skyellipse_forces_remote_astrometric_covariance(cm, monkeypatch):
+    import xmatch.remote_tap as rt
+
+    captured = {}
+
+    def fake_download(src, **kwargs):
+        captured["columns"] = kwargs.get("columns")
+        return pl.DataFrame()
+
+    monkeypatch.setattr(rt, "download_from_tap", fake_download)
+    src = cm.resolve_source("gaia", {})
+    req = MatchRequest(
+        "gaia",
+        "gaia",
+        spec=MatchSpec(target_epoch=2025.0, matcher="skyellipse"),
+        ra=10.0,
+        dec=5.0,
+        radius_deg=0.01,
+    )
+    req.side1.columns = ["source_id"]
+
+    cm._download_remote(src, req, prefix="1")
+
+    assert src.astrometric_covariance_columns is not None
+    assert set(src.astrometric_covariance_columns.values()).issubset(captured["columns"])
+    assert {"ra", "dec", "pmra", "pmdec", "parallax", "radial_velocity"}.issubset(
+        captured["columns"]
+    )
+
+
 def test_target_epoch_bypasses_unpropagated_tap_self_join(cm, monkeypatch):
     import xmatch.remote_tap as rt
 
