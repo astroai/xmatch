@@ -33,3 +33,7 @@
 ## 2026-07-08 - Optimize pseudo-label generation (LANDED)
 **Learning:** A Python loop over `np.unique(left_idx)` with per-group boolean masks and `np.argmin` is O(N × unique_left) and dominates ML feature prep on large match tables.
 **Action:** Use `np.lexsort((X[:, 0], left_idx))` then `np.unique(..., return_index=True)` on the sorted left indices to pick the minimum-separation pair per primary in O(N log N).
+
+## 2024-03-21 - Vectorizing Groupwise Best-Candidate Selection
+**Learning:** In astronomical array processing, finding the 'argmin' or 'argmax' per group (e.g., best match per primary source) using native Python `for` loops and boolean masking (`mask = inverse == idx`) creates a significant O(N^2) bottleneck. NumPy's `np.lexsort` allows vectorizing this to O(N log N) by sorting by the group ID and target scores, then using `np.unique(..., return_index=True)` to extract the best candidate per group.
+**Action:** Always prefer `np.lexsort` over loop-based masking for groupwise aggregation/selection in large datasets. Remember to sort the final extracted indices (`best_indices.sort()`) if the downstream code relies on the implicit row-order preservation of the original boolean masks.
