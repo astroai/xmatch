@@ -9,3 +9,7 @@
 ## 2026-07-07 - Endpoint typo suggestions on discover (LANDED)
 **Learning:** Unknown endpoint errors should suggest close matches via `difflib.get_close_matches` on a lowercased candidate pool, then map back to original casing for display.
 **Action:** Added `_suggest_endpoint` and wired it into `handle_discover` when `_resolve_discovery_endpoint` fails.
+
+## 2026-10-27 - Conditionally render empty CLI suggestions
+**Learning:** When formatting CLI output with optional 'Did you mean?' suggestions (e.g., from `_suggest`), failing to conditionally check if the suggestion string is non-empty before interpolating or printing it results in dangling whitespace or blank lines in the terminal, harming the user experience.
+**Action:** Updated `describe` and `_guarded` in `src/xmatch/cli.py` to check `if suggestion:` before printing the hint or adding it to the error message.
