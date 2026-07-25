@@ -1495,22 +1495,16 @@ def _likelihood_ratio_scoring(
     if spec.find == "best":
         # For each primary source, find the candidate with max reliability.
         # Ties go to smallest LR (then smallest sep).
-        best_mask = np.zeros(len(left_idx), dtype=bool)
-        for idx in range(len(unique_left)):
-            group_mask = inverse == idx
-            group_lr = lr[group_mask]
-            group_rel = reliability[group_mask]
-            group_seps = seps[group_mask]
-            # Sort by reliability desc, then LR asc, then sep asc.
-            order = np.lexsort((group_seps, group_lr, -group_rel))
-            best_pos = np.where(group_mask)[0][order[0]]
-            best_mask[best_pos] = True
+        order = np.lexsort((seps, lr, -reliability, inverse))
+        _, first_idx = np.unique(inverse[order], return_index=True)
+        best_indices = order[first_idx]
+        best_indices.sort()
         return (
-            left_idx[best_mask],
-            right_idx[best_mask],
-            seps[best_mask],
-            lr[best_mask],
-            reliability[best_mask],
+            left_idx[best_indices],
+            right_idx[best_indices],
+            seps[best_indices],
+            lr[best_indices],
+            reliability[best_indices],
         )
 
     return left_idx, right_idx, seps, lr, reliability
@@ -2374,15 +2368,13 @@ def _pick_best_per_primary(
     per unique primary source, keeping the candidate with the largest
     *scores* value.
     """
-    unique_left = np.unique(left_idx)
-    best_mask = np.zeros(len(left_idx), dtype=bool)
-    for ul in unique_left:
-        group = left_idx == ul
-        group_scores = scores[group]
-        best_local = int(np.argmax(group_scores))
-        best_pos = int(np.where(group)[0][best_local])
-        best_mask[best_pos] = True
-    return left_idx[best_mask], right_idx[best_mask], seps[best_mask], scores[best_mask]
+    original_idx = np.arange(len(left_idx))
+    order = np.lexsort((original_idx, -scores, left_idx))
+    _, first_idx = np.unique(left_idx[order], return_index=True)
+    best_indices = order[first_idx]
+    best_indices.sort()
+
+    return left_idx[best_indices], right_idx[best_indices], seps[best_indices], scores[best_indices]
 
 
 def _ml_fallback_best_by_sep(
@@ -2392,16 +2384,14 @@ def _ml_fallback_best_by_sep(
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Fallback: pick the spatially-nearest candidate per primary source."""
-    unique_left = np.unique(left_idx)
-    best_mask = np.zeros(len(left_idx), dtype=bool)
-    for ul in unique_left:
-        group = left_idx == ul
-        group_seps = seps[group]
-        best_local = int(np.argmin(group_seps))
-        best_pos = int(np.where(group)[0][best_local])
-        best_mask[best_pos] = True
-    scores = 1.0 / (1.0 + seps[best_mask])
-    return left_idx[best_mask], right_idx[best_mask], seps[best_mask], scores
+    original_idx = np.arange(len(left_idx))
+    order = np.lexsort((original_idx, seps, left_idx))
+    _, first_idx = np.unique(left_idx[order], return_index=True)
+    best_indices = order[first_idx]
+    best_indices.sort()
+
+    scores = 1.0 / (1.0 + seps[best_indices])
+    return left_idx[best_indices], right_idx[best_indices], seps[best_indices], scores
 
 
 # --------------------------------------------------------------------------- #
