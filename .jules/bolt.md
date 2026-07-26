@@ -33,3 +33,7 @@
 ## 2026-07-08 - Optimize pseudo-label generation (LANDED)
 **Learning:** A Python loop over `np.unique(left_idx)` with per-group boolean masks and `np.argmin` is O(N × unique_left) and dominates ML feature prep on large match tables.
 **Action:** Use `np.lexsort((X[:, 0], left_idx))` then `np.unique(..., return_index=True)` on the sorted left indices to pick the minimum-separation pair per primary in O(N log N).
+
+## 2026-07-26 - Unnecessary Polars to NumPy Copies
+**Learning:** Calling `.astype(float)` on a NumPy array natively returns a new copy, making chained `.copy()` calls redundant. Additionally, `.to_numpy()` on Polars Series returns a read-only view. When passing this view to read-only C/C++ consumers (like `torchsky`), appending `.copy()` creates an unnecessary deep copy, which induces massive memory and CPU overhead on large astronomical datasets.
+**Action:** Remove `.copy()` after `.astype()`, as it's redundant. Do not append `.copy()` to Polars `.to_numpy()` arrays when the data is consumed read-only.
