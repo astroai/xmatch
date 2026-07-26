@@ -14,6 +14,7 @@ right backend.
 
 ```python
 from xmatch import CrossMatch
+
 cm = CrossMatch()  # uses bundled xmatch.yaml
 result = cm.crossmatch("a.parquet", "b.csv", radius_arcsec=1.0)
 ```
@@ -119,10 +120,10 @@ Per-catalogue column override bundle.
 
 ```python
 SideOverrides(
-    ra_column="ra_custom",   # override RA column name
-    dec_column="dec_custom", # override Dec column name
-    id_column="objid",       # override ID column name
-    columns=["ra", "dec"],   # restrict columns returned
+    ra_column="ra_custom",  # override RA column name
+    dec_column="dec_custom",  # override Dec column name
+    id_column="objid",  # override ID column name
+    columns=["ra", "dec"],  # restrict columns returned
 )
 ```
 
@@ -166,8 +167,12 @@ spec = MatchSpec(
     radius_arcsec=1.0,
     target_epoch=2016.0,  # Gaia DR3 reference epoch
 )
-result = cm.crossmatch("wise.csv", "gaia_esa",
-    ra=180, dec=-30, radius_deg=0.01,
+result = cm.crossmatch(
+    "wise.csv",
+    "gaia_esa",
+    ra=180,
+    dec=-30,
+    radius_deg=0.01,
     spec=spec,
 )
 ```
@@ -233,8 +238,12 @@ spec = MatchSpec(
     pm_prior=True,
     pm_prior_magnitude_column="phot_g_mean_mag",  # optional magnitude refinement
 )
-result = cm.crossmatch("old_survey.parquet", "gaia_esa",
-    ra=180, dec=-30, radius_deg=0.01,
+result = cm.crossmatch(
+    "old_survey.parquet",
+    "gaia_esa",
+    ra=180,
+    dec=-30,
+    radius_deg=0.01,
     spec=spec,
 )
 ```
@@ -256,8 +265,12 @@ spec = MatchSpec(
     target_epoch=2016.0,
     pm_prior=True,
 )
-result = cm.crossmatch("historical_catalogue.csv", "gaia_esa",
-    ra=180, dec=-30, radius_deg=0.01,
+result = cm.crossmatch(
+    "historical_catalogue.csv",
+    "gaia_esa",
+    ra=180,
+    dec=-30,
+    radius_deg=0.01,
     spec=spec,
 )
 ```
@@ -297,8 +310,7 @@ spec = MatchSpec(
     extra_distance_cols={"phot_g_mean_mag": 0.5, "bp_rp": 0.3},
     find="best",
 )
-result = cm.crossmatch("cat_a.parquet", "cat_b.parquet", spec=spec,
-                        engine="fast")
+result = cm.crossmatch("cat_a.parquet", "cat_b.parquet", spec=spec, engine="fast")
 ```
 
 ### Out-of-core batching
@@ -310,8 +322,7 @@ balanced memory use.
 
 ```python
 spec = MatchSpec(radius_arcsec=1.0, batch_size=100)
-result = cm.crossmatch("large_a.parquet", "large_b.parquet", spec=spec,
-                        engine="zone")
+result = cm.crossmatch("large_a.parquet", "large_b.parquet", spec=spec, engine="zone")
 ```
 
 ### Ray distributed engine
@@ -325,8 +336,11 @@ pip install 'xmatch[ray]'
 ```
 
 ```python
-result = cm.crossmatch("huge_a.parquet", "huge_b.parquet",
-    radius_arcsec=1.0, engine="ray",
+result = cm.crossmatch(
+    "huge_a.parquet",
+    "huge_b.parquet",
+    radius_arcsec=1.0,
+    engine="ray",
 )
 ```
 
@@ -440,6 +454,7 @@ marker files ``properties``, ``hats.properties``, ``catalog_info.json``, or
 
 ```python
 from xmatch import is_hats_dir
+
 assert is_hats_dir("/data/gaia_dr3_hats")
 ```
 
@@ -452,7 +467,8 @@ cm = CrossMatch()
 
 # Two HATS catalogues
 result = cm.crossmatch(
-    "/data/cat_a_hats", "/data/cat_b_hats",
+    "/data/cat_a_hats",
+    "/data/cat_b_hats",
     radius_arcsec=2.0,
 )
 
@@ -460,9 +476,11 @@ result = cm.crossmatch(
 # incomplete — the RA/Dec column names from the HATS catalogue can be
 # given explicitly)
 result = cm.crossmatch(
-    "/data/gaia_dr3_hats", "wise_region.csv",
+    "/data/gaia_dr3_hats",
+    "wise_region.csv",
     radius_arcsec=1.0,
-    ra_column1="raj2000", dec_column1="dej2000",  # override cat-1 columns
+    ra_column1="raj2000",
+    dec_column1="dej2000",  # override cat-1 columns
 )
 ```
 
@@ -529,22 +547,30 @@ cm = CrossMatch()
 
 # Download a cone from Gaia DR3, match against a local file
 result = cm.crossmatch(
-    "gaia", "my_stars.csv",
-    ra=279.23, dec=38.78, radius_deg=0.005,
+    "gaia",
+    "my_stars.csv",
+    ra=279.23,
+    dec=38.78,
+    radius_deg=0.005,
     radius_arcsec=2.0,
 )
 
 # NSC DR2 × AllWISE (both via Data Lab TAP — same TAP self-join)
 result = cm.crossmatch(
-    "nsc", "allwise_dl",
-    ra=180.0, dec=-30.0, radius_deg=0.01,
+    "nsc",
+    "allwise_dl",
+    ra=180.0,
+    dec=-30.0,
+    radius_deg=0.01,
     radius_arcsec=1.5,
 )
 
 # Multi-way: Gaia × DES × DECaLS (remote first, two Data Lab catalogues)
 result = cm.crossmatch_multi(
     ["gaia", "des", "ls_dr10"],
-    ra=279.23, dec=38.78, radius_deg=0.005,
+    ra=279.23,
+    dec=38.78,
+    radius_deg=0.005,
     radius_arcsec=1.0,
 )
 ```
@@ -563,10 +589,13 @@ and ``distance`` (separation in arcsec).
 # file.  The xmatch table's "distance" column is the NSC–Gaia separation;
 # the output "sep_arcsec" is the separation from the local file.
 result = cm.crossmatch(
-    "nsc_x_gaia", "local_stars.csv",
-    ra=279.23, dec=38.78, radius_deg=0.005,
+    "nsc_x_gaia",
+    "local_stars.csv",
+    ra=279.23,
+    dec=38.78,
+    radius_deg=0.005,
     radius_arcsec=2.0,  # your desired local-match radius (the xmatch table's
-                        # 1.5″ NSC–Gaia pairing radius is baked in)
+    # 1.5″ NSC–Gaia pairing radius is baked in)
 )
 # Columns: ra1, dec1, id1 (NSC), ra2, dec2, id2 (Gaia), distance (NSC–Gaia),
 #          plus local columns and sep_arcsec (local-match separation)
@@ -603,13 +632,13 @@ class CatalogueSource:
     ra_column: Optional[str]
     dec_column: Optional[str]
     id_column: Optional[str]
-    ra_err_column: Optional[str]     # for skyerr
-    dec_err_column: Optional[str]    # for skyerr
-    corr_column: Optional[str]       # for skyerr (not yet wired)
+    ra_err_column: Optional[str]  # for skyerr
+    dec_err_column: Optional[str]  # for skyerr
+    corr_column: Optional[str]  # for skyerr (not yet wired)
     pos_err_units: str = "arcsec"
     default_pos_error_arcsec: Optional[float]
     epoch: Optional[float]
-    access_method: Optional[str]     # "tap" | "cds_xmatch" | "hats"
+    access_method: Optional[str]  # "tap" | "cds_xmatch" | "hats"
     ...
 ```
 

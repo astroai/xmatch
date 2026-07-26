@@ -288,7 +288,7 @@ cm = CrossMatch()
 
 # Local frame vs a configured remote catalogue
 sources = pl.read_csv("my_sources.csv")
-matches = cm.crossmatch(sources, "gaia", radius_arcsec=1.5)   # -> polars.DataFrame
+matches = cm.crossmatch(sources, "gaia", radius_arcsec=1.5)  # -> polars.DataFrame
 print(matches.head())
 
 # Lazy result (you call .collect() / .sink_parquet() yourself)
@@ -296,8 +296,7 @@ lazy = cm.crossmatch("a.parquet", "b.parquet", radius_arcsec=1.0, lazy=True)
 lazy.sink_parquet("out.parquet")
 
 # ID join
-cm.crossmatch(a, b, id_join=True, id_column_1="id", id_column_2="id",
-              join_type="1and2")
+cm.crossmatch(a, b, id_join=True, id_column_1="id", id_column_2="id", join_type="1and2")
 ```
 
 `crossmatch()` returns a polars `DataFrame` by default, a `LazyFrame` when
@@ -320,7 +319,10 @@ result = cm.crossmatch_multi(
 # A `_src_cats` column shows which catalogue(s) contributed (e.g. "1+2+3").
 master = cm.union_match(
     ["gaia", "allwise.csv", "twomass.csv"],
-    ra=180, dec=-30, radius_deg=0.5, radius_arcsec=1.5,
+    ra=180,
+    dec=-30,
+    radius_deg=0.5,
+    radius_arcsec=1.5,
 )
 print(master["_src_cats"].value_counts())
 
@@ -394,7 +396,10 @@ cm.union_match(
     ["gaia", "allwise.csv", "twomass.csv"],
     output_file="master.hats",
     hats_threshold=50_000,
-    ra=180, dec=-30, radius_deg=0.5, radius_arcsec=1.5,
+    ra=180,
+    dec=-30,
+    radius_deg=0.5,
+    radius_arcsec=1.5,
 )
 
 # N-way Bayesian match → HATS directory
@@ -411,6 +416,7 @@ Later, read the HATS catalogue back for spatial queries with LSDB:
 
 ```python
 import lsdb
+
 cat = lsdb.read_hats("master.hats")
 # Crossmatch against a new catalogue
 result = cat.crossmatch(lsdb.read_hats("new_data.hats"), radius_arcsec=1.0)
