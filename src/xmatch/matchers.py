@@ -2374,15 +2374,17 @@ def _pick_best_per_primary(
     per unique primary source, keeping the candidate with the largest
     *scores* value.
     """
-    unique_left = np.unique(left_idx)
-    best_mask = np.zeros(len(left_idx), dtype=bool)
-    for ul in unique_left:
-        group = left_idx == ul
-        group_scores = scores[group]
-        best_local = int(np.argmax(group_scores))
-        best_pos = int(np.where(group)[0][best_local])
-        best_mask[best_pos] = True
-    return left_idx[best_mask], right_idx[best_mask], seps[best_mask], scores[best_mask]
+    if len(left_idx) == 0:
+        return left_idx, right_idx, seps, scores
+
+    # Vectorized optimization: lexsort by primary key then descending score
+    # to efficiently find group-wise maximums in O(N log N) instead of O(N^2)
+    order = np.lexsort((-scores, left_idx))
+    _, unique_first_indices = np.unique(left_idx[order], return_index=True)
+    best_indices = order[unique_first_indices]
+    best_indices.sort()
+
+    return left_idx[best_indices], right_idx[best_indices], seps[best_indices], scores[best_indices]
 
 
 def _ml_fallback_best_by_sep(
@@ -2392,16 +2394,18 @@ def _ml_fallback_best_by_sep(
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Fallback: pick the spatially-nearest candidate per primary source."""
-    unique_left = np.unique(left_idx)
-    best_mask = np.zeros(len(left_idx), dtype=bool)
-    for ul in unique_left:
-        group = left_idx == ul
-        group_seps = seps[group]
-        best_local = int(np.argmin(group_seps))
-        best_pos = int(np.where(group)[0][best_local])
-        best_mask[best_pos] = True
-    scores = 1.0 / (1.0 + seps[best_mask])
-    return left_idx[best_mask], right_idx[best_mask], seps[best_mask], scores
+    if len(left_idx) == 0:
+        return left_idx, right_idx, seps, np.array([], dtype=float)
+
+    # Vectorized optimization: lexsort by primary key then ascending separation
+    # to efficiently find group-wise minimums in O(N log N) instead of O(N^2)
+    order = np.lexsort((seps, left_idx))
+    _, unique_first_indices = np.unique(left_idx[order], return_index=True)
+    best_indices = order[unique_first_indices]
+    best_indices.sort()
+
+    scores = 1.0 / (1.0 + seps[best_indices])
+    return left_idx[best_indices], right_idx[best_indices], seps[best_indices], scores
 
 
 # --------------------------------------------------------------------------- #
