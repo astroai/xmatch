@@ -9,3 +9,7 @@
 ## 2026-07-07 - Endpoint typo suggestions on discover (LANDED)
 **Learning:** Unknown endpoint errors should suggest close matches via `difflib.get_close_matches` on a lowercased candidate pool, then map back to original casing for display.
 **Action:** Added `_suggest_endpoint` and wired it into `handle_discover` when `_resolve_discovery_endpoint` fails.
+
+## 2024-07-27 - [CLI Output Formatting]
+**Learning:** Empty string formatting inside CLI outputs (like missing 'Did you mean?' suggestions) can cause dangling whitespace and unwanted blank lines, impacting screen readers and creating visual noise.
+**Action:** Always conditionally check if suggestion strings or hints are non-empty before interpolating or printing them in the terminal.
