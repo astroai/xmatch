@@ -9,3 +9,7 @@
 ## 2026-07-07 - Endpoint typo suggestions on discover (LANDED)
 **Learning:** Unknown endpoint errors should suggest close matches via `difflib.get_close_matches` on a lowercased candidate pool, then map back to original casing for display.
 **Action:** Added `_suggest_endpoint` and wired it into `handle_discover` when `_resolve_discovery_endpoint` fails.
+## 2024-05-19 - Ensure non-empty suggestions for CLI
+
+**Learning:** When using difflib or suggestion engines in CLI hints, ensure that the hint string is non-empty before interpolating it. Otherwise, dangling space and empty hint lines are rendered, resulting in poor visual UX on terminal outputs.
+**Action:** Always conditionally check the output of `_suggest` before calling `console.hint()` or formatting it into error messages.

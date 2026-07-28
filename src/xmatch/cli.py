@@ -1611,7 +1611,9 @@ def describe(cm: CrossMatch, name: str, console: Console) -> bool:
     resolved = cm.resolve_name(name)
     if resolved not in cm.catalogues_config:
         console.error(f"  Catalogue '{name}' not found.")
-        console.hint(f"  {_suggest(cm, name)}")
+        suggestion = _suggest(cm, name)
+        if suggestion:
+            console.hint(f"  {suggestion}")
         return False
     cat = cm.catalogues_config[resolved]
     # Single styled line so the contiguous substring ``"Catalogue: NAME"``
@@ -1898,7 +1900,10 @@ def _guarded(
         source = getattr(exc, "source", None)
         if source:
             hint = _suggest(cm, source)
-        console.error(f"Error: {exc} {hint}")
+        if hint:
+            console.error(f"Error: {exc} {hint}")
+        else:
+            console.error(f"Error: {exc}")
         return 1
     except KeyboardInterrupt:
         console.error("Interrupted.")
