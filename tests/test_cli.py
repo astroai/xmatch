@@ -78,6 +78,16 @@ def test_cli_describe(capsys):
     assert "Catalogue: gaia_cds" in out
 
 
+def test_cli_describe_no_dangling_whitespace_without_suggestion(capsys):
+    """Unknown name with no close matches must not leave a blank hint line."""
+    name = "zzzz_no_close_match_catalogue_xyzzy"
+    assert main(["--describe", name]) == 1
+    err = capsys.readouterr().err
+    assert f"Catalogue '{name}' not found." in err
+    assert "Did you mean" not in err
+    assert " \n" not in err
+
+
 # ---------------------------------------------------------------- did you mean?
 def test_cli_describe_suggests_close_match_for_typo(capsys):
     """`xmatch --describe typo` must append a "Did you mean?" hint."""
