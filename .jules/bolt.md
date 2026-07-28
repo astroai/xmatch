@@ -37,3 +37,7 @@
 ## 2024-06-25 - Lexsort vectorization for boolean masks
 **Learning:** In astronomical data processing with large datasets, finding the best or nearest candidate per primary source (e.g. `_pick_best_per_primary`, `_ml_fallback_best_by_sep`) using a `for` loop over unique sources to create boolean masks (`inverse == idx`) and apply `np.argmax`/`np.argmin` incurs an O(N^2) overhead, significantly bottlenecking performance.
 **Action:** Replace `O(N^2)` boolean mask loops with `np.lexsort` to sort by group identifier and target value, followed by `np.unique(..., return_index=True)`. Crucially, to maintain identical row order behavior as the original boolean mask, explicitly sort the final `best_positions` array.
+
+## 2026-07-19 - Unnecessary DataFrame Copies in Torchsky Match
+**Learning:** Polars `to_numpy()` without `copy` returns a read-only numpy array. When passing DataFrame columns to external matching libraries like `torchsky` that do not mutate the input array, calling `.to_numpy().copy()` explicitly performs a deep copy which incurs massive unnecessary CPU and memory overhead for large astronomical datasets.
+**Action:** Avoid calling `.copy()` on numpy arrays obtained from Polars or Pandas when the consumer does not mutate the array. Use the read-only output natively.

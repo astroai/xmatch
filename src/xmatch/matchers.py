@@ -1499,7 +1499,7 @@ def _likelihood_ratio_scoring(
         order = np.lexsort((seps, lr, -reliability, inverse))
         _, best_indices = np.unique(inverse[order], return_index=True)
         best_positions = order[best_indices]
-        best_positions.sort() # Preserve original row order implicitly done by boolean mask
+        best_positions.sort()  # Preserve original row order implicitly done by boolean mask
         return (
             left_idx[best_positions],
             right_idx[best_positions],
@@ -2373,8 +2373,13 @@ def _pick_best_per_primary(
     order = np.lexsort((-scores, left_idx))
     _, best_indices = np.unique(left_idx[order], return_index=True)
     best_positions = order[best_indices]
-    best_positions.sort() # Preserve original row order implicitly done by boolean mask
-    return left_idx[best_positions], right_idx[best_positions], seps[best_positions], scores[best_positions]
+    best_positions.sort()  # Preserve original row order implicitly done by boolean mask
+    return (
+        left_idx[best_positions],
+        right_idx[best_positions],
+        seps[best_positions],
+        scores[best_positions],
+    )
 
 
 def _ml_fallback_best_by_sep(
@@ -2388,7 +2393,7 @@ def _ml_fallback_best_by_sep(
     order = np.lexsort((seps, left_idx))
     _, best_indices = np.unique(left_idx[order], return_index=True)
     best_positions = order[best_indices]
-    best_positions.sort() # Preserve original row order implicitly done by boolean mask
+    best_positions.sort()  # Preserve original row order implicitly done by boolean mask
 
     scores = 1.0 / (1.0 + seps[best_positions])
     return left_idx[best_positions], right_idx[best_positions], seps[best_positions], scores
@@ -2425,11 +2430,12 @@ def _torchsky_match(
         )
 
     crossmatch_sky = _load_torchsky_crossmatch()
+    # Pass read-only numpy arrays directly to avoid expensive deep copies
     result = crossmatch_sky(
-        left[left_src.ra_column].to_numpy().copy(),
-        left[left_src.dec_column].to_numpy().copy(),
-        right[right_src.ra_column].to_numpy().copy(),
-        right[right_src.dec_column].to_numpy().copy(),
+        left[left_src.ra_column].to_numpy(),
+        left[left_src.dec_column].to_numpy(),
+        right[right_src.ra_column].to_numpy(),
+        right[right_src.dec_column].to_numpy(),
         radius_arcsec=spec.radius_arcsec,
         find=spec.find,
     )
