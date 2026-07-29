@@ -356,8 +356,8 @@ def _pos_covariance(
 
     propagated_columns = (_PROPAGATED_COV_EE, _PROPAGATED_COV_NN, _PROPAGATED_COV_EN)
     if all(column in df.columns for column in propagated_columns):
-        ee = df[_PROPAGATED_COV_EE].to_numpy().astype(float).copy()
-        nn = df[_PROPAGATED_COV_NN].to_numpy().astype(float).copy()
+        ee = df[_PROPAGATED_COV_EE].to_numpy().astype(float)
+        nn = df[_PROPAGATED_COV_NN].to_numpy().astype(float)
         en = df[_PROPAGATED_COV_EN].to_numpy().astype(float)
         if floor is not None:
             ee = np.maximum(ee, floor * floor)

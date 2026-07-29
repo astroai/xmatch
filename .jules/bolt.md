@@ -41,3 +41,7 @@
 ## 2026-07-19 - Unnecessary DataFrame Copies in Torchsky Match
 **Learning:** Polars `to_numpy()` without `copy` returns a read-only numpy array. When passing DataFrame columns to external matching libraries like `torchsky` that do not mutate the input array, calling `.to_numpy().copy()` explicitly performs a deep copy which incurs massive unnecessary CPU and memory overhead for large astronomical datasets.
 **Action:** Avoid calling `.copy()` on numpy arrays obtained from Polars or Pandas when the consumer does not mutate the array. Use the read-only output natively.
+
+## 2026-07-29 - Unnecessary Deep Copies from astype()
+**Learning:** When converting data types on NumPy arrays (e.g. `.astype(float)`), NumPy natively allocates and returns a *new, writeable array copy*. Chaining `.copy()` after `.astype(float)` as in `.astype(float).copy()` causes a completely redundant deep copy, resulting in massive unnecessary CPU and memory overhead when processing large astronomical datasets.
+**Action:** Do not chain `.copy()` on the output of `.astype()`. Use the natively returned, writeable copy directly.
