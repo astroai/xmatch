@@ -1709,8 +1709,9 @@ def handle_search(cm: CrossMatch, pattern: str, console: Console) -> int:
                     desc_short = (desc[:60] + "…") if len(desc) > 60 else desc
                     sys.stdout.write(f"  {_pad(console.cyan(full), 40)} {desc_short}\n")
     if not found_any:
-        console.info("\nNo matching tables found.")
+        console.error("\nNo matching tables found.")
         console.hint("Tip: use 'xmatch discover <endpoint>' for known endpoint names.")
+        return 1
     return 0
 
 
@@ -1741,6 +1742,9 @@ def handle_discover(
             console.error(f"Failed to query schema for '{schema_table}': {exc}")
             return 1
         cols = schema["columns"]
+        if cols.height == 0:
+            console.error(f"\nTable '{schema_table}' not found or has no columns.")
+            return 1
         console.header(f"\nTable: {console.bold(schema_table)}  ({cols.height} columns)")
         if schema["ra_column"]:
             console.info(f"  Guessed RA column:  {console.green(schema['ra_column'])}")
@@ -1804,6 +1808,9 @@ def handle_discover(
             tables = discover_tables(url)
         except Exception as exc:
             console.error(f"Failed to discover tables: {exc}")
+            return 1
+        if tables.height == 0:
+            console.error("\nNo tables found on this endpoint.")
             return 1
         console.info(f"\n{console.bold(str(tables.height))} table(s) on this endpoint:\n")
         for row in tables.iter_rows(named=True):
