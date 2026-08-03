@@ -45,3 +45,7 @@
 ## 2026-07-29 - Unnecessary Deep Copies from astype()
 **Learning:** When converting data types on NumPy arrays (e.g. `.astype(float)`), NumPy natively allocates and returns a *new, writeable array copy*. Chaining `.copy()` after `.astype(float)` as in `.astype(float).copy()` causes a completely redundant deep copy, resulting in massive unnecessary CPU and memory overhead when processing large astronomical datasets.
 **Action:** Do not chain `.copy()` on the output of `.astype()`. Use the natively returned, writeable copy directly.
+
+## 2024-08-03 - Avoid expensive np.linalg.eigvalsh on invalid matrices
+**Learning:** When evaluating per-row astrometric covariances, the array of matrices is often sparse because many astronomical objects lack full 5-parameter astrometry (e.g. missing proper motions). Unconditionally copying the entire `(N, 5, 5)` array, substituting `np.eye()` for all invalid rows, and computing `np.linalg.eigvalsh` on *every* row causes massive unnecessary CPU overhead.
+**Action:** When computing expensive linear algebra operations like `np.linalg.eigvalsh` over a stacked batch of matrices, filter for the `valid` matrices first (e.g., `cov_valid = covariance[valid]`) and only run the computation on the subset. Update the original boolean mask via in-place subset assignment `valid[valid] &= ...`.

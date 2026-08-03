@@ -529,11 +529,14 @@ def _astrometric_covariance_mas(
     correlation_values = np.stack(correlations, axis=-1)
     valid &= np.isfinite(correlation_values).all(axis=1)
     valid &= (np.abs(correlation_values) <= 1.0).all(axis=1)
-    safe_covariance = covariance.copy()
-    safe_covariance[~valid] = np.eye(5)
-    eigenvalues = np.linalg.eigvalsh(safe_covariance)
-    scale = np.maximum(np.max(np.diagonal(safe_covariance, axis1=1, axis2=2), axis=1), 1.0)
-    valid &= eigenvalues[:, 0] >= -1e-10 * scale
+
+    # Only calculate eigenvalues for matrices with valid parameters. This avoids deep copying
+    # the entire array and doing np.linalg.eigvalsh on invalid rows (often the majority).
+    if np.any(valid):
+        cov_valid = covariance[valid]
+        eigenvalues_min = np.linalg.eigvalsh(cov_valid)[:, 0]
+        scale = np.maximum(np.max(np.diagonal(cov_valid, axis1=1, axis2=2), axis=1), 1.0)
+        valid[valid] &= (eigenvalues_min >= -1e-10 * scale)
 
     # Gaia publishes (alpha*, delta, parallax, pmra, pmdec); Torchsky's local
     # state orders proper motion before parallax.
@@ -543,14 +546,17 @@ def _astrometric_covariance_mas(
     angular_errors = errors[:, [0, 1, 3, 4]]
     angular_valid = np.isfinite(angular_errors).all(axis=1) & (angular_errors > 0.0).all(axis=1)
     angular_valid &= np.isfinite(angular_covariance).all(axis=(1, 2))
-    safe_angular_covariance = angular_covariance.copy()
-    safe_angular_covariance[~angular_valid] = np.eye(4)
-    angular_eigenvalues = np.linalg.eigvalsh(safe_angular_covariance)
-    angular_scale = np.maximum(
-        np.max(np.diagonal(safe_angular_covariance, axis1=1, axis2=2), axis=1),
-        1.0,
-    )
-    angular_valid &= angular_eigenvalues[:, 0] >= -1e-10 * angular_scale
+
+    # As above, avoid copy and unnecessary computations on invalid angular matrices
+    if np.any(angular_valid):
+        ang_cov_valid = angular_covariance[angular_valid]
+        angular_eigenvalues_min = np.linalg.eigvalsh(ang_cov_valid)[:, 0]
+        angular_scale = np.maximum(
+            np.max(np.diagonal(ang_cov_valid, axis1=1, axis2=2), axis=1),
+            1.0,
+        )
+        angular_valid[angular_valid] &= (angular_eigenvalues_min >= -1e-10 * angular_scale)
+
     return ordered_covariance, valid, angular_valid
 
 
