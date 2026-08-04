@@ -57,39 +57,68 @@ archives:
 # This allows users to reference catalogues with simple names like "gaia" or "galex"
 # without needing to know the specific version or archive
 catalogue_aliases:
-  # ESA Gaia Data
-  gaia: "gaia_esa" # Default to ESA's version
-  gaia_dr3: "gaia_esa"
-  gaiadr3: "gaia_esa"
+  # Short survey names are the catalogue keys themselves.
+  # These aliases are synonyms, version pins, and archive-specific mirrors.
 
-  # CDS Data
-  galex: "galex_cds"
-  vhs: "vhs_cds"
+  # Gaia — default is ESA Archive; CDS/NOAO mirrors remain as separate catalogues
+  gaia_dr3: "gaia"
+  gaiadr3: "gaia"
+  gaia_esa: "gaia"
 
-  # NOAO Data
-  delve: "delve_noao"
-  nsc: "nsc_noao"
-  nsc_dr2: "nsc_noao"
-  des: "des_noao"
-  des_dr2: "des_noao"
-  decals: "desils_noao"
-  decals_dr10: "desils_noao"
-  decals_objects: "decals_noao"
-  ls_dr10_objects: "decals_noao"
-  desils: "desils_noao"
-  desils_dr10: "desils_noao"
-  ls_dr10: "desils_noao"
-  smash: "smash_noao"
-  smash_dr2: "smash_noao"
-  unwise: "unwise_noao"
-  unwise_dr1: "unwise_noao"
-  allwise_dl: "allwise_noao"
-  ukidss: "ukidsslas_noao"
-  ukidsslas: "ukidsslas_noao"
-  nsc_x_gaia: "nsc_x_gaia_noao"
-  des_x_gaia: "des_x_gaia_noao"
-  decals_x_gaia: "decals_x_gaia_noao"
-  allwise_x_gaia: "allwise_x_gaia_noao"
+  # Optical / NIR
+  panstarrs: "ps1"
+  panstarrs1: "ps1"
+  "2mass": "twomass"
+  des_dr2: "des"
+  nsc_dr2: "nsc"
+  smash_dr2: "smash"
+  desils_dr10: "desils"
+  ls_dr10: "desils"
+  decals: "desils"
+  decals_dr10: "desils"
+  decals_noao: "decals_objects"
+  ls_dr10_objects: "decals_objects"
+  ukidsslas: "ukidss"
+
+  # Mid-IR
+  unwise_dr1: "unwise"
+  allwise_dl: "allwise"
+
+  # Archive-qualified pins (optional; prefer the short name)
+  galex_cds: "galex"
+  vhs_cds: "vhs"
+  ps1_cds: "ps1"
+  twomass_cds: "twomass"
+  catwise_cds: "catwise"
+  sdss_cds: "sdss"
+  skymapper_cds: "skymapper"
+  glimpse_cds: "glimpse"
+  nvss_cds: "nvss"
+  first_cds: "first"
+  xmm_cds: "xmm"
+  chandra_cds: "chandra"
+  rosat_cds: "rosat"
+  erosita_cds: "erosita"
+  nsc_noao: "nsc"
+  des_noao: "des"
+  desils_noao: "desils"
+  delve_noao: "delve"
+  delve3_noao: "delve3"
+  smash_noao: "smash"
+  unwise_noao: "unwise"
+  allwise_noao: "allwise"
+  ukidsslas_noao: "ukidss"
+  ukidss_gps_noao: "ukidss_gps"
+  decaps_noao: "decaps"
+  splus_noao: "splus"
+  euclid_noao: "euclid"
+  desi_noao: "desi"
+  usnob_noao: "usnob"
+  nsc_x_gaia_noao: "nsc_x_gaia"
+  des_x_gaia_noao: "des_x_gaia"
+  decals_x_gaia_noao: "decals_x_gaia"
+  allwise_x_gaia_noao: "allwise_x_gaia"
+  ukidss_gaia_xmatch_noao: "ukidss_x_gaia"
 
 # --- Catalogue Definitions ---
 # Defines specific astronomical catalogues, their location, and properties.
@@ -126,7 +155,7 @@ catalogues:
     # Default error if specific columns are missing/null (in arcsec)
     default_pos_error_arcsec: 0.05
 
-  galex_cds:
+  galex:
     description: "GALEX All-Sky Imaging Survey (AIS) via CDS VizieR TAP"
     archive: cds
     service_id: tap_service
@@ -141,7 +170,7 @@ catalogues:
     default_columns: ["obijd", "RAJ2000", "DEJ2000", "FUVmag", "e_FUVmag", "NUVmag", "e_NUVmag", "Fafl", "Nafl", "Fexf", "Nexf", "Ffux", "e_Fflux", "Nfux", "e_Nflux"]
     default_pos_error_arcsec: 3.0
 
-  vhs_cds:
+  vhs:
     description: "VISTA Hemisphere Survey via CDS VizieR TAP"
     archive: cds
     service_id: tap_service
@@ -157,8 +186,194 @@ catalogues:
     pos_err_units: "arcsec"
     default_pos_error_arcsec: 0.3
 
+  ps1:
+    description: "Pan-STARRS1 DR1 MeanObject photometry (g/r/i/z/y) via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "dr1"
+    access_identifier: "II/349/ps1"
+    table_name: "II/349/ps1"
+    epoch: 2012.0
+    estimated_size: 'huge'
+    ra_column: "RAJ2000"
+    dec_column: "DEJ2000"
+    id_column: "objID"
+    default_columns: ["objID", "RAJ2000", "DEJ2000", "gmag", "e_gmag", "rmag", "e_rmag", "imag", "e_imag", "zmag", "e_zmag", "ymag", "e_ymag", "Epoch"]
+    ra_err_column: "e_RAJ2000"
+    dec_err_column: "e_DEJ2000"
+    pos_err_units: "arcsec"
+    epoch_column: "Epoch"
+    default_pos_error_arcsec: 0.1
+
+  twomass:
+    description: "2MASS Point Source Catalog via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "psc"
+    access_identifier: "II/246/out"
+    table_name: "II/246/out"
+    epoch: 2000.0
+    estimated_size: 'huge'
+    ra_column: "RAJ2000"
+    dec_column: "DEJ2000"
+    id_column: "2MASS"
+    default_columns: ["2MASS", "RAJ2000", "DEJ2000", "Jmag", "e_Jmag", "Hmag", "e_Hmag", "Kmag", "e_Kmag"]
+    default_pos_error_arcsec: 0.2
+
+  catwise:
+    description: "CatWISE2020 mid-IR catalog via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "2020"
+    access_identifier: "II/365/catwise"
+    table_name: "II/365/catwise"
+    epoch: 2015.0
+    estimated_size: 'huge'
+    ra_column: "RA_ICRS"
+    dec_column: "DE_ICRS"
+    id_column: "objID"
+    default_columns: ["objID", "RA_ICRS", "DE_ICRS", "W1mproPM", "W2mproPM", "pmRA", "pmDE"]
+    pm_ra_column: "pmRA"
+    pm_dec_column: "pmDE"
+    default_pos_error_arcsec: 0.2
+
+  sdss:
+    description: "SDSS DR16 photometric sources via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "dr16"
+    access_identifier: "V/154/sdss16"
+    table_name: "V/154/sdss16"
+    epoch: 2000.0
+    estimated_size: 'huge'
+    ra_column: "RA_ICRS"
+    dec_column: "DE_ICRS"
+    id_column: "objID"
+    default_columns: ["objID", "RA_ICRS", "DE_ICRS", "upmag", "gpmag", "rpmag", "ipmag", "zpmag"]
+    default_pos_error_arcsec: 0.1
+
+  skymapper:
+    description: "SkyMapper Southern Survey DR4 via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "dr4"
+    access_identifier: "II/379/smssdr4"
+    table_name: "II/379/smssdr4"
+    epoch: 2015.0
+    estimated_size: 'huge'
+    ra_column: "RAICRS"
+    dec_column: "DEICRS"
+    id_column: "ObjectId"
+    default_columns: ["ObjectId", "RAICRS", "DEICRS", "uPSF", "vPSF", "gPSF", "rPSF", "iPSF", "zPSF"]
+    default_pos_error_arcsec: 0.1
+
+  glimpse:
+    description: "Spitzer GLIMPSE I Catalog via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "i"
+    access_identifier: "II/293/glimpse"
+    table_name: "II/293/glimpse"
+    epoch: 2005.0
+    estimated_size: 'large'
+    ra_column: "RAJ2000"
+    dec_column: "DEJ2000"
+    id_column: "GLIMPSE"
+    default_columns: ["GLIMPSE", "RAJ2000", "DEJ2000", "3_6mag", "4_5mag", "5_8mag", "8_0mag"]
+    default_pos_error_arcsec: 0.3
+
+  nvss:
+    description: "NVSS 1.4 GHz radio catalog via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "1.4ghz"
+    access_identifier: "VIII/65/nvss"
+    table_name: "VIII/65/nvss"
+    epoch: 1995.0
+    estimated_size: 'large'
+    ra_column: "RAJ2000"
+    dec_column: "DEJ2000"
+    id_column: "NVSS"
+    default_columns: ["NVSS", "RAJ2000", "DEJ2000", "S1_4", "e_S1_4"]
+    default_pos_error_arcsec: 1.0
+
+  first:
+    description: "FIRST 2014 radio catalog via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "2014"
+    access_identifier: "VIII/92/first14"
+    table_name: "VIII/92/first14"
+    epoch: 2000.0
+    estimated_size: 'large'
+    ra_column: "RAJ2000"
+    dec_column: "DEJ2000"
+    id_column: "FIRST"
+    default_columns: ["FIRST", "RAJ2000", "DEJ2000", "Fpeak", "Fint"]
+    default_pos_error_arcsec: 0.5
+
+  xmm:
+    description: "4XMM-DR13 slim X-ray catalog via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "dr13"
+    access_identifier: "IX/69/xmm4d13s"
+    table_name: "IX/69/xmm4d13s"
+    epoch: 2010.0
+    estimated_size: 'medium'
+    ra_column: "RA_ICRS"
+    dec_column: "DE_ICRS"
+    id_column: "Source"
+    default_columns: ["Source", "RA_ICRS", "DE_ICRS", "Flux1", "Flux2", "Flux3"]
+    default_pos_error_arcsec: 1.0
+
+  chandra:
+    description: "Chandra Source Catalog v2.1 masters via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "v2.1"
+    access_identifier: "IX/70/csc21mas"
+    table_name: "IX/70/csc21mas"
+    epoch: 2010.0
+    estimated_size: 'medium'
+    ra_column: "RAICRS"
+    dec_column: "DEICRS"
+    id_column: "2CXO"
+    default_columns: ["2CXO", "RAICRS", "DEICRS", "PFluxb", "PFluxs", "PFluxm", "PFluxh"]
+    default_pos_error_arcsec: 0.5
+
+  rosat:
+    description: "ROSAT 2RXS catalog via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "2rxs"
+    access_identifier: "J/A+A/588/A103/cat2rxs"
+    table_name: "J/A+A/588/A103/cat2rxs"
+    epoch: 1991.0
+    estimated_size: 'medium'
+    ra_column: "RAJ2000"
+    dec_column: "DEJ2000"
+    id_column: "2RXS"
+    default_columns: ["2RXS", "RAJ2000", "DEJ2000", "CRate", "Fluxb"]
+    default_pos_error_arcsec: 10.0
+
+  erosita:
+    description: "eROSITA eRASS1 main catalog via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "erass1"
+    access_identifier: "J/A+A/682/A34/erass1-m"
+    table_name: "J/A+A/682/A34/erass1-m"
+    epoch: 2020.0
+    estimated_size: 'large'
+    ra_column: "RA_ICRS"
+    dec_column: "DE_ICRS"
+    id_column: "IAUName"
+    default_columns: ["IAUName", "RA_ICRS", "DE_ICRS", "MLRate1"]
+    default_pos_error_arcsec: 5.0
+
   # --- NOAO Data Lab Catalogues ---
-  nsc_noao:
+  nsc:
     description: "NOIRLab Source Catalog (NSC) DR2 via Data Lab"
     archive: noao_datalab
     service_id: tap_service
@@ -176,7 +391,7 @@ catalogues:
     pos_err_units: "arcsec"
     default_pos_error_arcsec: 0.05
 
-  des_noao:
+  des:
     description: "Dark Energy Survey (DES) DR2 via Data Lab"
     archive: noao_datalab
     service_id: tap_service
@@ -194,8 +409,8 @@ catalogues:
     pos_err_units: "arcsec"
     default_pos_error_arcsec: 0.1
 
-  decals_noao:
-    description: "DECaLS DR10 (object/detection table — no photometry; use 'ls_dr10' for tractor magnitudes) via Data Lab"
+  decals_objects:
+    description: "DECaLS DR10 (object/detection table — no photometry; use 'desils' for tractor magnitudes) via Data Lab"
     archive: noao_datalab
     service_id: tap_service
     release: "dr10"
@@ -210,7 +425,7 @@ catalogues:
     pos_err_units: "arcsec"
     default_pos_error_arcsec: 0.1
 
-  smash_noao:
+  smash:
     description: "Survey of the MAgellanic Stellar History (SMASH) DR2 via Data Lab"
     archive: noao_datalab
     service_id: tap_service
@@ -226,7 +441,7 @@ catalogues:
     pos_err_units: "arcsec"
     default_pos_error_arcsec: 0.05
 
-  unwise_noao:
+  unwise:
     description: "unWISE DR1 (NEO coadds) via Data Lab"
     archive: noao_datalab
     service_id: tap_service
@@ -242,7 +457,7 @@ catalogues:
     pos_err_units: "arcsec"
     default_pos_error_arcsec: 0.5
 
-  allwise_noao:
+  allwise:
     description: "AllWISE Source Catalog via Data Lab"
     archive: noao_datalab
     service_id: tap_service
@@ -260,7 +475,7 @@ catalogues:
     pos_err_units: "arcsec"
     default_pos_error_arcsec: 0.2
 
-  delve_noao:
+  delve:
     description: "DECam Local Volume Exploration Survey (DELVE) via NOIRLab Data Lab"
     archive: noao_datalab
     service_id: tap_service
@@ -316,7 +531,7 @@ catalogues:
     pos_err_units: "mas"
     default_pos_error_arcsec: 0.01
 
-  desils_noao:
+  desils:
     description: "DESI Legacy Imaging Surveys (LS) via NOIRLab Data Lab TAP"
     archive: noao_datalab
     service_id: tap_service
@@ -335,7 +550,7 @@ catalogues:
     # pos_err_units: "ivar" # Or convert ivar to arcsec error
     default_pos_error_arcsec: 0.1 # Approximate default
 
-  ukidsslas_noao:
+  ukidss:
     description: "UKIDSS Large Area Survey (LAS) via NOIRLab Data Lab"
     archive: noao_datalab
     service_id: tap_service
@@ -354,8 +569,113 @@ catalogues:
     pos_err_units: "arcsec"
     default_pos_error_arcsec: 0.05
 
+  ukidss_gps:
+    description: "UKIDSS Galactic Plane Survey via NOIRLab Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "dr11plus"
+    access_identifier: "ukidss_dr11plus.gpssource"
+    table_name: "ukidss_dr11plus.gpssource"
+    epoch: 2000.0
+    estimated_size: 'large'
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "sourceid"
+    default_columns: ["sourceid", "ra", "dec", "japermag3", "hapermag3", "kapermag3"]
+    default_pos_error_arcsec: 0.05
+
+  delve3:
+    description: "DELVE DR3 coadd objects via NOIRLab Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "dr3"
+    access_identifier: "delve_dr3.coadd_objects"
+    table_name: "delve_dr3.coadd_objects"
+    epoch: 2000.0
+    estimated_size: 'huge'
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "coadd_object_id"
+    default_columns: ["coadd_object_id", "ra", "dec", "mag_auto_g", "mag_auto_r", "mag_auto_i", "mag_auto_z"]
+    default_pos_error_arcsec: 0.1
+
+  decaps:
+    description: "DECaPS DR2 Galactic plane catalog via NOIRLab Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "dr2"
+    access_identifier: "decaps_dr2.object"
+    table_name: "decaps_dr2.object"
+    epoch: 2017.0
+    estimated_size: 'huge'
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "obj_id"
+    default_columns: ["obj_id", "ra", "dec", "mean_mag_g", "mean_mag_r", "mean_mag_i", "mean_mag_z", "mean_mag_y"]
+    default_pos_error_arcsec: 0.1
+
+  splus:
+    description: "S-PLUS DR4 PSF photometry via NOIRLab Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "dr4"
+    access_identifier: "splus_dr4.psf"
+    table_name: "splus_dr4.psf"
+    epoch: 2018.0
+    estimated_size: 'large'
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "id"
+    default_columns: ["id", "ra", "dec", "u_psf", "g_psf", "r_psf", "i_psf", "z_psf"]
+    default_pos_error_arcsec: 0.1
+
+  euclid:
+    description: "Euclid Q1 object catalog via NOIRLab Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "q1"
+    access_identifier: "euclid_q1.object"
+    table_name: "euclid_q1.object"
+    epoch: 2024.0
+    estimated_size: 'huge'
+    ra_column: "right_ascension"
+    dec_column: "declination"
+    id_column: "object_id"
+    default_columns: ["object_id", "right_ascension", "declination", "flux_vis_psf"]
+    default_pos_error_arcsec: 0.05
+
+  desi:
+    description: "DESI DR1 target photometry via NOIRLab Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "dr1"
+    access_identifier: "desi_dr1.photometry"
+    table_name: "desi_dr1.photometry"
+    epoch: 2015.0
+    estimated_size: 'huge'
+    ra_column: "ra"
+    dec_column: "dec"
+    id_column: "targetid"
+    default_columns: ["targetid", "ra", "dec", "flux_g", "flux_r", "flux_z"]
+    default_pos_error_arcsec: 0.1
+
+  usnob:
+    description: "USNO-B1.0 via NOIRLab Data Lab"
+    archive: noao_datalab
+    service_id: tap_service
+    release: "b1"
+    access_identifier: "usno.b1"
+    table_name: "usno.b1"
+    epoch: 2000.0
+    estimated_size: 'huge'
+    ra_column: "raj2000"
+    dec_column: "dej2000"
+    id_column: "id"
+    default_columns: ["id", "raj2000", "dej2000", "b1_mag", "r1_mag", "b2_mag", "r2_mag", "i_mag"]
+    default_pos_error_arcsec: 0.2
+
   # --- ESA Archive Catalogues ---
-  gaia_esa:
+  gaia:
     description: "Gaia Data Release 3 (ESA Archive)"
     archive: esa_gaia
     service_id: tap_service
@@ -399,7 +719,7 @@ catalogues:
   # All are 1.5 arcsec nearest-neighbour pre-computed tables. Columns follow
   # Data Lab convention: ra1/dec1 (survey), ra2/dec2 (Gaia), id1 (survey
   # ID), id2 (Gaia source_id), distance (separation in arcsec).
-  nsc_x_gaia_noao:
+  nsc_x_gaia:
     description: "NSC DR2 × Gaia DR3 pre-computed crossmatch (1.5\")"
     archive: noao_datalab
     service_id: tap_service
@@ -412,7 +732,7 @@ catalogues:
     default_columns: ["ra1", "dec1", "ra2", "dec2", "id1", "id2", "distance"]
     estimated_size: 'large'
 
-  des_x_gaia_noao:
+  des_x_gaia:
     description: "DES DR2 × Gaia DR3 pre-computed crossmatch (1.5\")"
     archive: noao_datalab
     service_id: tap_service
@@ -425,7 +745,7 @@ catalogues:
     default_columns: ["ra1", "dec1", "ra2", "dec2", "id1", "id2", "distance"]
     estimated_size: 'large'
 
-  decals_x_gaia_noao:
+  decals_x_gaia:
     description: "DECaLS DR10 × Gaia DR3 pre-computed crossmatch (1.5\")"
     archive: noao_datalab
     service_id: tap_service
@@ -438,7 +758,7 @@ catalogues:
     default_columns: ["ra1", "dec1", "ra2", "dec2", "id1", "id2", "distance"]
     estimated_size: 'large'
 
-  allwise_x_gaia_noao:
+  allwise_x_gaia:
     description: "AllWISE × Gaia DR3 pre-computed crossmatch (1.5\")"
     archive: noao_datalab
     service_id: tap_service
@@ -451,7 +771,7 @@ catalogues:
     default_columns: ["ra1", "dec1", "ra2", "dec2", "id1", "id2", "distance"]
     estimated_size: 'large'
 
-  ukidss_gaia_xmatch_noao:
+  ukidss_x_gaia:
     description: "UKIDSS DR11 LAS x Gaia DR3 Pre-computed Crossmatch (NOAO)"
     archive: noao_datalab
     service_id: tap_service

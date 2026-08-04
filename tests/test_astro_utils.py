@@ -69,9 +69,8 @@ def test_sky_extent_lazy_matches_eager_numpy():
     assert lazy is not None and eager is not None
     assert abs(lazy["ra_center_deg"] - eager["ra_center_deg"]) < 1e-9
     assert abs(lazy["dec_center_deg"] - eager["dec_center_deg"]) < 1e-9
-    # Different kernels (numpy vs Arrow) can drift at the arc-second level
-    # for the max-separation path; tolerate that here.
-    assert abs(lazy["radius_deg"] - eager["radius_deg"]) < 1.0
+    # Max-separation uses cos(sep).min() → arccos; stay within ~1 arcsec of numpy.
+    assert abs(lazy["radius_deg"] - eager["radius_deg"]) < 1e-3
     assert 0.0 < eager["radius_deg"] < 2.0
     assert 0.0 < lazy["radius_deg"] < 2.0
 

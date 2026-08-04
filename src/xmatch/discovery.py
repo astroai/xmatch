@@ -14,11 +14,12 @@ Results are returned as polars DataFrames for filtering/display.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import polars as pl
 
-from .exceptions import TapError
+from .exceptions import InputError, TapError
 from .tap import execute_tap_query, get_tap_service
 
 logger = logging.getLogger(__name__)
@@ -28,20 +29,48 @@ _PUBLIC_TAP_ENDPOINTS: Dict[str, Dict[str, Any]] = {
     "vizier": {
         "url": "http://tapvizier.u-strasbg.fr/TAPVizieR/tap",
         "description": "CDS VizieR TAP service",
+        "archive": "cds",
+        "service_id": "tap_service",
     },
     "gaia": {
         "url": "https://gea.esac.esa.int/tap-server/tap",
         "description": "ESA Gaia Archive TAP service",
+        "archive": "esa_gaia",
+        "service_id": "tap_service",
     },
     "noirlab": {
         "url": "https://datalab.noirlab.edu/tap",
         "description": "NOIRLab Astro Data Lab TAP service",
+        "archive": "noao_datalab",
+        "service_id": "tap_service",
     },
     "cadc": {
         "url": "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/tap",
         "description": "Canadian Astronomy Data Centre TAP service",
+        # Not in bundled archives yet — ad-hoc still works via tap_url override.
+        "archive": None,
+        "service_id": "tap_service",
     },
 }
+
+# VizieR-style catalogue ids: I/355/gaiadr3, II/349/ps1, J/A+A/588/A103/cat2rxs, VIII/65/nvss
+# Require a catalogue-class prefix so paths like data/foo are not treated as TAP ids.
+_VIZIER_TABLE_RE = re.compile(r"^(?:[IVX]+|J)/[A-Za-z0-9.+/_-]+$")
+# Data Lab / ESA style: schema.table (single dot, no slash, no path separators)
+_SCHEMA_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$")
+
+_ID_NAME_HINTS = (
+    "source_id",
+    "objid",
+    "object_id",
+    "obj_id",
+    "ls_id",
+    "targetid",
+    "designation",
+    "allwise",
+    "sourceid",
+    "coadd_object_id",
+)
 
 
 def get_public_endpoints() -> Dict[str, Dict[str, Any]]:
@@ -96,6 +125,58 @@ def discover_tables(
     return astropy_table_to_polars(table)
 
 
+def split_table_id(table_id: str) -> Tuple[Optional[str], str]:
+    """Split a table id into ``(schema_name, table_name)`` for TAP_SCHEMA queries.
+
+    * Data Lab / ESA: ``ls_dr10.tractor`` → ``('ls_dr10', 'tractor')``
+    * VizieR: ``II/349/ps1`` → ``(None, 'II/349/ps1')`` (single identifier)
+    """
+    text = table_id.strip().strip('"')
+    if "/" in text:
+        return None, text
+    if "." in text:
+        schema, _, name = text.partition(".")
+        if schema and name and "." not in name:
+            return schema, name
+    return None, text
+
+
+def looks_like_table_id(value: str) -> bool:
+    """True when *value* looks like a remote TAP/VizieR table id, not a local name."""
+    text = value.strip().strip('"')
+    if not text or " " in text or text.startswith(".") or text.startswith("/"):
+        return False
+    # Local data files must not be treated as TAP ids (e.g. sources.csv).
+    lower = text.lower()
+    if lower.endswith((".csv", ".parquet", ".fits", ".fit", ".tsv", ".txt", ".hats")):
+        return False
+    if _VIZIER_TABLE_RE.match(text):
+        return True
+    return bool(_SCHEMA_TABLE_RE.match(text))
+
+
+def guess_endpoint(table_id: str) -> Optional[str]:
+    """Guess the public endpoint short-name for a table id."""
+    text = table_id.strip().strip('"')
+    if "/" in text:
+        return "vizier"
+    if _SCHEMA_TABLE_RE.match(text):
+        # ESA Gaia uses gaiadr3.* ; everything else with schema.table → noirlab.
+        if text.lower().startswith("gaiadr"):
+            return "gaia"
+        return "noirlab"
+    return None
+
+
+def endpoint_archive(endpoint: str) -> Tuple[Optional[str], str, str]:
+    """Return ``(archive_name, service_id, tap_url)`` for a public endpoint."""
+    key = endpoint.lower().strip()
+    info = _PUBLIC_TAP_ENDPOINTS.get(key)
+    if info is None:
+        raise InputError(f"Unknown TAP endpoint '{endpoint}'.")
+    return info.get("archive"), info.get("service_id", "tap_service"), info["url"]
+
+
 def discover_columns(
     tap_url: str,
     table_name: str,
@@ -110,7 +191,8 @@ def discover_columns(
     tap_url:
         TAP service URL.
     table_name:
-        Exact table name.
+        Exact table name, or ``schema.table`` (schema is split automatically
+        when *schema_name* is omitted).
     schema_name:
         Optional schema name qualifier.
     auth_session:
@@ -121,10 +203,13 @@ def discover_columns(
     polars.DataFrame
         Columns: ``column_name``, ``datatype``, ``ucd``, ``unit``, ``description``.
     """
+    if schema_name is None:
+        schema_name, table_name = split_table_id(table_name)
+    safe_table = table_name.replace("'", "''")
     query = (
         "SELECT column_name, datatype, ucd, unit, description "
         "FROM TAP_SCHEMA.columns "
-        f"WHERE table_name = '{table_name.replace(chr(39), chr(39) + chr(39))}'"
+        f"WHERE table_name = '{safe_table}'"
     )
     if schema_name:
         safe = schema_name.replace("'", "''")
@@ -181,14 +266,117 @@ def get_table_schema(
     """Get full column metadata for a table.
 
     Returns a dict with ``columns`` (DataFrame), ``columns_count`` (int),
-    ``ra_column``, ``dec_column`` (guessed).
+    ``ra_column``, ``dec_column`` (guessed), ``columns_list``, and
+    ``access_identifier`` (canonical FROM string).
     """
-    cols = discover_columns(tap_url, table_name, auth_session=auth_session)
+    schema_name, bare_table = split_table_id(table_name)
+    cols = discover_columns(tap_url, bare_table, schema_name=schema_name, auth_session=auth_session)
+    # VizieR TAP_SCHEMA often stores the bare id; if empty, retry without schema.
+    if cols.height == 0 and schema_name is not None:
+        cols = discover_columns(tap_url, table_name.strip().strip('"'), auth_session=auth_session)
+    # CDS large_tables: table_name may be II/349/ps1 while discover listed large_tables."II/349/ps1"
+    if cols.height == 0 and "/" in table_name:
+        cols = discover_columns(tap_url, table_name.strip().strip('"'), auth_session=auth_session)
     ra, dec = detect_radec_columns(cols)
+    access = table_name.strip().strip('"')
+    if schema_name and "." not in access and "/" not in access:
+        access = f"{schema_name}.{bare_table}"
     return {
         "columns": cols,
         "columns_count": cols.height,
         "ra_column": ra,
         "dec_column": dec,
-        "columns_list": cols["column_name"].to_list(),
+        "columns_list": cols["column_name"].to_list() if cols.height else [],
+        "access_identifier": access,
+        "schema_name": schema_name,
+        "bare_table_name": bare_table,
     }
+
+
+def _guess_id_column(columns: List[str]) -> Optional[str]:
+    lower = {c.lower(): c for c in columns}
+    for hint in _ID_NAME_HINTS:
+        if hint in lower:
+            return lower[hint]
+    for c in columns:
+        cl = c.lower()
+        if cl.endswith("id") or cl.endswith("_id") or "objid" in cl:
+            return c
+    return None
+
+
+def _guess_default_columns(
+    columns: List[str],
+    *,
+    ra: Optional[str],
+    dec: Optional[str],
+    id_col: Optional[str],
+    limit: int = 12,
+) -> List[str]:
+    """Pick a short default column list: coords + id + a few mag/flux columns."""
+    chosen: List[str] = []
+    for c in (id_col, ra, dec):
+        if c and c not in chosen:
+            chosen.append(c)
+    for c in columns:
+        if c in chosen:
+            continue
+        cl = c.lower()
+        if any(k in cl for k in ("mag", "flux", "psf", "aper")) and "err" not in cl:
+            chosen.append(c)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+def catalogue_entry_from_schema(
+    table_id: str,
+    schema: Dict[str, Any],
+    *,
+    archive: str,
+    service_id: str = "tap_service",
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+) -> Tuple[str, Dict[str, Any]]:
+    """Build ``(catalogue_name, entry_dict)`` from a :func:`get_table_schema` result."""
+    access = schema.get("access_identifier") or table_id.strip().strip('"')
+    ra = schema.get("ra_column")
+    dec = schema.get("dec_column")
+    if not ra or not dec:
+        raise InputError(
+            f"Could not detect RA/Dec columns for '{access}'. "
+            "Pass --ra-column / --dec-column after adopting, or edit the YAML."
+        )
+    cols_list: List[str] = list(schema.get("columns_list") or [])
+    id_col = _guess_id_column(cols_list)
+    short = name or _default_catalogue_name(access)
+    entry: Dict[str, Any] = {
+        "description": description
+        or f"Ad-hoc catalogue {access} (adopted / resolved via TAP_SCHEMA)",
+        "archive": archive,
+        "service_id": service_id,
+        "access_identifier": access,
+        "table_name": access,
+        "ra_column": ra,
+        "dec_column": dec,
+        "estimated_size": "huge",
+        "default_pos_error_arcsec": 0.1,
+    }
+    if id_col:
+        entry["id_column"] = id_col
+    entry["default_columns"] = _guess_default_columns(cols_list, ra=ra, dec=dec, id_col=id_col)
+    return short, entry
+
+
+def _default_catalogue_name(access: str) -> str:
+    """Derive a YAML-safe catalogue key from a table id."""
+    text = access.strip().strip('"').lower()
+    text = text.replace("/", "_").replace(".", "_").replace("+", "p").replace("-", "_")
+    text = re.sub(r"[^a-z0-9_]", "", text)
+    return text or "adopted_table"
+
+
+def resolve_endpoint_name(name: str) -> Optional[str]:
+    """Return canonical endpoint short-name if *name* is known (else ``None``)."""
+    key = name.lower().strip()
+    return key if key in _PUBLIC_TAP_ENDPOINTS else None

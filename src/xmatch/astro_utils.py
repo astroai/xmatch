@@ -391,7 +391,7 @@ def sky_extent_from_frame(
         sin_d * pl.col(dec_col).radians().sin()
         + cos_d * pl.col(dec_col).radians().cos() * (pl.col(ra_col).radians() - ra0).cos()
     )
-    cos_sep_max = lf.select(cos_sep_expr.max()).collect().item()
+    cos_sep_max = lf.select(cos_sep_expr.min()).collect().item()
     radius_deg = math.degrees(math.acos(max(-1.0, min(1.0, float(cos_sep_max)))))
     return {
         "ra_center_deg": float(center_ra),

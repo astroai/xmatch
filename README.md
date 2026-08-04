@@ -131,6 +131,7 @@ explicit subcommands.
 | Search remote TAP services        | `xmatch search gaia`                                  |
 | Browse a remote endpoint          | `xmatch discover noirlab`                             |
 | Schema + YAML hint for a table    | `xmatch discover noirlab --schema nsc_dr2.object`     |
+| Adopt a remote table into config  | `xmatch adopt vizier II/349/ps1 --name ps1`            |
 
 ```bash
 # Two local files (coordinate columns auto-detected); CSV result on stdout
@@ -146,7 +147,7 @@ xmatch match gaia allwise.csv twomass.csv --union -r 1.5 -o master.hats --hats-t
 xmatch my_sources.csv gaia -o my_gaia.parquet -r 2.0
 
 # Error-ellipse match (needs error columns in the catalogue config)
-xmatch match gaia desils_noao --matcher skyerr --max-error 3.0 -o out.parquet
+xmatch match gaia desils --matcher skyerr --max-error 3.0 -o out.parquet
 
 # Pick the in-process cKDTree engine (no Java) and stream matches to disk
 xmatch match a.parquet b.parquet --engine fast -r 1.0 -o matches.parquet
@@ -169,6 +170,11 @@ xmatch list
 xmatch describe gaia
 xmatch --list            # legacy alias kept for backwards compatibility
 xmatch --describe gaia   # legacy alias kept for backwards compatibility
+
+# Adopt a discovered TAP/VizieR table into ~/.config/xmatch/xmatch.yaml
+xmatch adopt vizier II/349/ps1 --name ps1
+# Or match an ad-hoc table id without writing config (endpoint auto-guessed)
+xmatch match sources.csv II/349/ps1 --ra 150.1 --dec 2.18 --radius-deg 0.05
 ```
 
 ### Help, colour, and discovery
@@ -185,6 +191,8 @@ xmatch --describe gaia   # legacy alias kept for backwards compatibility
 * Errors include a **"Did you mean: …"** hint when a catalogue name is
   close to one in the config (e.g. `xmatch --describe gaiaesa` suggests
   `gaia_esa`).
+* `~/.config/xmatch/xmatch.yaml` (if present) is **merged over** the bundled
+  config — use `xmatch adopt` to add surveys without editing the package YAML.
 
 Run `xmatch --help` for the full top-level summary, and `xmatch <cmd> --help`
 for command-specific options.
@@ -431,7 +439,12 @@ result = cat.crossmatch(lsdb.read_hats("new_data.hats"), radius_arcsec=1.0)
 
 - `xmatch.yaml` defines archives (TAP/CDS services) and catalogues (access
   identifiers, coordinate / id / error columns, epoch). The packaged config is
-  used by default; override with `--config` or `CrossMatch(config_file=...)`.
+  used by default; `~/.config/xmatch/xmatch.yaml` (or `~/.xmatch/xmatch.yaml`)
+  is deep-merged on top when present. Override everything with `--config` or
+  `CrossMatch(config_file=...)`.
+- `xmatch adopt <endpoint> <table>` probes TAP_SCHEMA and appends a catalogue
+  entry to the user overlay. Ad-hoc table ids (e.g. `II/349/ps1`,
+  `ls_dr10.tractor`) also resolve directly in `xmatch match` without adopting.
 - `auth.py` loads credentials for authenticated TAP services via `keyring` or the
   `XMATCH_<SERVICE>_USER` / `XMATCH_<SERVICE>_PASSWORD` environment variables.
 

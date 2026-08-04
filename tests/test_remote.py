@@ -146,7 +146,7 @@ def test_target_epoch_bypasses_unpropagated_tap_self_join(cm, monkeypatch):
     result = cm._remote_vs_remote(src1, src2, req).collect()
 
     assert result["ok"].to_list() == [True]
-    assert downloads == ["gaia_esa", "gaia_esa"]
+    assert downloads == ["gaia", "gaia"]
 
 
 def test_target_epoch_bypasses_unpropagated_cds_xmatch(cm, monkeypatch):

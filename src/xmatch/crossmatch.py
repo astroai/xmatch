@@ -26,11 +26,17 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import polars as pl
-import yaml
 
 from . import auth, io_utils
 from .astro_utils import coord_arrays, find_coord_columns, sky_extent, sky_extent_from_frame
 from .bayes import compute_nway_p_match
+from .discovery import (
+    catalogue_entry_from_schema,
+    endpoint_archive,
+    get_table_schema,
+    guess_endpoint,
+    looks_like_table_id,
+)
 from .exceptions import ConfigError, CrossMatchError, InputError
 from .matchers import (
     _RIGHT_SUFFIX,
@@ -43,6 +49,7 @@ from .matchers import (
 )
 from .request import MatchRequest
 from .sources import ASTROMETRIC_COVARIANCE_KEYS, CatalogueSource
+from .user_config import bundled_config_path, load_merged_config
 
 logger = logging.getLogger(__name__)
 
@@ -50,21 +57,12 @@ FrameInput = Union[str, Path, pl.DataFrame, pl.LazyFrame]
 
 
 def _find_default_config_path() -> Optional[Path]:
-    candidates = [Path(__file__).parent / "xmatch.yaml", Path.cwd() / "xmatch.yaml"]
-    try:
-        from importlib.resources import files
-
-        candidates.insert(0, Path(str(files("xmatch") / "xmatch.yaml")))
-    except Exception:
-        pass
-    candidates += [
-        Path.home() / ".config" / "xmatch" / "xmatch.yaml",
-        Path.home() / ".xmatch" / "xmatch.yaml",
-    ]
-    for path in candidates:
-        if path.is_file():
-            return path
-    return None
+    """Prefer bundled package yaml (user overlay is merged separately)."""
+    bundled = bundled_config_path()
+    if bundled.is_file():
+        return bundled
+    cwd = Path.cwd() / "xmatch.yaml"
+    return cwd if cwd.is_file() else None
 
 
 DEFAULT_CONFIG_PATH = _find_default_config_path()
@@ -74,6 +72,7 @@ class CrossMatch:
     """Configuration holder and crossmatch entry point."""
 
     def __init__(self, config_file: Optional[Union[str, Path]] = None, **kwargs):
+        self._explicit_config = config_file is not None
         if config_file is None:
             if DEFAULT_CONFIG_PATH is None:
                 raise ConfigError("No xmatch.yaml found; pass config_file explicitly.")
@@ -95,6 +94,8 @@ class CrossMatch:
         self.stilts_java_opts = kwargs.get("java_opts", self.stilts_config.get("java_opts"))
         self.stilts_tmpdir = kwargs.get("tmpdir", self.stilts_config.get("tmpdir"))
         self.n_workers = kwargs.get("n_workers", multiprocessing.cpu_count())
+        # Optional default TAP endpoint for ad-hoc table-id resolution.
+        self.default_endpoint: Optional[str] = kwargs.get("endpoint")
 
         self.auth_config = auth.load_auth_config()
         self.last_spill_stats: Optional[Dict[str, int]] = None
@@ -103,13 +104,14 @@ class CrossMatch:
 
     # ------------------------------------------------------------------ config
     def _load_config(self) -> Dict[str, Any]:
-        try:
-            with open(self.config_file, "r") as fh:
-                config = yaml.safe_load(fh)
-        except yaml.YAMLError as exc:
-            raise ConfigError(f"Error parsing {self.config_file}: {exc}") from exc
-        if not isinstance(config, dict):
-            raise ConfigError("Configuration file is not a YAML mapping.")
+        if self._explicit_config:
+            config, path = load_merged_config(
+                config_file=self.config_file, include_user_overlay=False
+            )
+            self.config_file = path
+            return config
+        config, path = load_merged_config(include_user_overlay=True)
+        self.config_file = path
         return config
 
     def _validate_config(self) -> None:
@@ -169,7 +171,7 @@ class CrossMatch:
                 raise ConfigError(f"Alias '{alias}' points to unknown catalogue '{target}'.")
 
     def get_catalogue_config(self, name: str) -> Dict[str, Any]:
-        name = name.lower()
+        name = self.resolve_name(name)
         if name not in self.catalogues_config:
             raise CrossMatchError(f"Catalogue '{name}' not found in configuration.")
         cat = self.catalogues_config[name]
@@ -190,6 +192,24 @@ class CrossMatch:
 
     def resolve_name(self, name: str) -> str:
         return self.aliases_config.get(name.lower(), name.lower())
+
+    def find_catalogue_by_access_id(self, table_id: str) -> Optional[str]:
+        """Return catalogue key whose ``access_identifier``/``table_name`` matches *table_id*.
+
+        Lets users paste the ACCESS column from ``xmatch list`` and still get the
+        bundled entry (columns, errors, epoch) instead of a bare TAP_SCHEMA probe.
+        """
+        needle = table_id.strip().strip('"').lower()
+        if not needle:
+            return None
+        for name, cat in self.catalogues_config.items():
+            for key in ("access_identifier", "table_name"):
+                val = cat.get(key)
+                if val is None:
+                    continue
+                if str(val).strip().strip('"').lower() == needle:
+                    return name
+        return None
 
     def suggest(self, name: str, *, n: int = 3, cutoff: float = 0.4) -> List[str]:
         """Return catalogue or alias names similar to ``name`` for hinting.
@@ -232,7 +252,13 @@ class CrossMatch:
 
     # ----------------------------------------------------------------- sources
     def resolve_source(self, value: FrameInput, overrides: Dict[str, Any]) -> CatalogueSource:
-        """Build a CatalogueSource from a path/name/frame plus per-side overrides."""
+        """Build a CatalogueSource from a path/name/frame plus per-side overrides.
+
+        Unknown strings that look like TAP/VizieR table ids (e.g. ``II/349/ps1``
+        or ``ls_dr10.tractor``) are resolved on the fly via TAP_SCHEMA when an
+        endpoint can be guessed or is passed as ``overrides['endpoint']`` /
+        ``CrossMatch(endpoint=…)``.
+        """
         if isinstance(value, (pl.DataFrame, pl.LazyFrame)):
             lf = value.lazy() if isinstance(value, pl.DataFrame) else value
             return self._local_source("frame", lf=lf, overrides=overrides)
@@ -252,12 +278,83 @@ class CrossMatch:
         if path.is_file():
             return self._local_source(path.stem, path=path, overrides=overrides)
 
+        # Prefer a configured catalogue when the user pastes an ACCESS id from
+        # `xmatch list` (e.g. II/349/ps1 → ps1), before falling back to ad-hoc TAP.
+        by_access = self.find_catalogue_by_access_id(text)
+        if by_access is not None:
+            return self._remote_source(self.get_catalogue_config(by_access), overrides)
+
+        if looks_like_table_id(text):
+            # Prefer the table-id heuristic (VizieR slash vs schema.table) over a
+            # global --endpoint meant for the other match operand.
+            endpoint = guess_endpoint(text) or overrides.get("endpoint") or self.default_endpoint
+            if endpoint:
+                return self.source_from_table_id(text, endpoint=endpoint, overrides=overrides)
+
         # Defer the "did you mean?" rendering to the CLI: the exception
         # carries `.source` so callers can decide how loudly to hint.
         raise InputError(
             f"'{text}' is not a file, HATS dir, or known catalogue.",
             source=text,
         )
+
+    def source_from_table_id(
+        self,
+        table_id: str,
+        *,
+        endpoint: str,
+        overrides: Optional[Dict[str, Any]] = None,
+    ) -> CatalogueSource:
+        """Build a remote :class:`CatalogueSource` from a TAP table id (no YAML write)."""
+        overrides = overrides or {}
+        archive_name, service_id, tap_url = endpoint_archive(endpoint)
+        if archive_name is None:
+            # Endpoint has no bundled archive (e.g. cadc) — still allow TAP download.
+            archive_name = endpoint.lower()
+        auth_session = self.auth_config.get_auth_session(archive_name)
+        schema = get_table_schema(tap_url, table_id, auth_session=auth_session)
+        if schema["columns_count"] == 0:
+            raise InputError(
+                f"No columns found for table '{table_id}' on endpoint '{endpoint}'.",
+                source=table_id,
+            )
+        # Prefer explicit RA/Dec overrides over TAP_SCHEMA heuristics.
+        if overrides.get("ra_column"):
+            schema = dict(schema)
+            schema["ra_column"] = overrides["ra_column"]
+        if overrides.get("dec_column"):
+            schema = dict(schema)
+            schema["dec_column"] = overrides["dec_column"]
+        if archive_name not in self.archives_config:
+            # Synthesize a minimal archive so _remote_source can pick up tap URL.
+            name, entry = catalogue_entry_from_schema(
+                table_id,
+                schema,
+                archive=archive_name,
+                service_id=service_id,
+            )
+            cfg = {
+                **entry,
+                "access_method": "tap",
+                "access_url": tap_url,
+                "_catalogue_name": name,
+                "_archive_name": archive_name,
+            }
+            return self._remote_source(cfg, overrides)
+
+        name, entry = catalogue_entry_from_schema(
+            table_id,
+            schema,
+            archive=archive_name,
+            service_id=service_id,
+        )
+        # Merge archive service fields the same way as configured catalogues.
+        service = self.archives_config[archive_name].get(service_id, {})
+        cfg = dict(service) if isinstance(service, dict) else {}
+        cfg.update(entry)
+        cfg["_catalogue_name"] = name
+        cfg["_archive_name"] = archive_name
+        return self._remote_source(cfg, overrides)
 
     def _resolve_coords(self, columns, overrides):
         ra = overrides.get("ra_column") or find_coord_columns(columns)[0]

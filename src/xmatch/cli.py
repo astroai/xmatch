@@ -40,8 +40,15 @@ import yaml
 
 from . import __version__
 from .crossmatch import CrossMatch
-from .discovery import discover_tables, get_public_endpoints, get_table_schema
+from .discovery import (
+    catalogue_entry_from_schema,
+    discover_tables,
+    endpoint_archive,
+    get_public_endpoints,
+    get_table_schema,
+)
 from .exceptions import ConfigError, CrossMatchError
+from .user_config import append_catalogue_to_user_config, format_catalogue_yaml, user_config_path
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +271,7 @@ def _make_console(no_color: bool = False) -> Console:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-SUBCOMMANDS = ("match", "list", "describe", "discover", "search", "completion", "doctor")
+SUBCOMMANDS = ("match", "list", "describe", "discover", "search", "adopt", "completion", "doctor")
 
 TAGLINE = (
     "Cross-match two or more astronomical catalogues — local files, HATS "
@@ -292,6 +299,7 @@ Examples:
   xmatch describe gaia
   xmatch discover noirlab --schema nsc_dr2.object
   xmatch search gaia
+  xmatch adopt vizier II/349/ps1 --name ps1
 
   # Shell tab completion (bash | zsh | fish) — emit, then `eval` or save
   eval "$(xmatch completion bash)"
@@ -349,6 +357,18 @@ SEARCH_EXAMPLES = """\
 Examples:
   xmatch search           # all tables on every known endpoint
   xmatch search gaia      # only tables whose name matches "gaia"
+"""
+
+ADOPT_EXAMPLES = """\
+Examples:
+  # Probe VizieR and append to ~/.config/xmatch/xmatch.yaml
+  xmatch adopt vizier II/349/ps1 --name ps1
+
+  # Preview the YAML without writing
+  xmatch adopt noirlab catwise2020.main --name catwise --dry-run
+
+  # Match an ad-hoc table id without adopting (endpoint auto-guessed for VizieR)
+  xmatch match sources.csv II/349/ps1 --ra 150.1 --dec 2.18 --radius-deg 0.05
 """
 
 COMPLETION_EXAMPLES = """\
@@ -646,6 +666,7 @@ def _build_params(args) -> dict:
         radius_deg=args.radius_deg,
         probabilistic=args.probabilistic,
         hats_threshold=args.hats_threshold,
+        endpoint=getattr(args, "endpoint", None),
     )
 
 
@@ -884,6 +905,10 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         dest="radius_deg",
         type=float,
         help="Region radius (deg) for remote downloads.",
+    )
+    g_reg.add_argument(
+        "--endpoint",
+        help="TAP endpoint for ad-hoc table ids (vizier, noirlab, gaia).",
     )
 
     g_info = parser.add_argument_group("Inspection / discovery (legacy flags)")
@@ -1156,6 +1181,10 @@ def _build_match_subparser() -> argparse.ArgumentParser:
         type=float,
         help="Region radius (deg) for remote cone downloads.",
     )
+    g_reg.add_argument(
+        "--endpoint",
+        help="TAP endpoint for ad-hoc table ids (vizier, noirlab, gaia).",
+    )
 
     _add_global_options(parser)
     return parser
@@ -1217,6 +1246,42 @@ def _build_search_subparser() -> argparse.ArgumentParser:
         nargs="?",
         default="*",
         help="Substring to search for (default: '*' = all tables).",
+    )
+    _add_global_options(parser)
+    return parser
+
+
+def _build_adopt_subparser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="xmatch adopt",
+        description=(
+            "Probe a remote TAP table and append a catalogue entry to "
+            "~/.config/xmatch/xmatch.yaml (merged over the bundled config)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=ADOPT_EXAMPLES,
+    )
+    parser.add_argument(
+        "endpoint",
+        help="Endpoint short-name (vizier, noirlab, gaia) or a known public TAP name.",
+    )
+    parser.add_argument(
+        "table",
+        help="Table id (e.g. II/349/ps1 or ls_dr10.tractor).",
+    )
+    parser.add_argument(
+        "--name",
+        dest="catalogue_name",
+        help="Catalogue key to write (default: derived from the table id).",
+    )
+    parser.add_argument(
+        "--alias",
+        help="Optional short alias pointing at the new catalogue.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the YAML snippet without writing the user config.",
     )
     _add_global_options(parser)
     return parser
@@ -1368,7 +1433,7 @@ _xmatch_endpoints=(
 {ep_array}
 )
 _xmatch_shells=( bash zsh fish )
-_xmatch_subcommands=( match list describe discover search completion )
+_xmatch_subcommands=( match list describe discover search adopt completion )
 
 _xmatch() {{
     local cur="" words="" cword=0 i subcmd=""
@@ -1390,7 +1455,7 @@ _xmatch() {{
     # Skip past leading flag tokens to locate the subcommand keyword.
     for ((i = 1; i < cword; i++)); do
         case "${{words[i]}}" in
-            match|list|describe|discover|search|completion)
+            match|list|describe|discover|search|adopt|completion)
                 subcmd="${{words[i]}}"; break ;;
         esac
     done
@@ -1411,7 +1476,7 @@ _xmatch() {{
         match|describe)
             COMPREPLY=( $(compgen -W "${{_xmatch_catalogues[*]}}" -- "$cur") )
             ;;
-        discover)
+        discover|adopt)
             COMPREPLY=( $(compgen -W "${{_xmatch_endpoints[*]}}" -- "$cur") )
             ;;
         completion)
@@ -1442,6 +1507,7 @@ _xmatch_subcommands=(
     'describe:show columns and access info for a catalogue'
     'discover:browse tables on a remote TAP endpoint'
     'search:search every endpoint for tables matching a substring'
+    'adopt:save a remote table into the user config overlay'
     'completion:emit a shell completion script'
 )
 _xmatch_catalogues=( {cat_array} )
@@ -1467,7 +1533,7 @@ _xmatch() {{
                 match|describe)
                     _describe 'catalogue' _xmatch_catalogues
                     ;;
-                discover)
+                discover|adopt)
                     _describe 'endpoint' _xmatch_endpoints
                     ;;
                 completion)
@@ -1493,7 +1559,7 @@ def _emit_fish(catalogues: Sequence[str], endpoints: Sequence[str]) -> str:
 function _xmatch_subcmd
     for token in $argv
         switch $token
-            case match list describe discover search completion
+            case match list describe discover search adopt completion
                 echo $token
                 return
         end
@@ -1507,7 +1573,7 @@ end
 
 function _xmatch_needs_endpoint
     set -l cmd (_xmatch_subcmd $argv)
-    test "$cmd" = discover
+    contains -- $cmd discover adopt
 end
 
 function _xmatch_needs_shell
@@ -1515,7 +1581,7 @@ function _xmatch_needs_shell
     test "$cmd" = completion
 end
 
-set -l _xmatch_subcommands match list describe discover search completion
+set -l _xmatch_subcommands match list describe discover search adopt completion
 
 {cat_lines}
 
@@ -1555,6 +1621,7 @@ def _build_top_parser() -> argparse.ArgumentParser:
         "  describe    show columns & access info for a catalogue\n"
         "  discover    browse tables and columns on a remote TAP endpoint\n"
         "  search      search every endpoint for tables matching a substring\n"
+        "  adopt       save a remote table into ~/.config/xmatch/xmatch.yaml\n"
         "\n"
         "Run `xmatch COMMAND --help` for command-specific options.  The legacy\n"
         "flat form (`xmatch --list`, `xmatch --describe NAME`, `xmatch --search`,\n"
@@ -1578,33 +1645,45 @@ def _build_top_parser() -> argparse.ArgumentParser:
 def list_catalogues(cm: CrossMatch, console: Console) -> None:
     """Print all configured catalogues — colour-aware, table-formatted.
 
-    Column widths are computed from *visible* string length so a coloured
-    table stays aligned on a real terminal (where ANSI escape sequences
-    inflate the byte- but not the visible-count).
+    Shows memorable survey names first. Archive/table details live in
+    ``xmatch describe`` so users are not nudged to paste ACCESS ids.
     """
-    widths = (24, 14, 30, 8)
-    header = (
-        f"{'NAME':<{widths[0]}}  {'ARCHIVE':<{widths[1]}}  "
-        f"{'ACCESS':<{widths[2]}}  {'ROWS':>{widths[3]}}  DESCRIPTION"
-    )
+    widths = (20, 8, 56)
+    header = f"{'NAME':<{widths[0]}}  {'ROWS':>{widths[1]}}  DESCRIPTION"
     console.header(header)
     console.dim_print("\u2500" * _visible_len(header))
+    # Prefer primary surveys; demote archive mirrors of the same survey.
+    primary: list[str] = []
+    mirrors: list[str] = []
     for name in sorted(cm.catalogues_config):
+        if name in {"gaia_cds", "gaia_noao"}:
+            mirrors.append(name)
+        else:
+            primary.append(name)
+
+    def _emit(name: str, *, mirror: bool = False) -> None:
         cat = cm.catalogues_config[name]
-        archive = cat.get("archive", "?")
-        access = str(cat.get("access_identifier", "?"))[:28]
         size = str(cat.get("estimated_size", "?"))
         desc = cat.get("description", "")
+        if mirror:
+            desc = f"(mirror) {desc}"
         size_styled = console.green(size) if size in {"small", "medium", "large", "huge"} else size
+        label = console.dim(name) if mirror else console.bold(name)
         sys.stdout.write(
-            f"  {_pad(console.bold(name), widths[0])}  "
-            f"{_pad(console.dim(archive), widths[1])}  "
-            f"{_pad(console.cyan(access), widths[2])}  "
-            f"{_pad(size_styled, widths[3], '>')}  {desc}\n"
+            f"  {_pad(label, widths[0])}  {_pad(size_styled, widths[1], '>')}  {desc}\n"
         )
+
+    for name in primary:
+        _emit(name)
+    if mirrors:
+        console.dim_print("")
+        console.dim_print("  Archive mirrors (prefer the short name above):")
+        for name in mirrors:
+            _emit(name, mirror=True)
     sys.stdout.write("\n")
     console.info(f"{len(cm.catalogues_config)} catalogues, {len(cm.aliases_config)} aliases.")
-    console.hint("Use 'xmatch describe <name>' (or 'xmatch --describe <name>') for column details.")
+    console.hint("Use 'xmatch describe <name>' for archive/table/column details.")
+    console.hint("Match with the NAME column (e.g. ps1, desils), not the remote table id.")
 
 
 def describe(cm: CrossMatch, name: str, console: Console) -> bool:
@@ -1711,6 +1790,7 @@ def handle_search(cm: CrossMatch, pattern: str, console: Console) -> int:
     if not found_any:
         console.error("\nNo matching tables found.")
         console.hint("Tip: use 'xmatch discover <endpoint>' for known endpoint names.")
+        console.hint("     or 'xmatch adopt <endpoint> <table> --name <short>' to save one.")
         return 1
     return 0
 
@@ -1767,42 +1847,36 @@ def handle_discover(
             )
 
         # ── suggested YAML config snippet ───────────────────────────────
-        ra_guess = schema.get("ra_column")
-        dec_guess = schema.get("dec_column")
-        col_list = schema.get("columns_list", [])
-        id_candidates = [
-            c
-            for c in col_list
-            if c.lower()
-            in ("source_id", "id", "objid", "object_id", "allwise", "usno-b1.0", "desig")
-        ]
-        id_guess = id_candidates[0] if id_candidates else None
-        err_candidates = [c for c in col_list if "err" in c.lower() or "error" in c.lower()]
-        ra_err_guess = next((c for c in err_candidates if "ra" in c.lower()), None)
-        dec_err_guess = next(
-            (c for c in err_candidates if "dec" in c.lower() or "de" in c.lower()), None
+        try:
+            archive_name, service_id, _ = endpoint_archive(endpoint)
+        except Exception:
+            archive_name, service_id = None, "tap_service"
+        if archive_name is None:
+            archive_name = endpoint.lower()
+        try:
+            short_name, entry = catalogue_entry_from_schema(
+                schema_table,
+                schema,
+                archive=archive_name,
+                service_id=service_id,
+            )
+            tip = f"# ─── Suggested entry (or: xmatch adopt {endpoint} {schema_table}) ───"
+            sys.stdout.write(f"\n{console.dim(tip)}\n")
+            sys.stdout.write(format_catalogue_yaml(short_name, entry))
+        except Exception as exc:
+            console.hint(f"Could not build a full snippet ({exc}); showing minimal stub.")
+            short_name = schema_table.rsplit(".", 1)[-1] if "." in schema_table else schema_table
+            sys.stdout.write(f"  {short_name}:\n")
+            sys.stdout.write(f'    archive: "{archive_name}"\n')
+            sys.stdout.write(f'    service_id: "{service_id}"\n')
+            sys.stdout.write(f'    access_identifier: "{schema_table}"\n')
+            if schema.get("ra_column"):
+                sys.stdout.write(f'    ra_column: "{schema["ra_column"]}"\n')
+            if schema.get("dec_column"):
+                sys.stdout.write(f'    dec_column: "{schema["dec_column"]}"\n')
+        console.hint(
+            f"Tip: `xmatch adopt {endpoint} {schema_table}` writes this into {user_config_path()}."
         )
-
-        short_name = schema_table.rsplit(".", 1)[-1] if "." in schema_table else schema_table
-        sys.stdout.write(
-            f"\n{console.dim('# ─── Suggested xmatch.yaml entry (copy into your config) ───')}\n"
-        )
-        sys.stdout.write(f"  {short_name}:\n")
-        sys.stdout.write("    archive: <archive_name>\n")
-        sys.stdout.write("    service_id: <service_id>\n")
-        sys.stdout.write(f'    description: "{schema_table}"\n')
-        sys.stdout.write(f'    access_identifier: "{schema_table}"\n')
-        if ra_guess:
-            sys.stdout.write(f'    ra_column: "{ra_guess}"\n')
-        if dec_guess:
-            sys.stdout.write(f'    dec_column: "{dec_guess}"\n')
-        if id_guess:
-            sys.stdout.write(f'    id_column: "{id_guess}"\n')
-        if ra_err_guess:
-            sys.stdout.write(f'    ra_err_column: "{ra_err_guess}"\n')
-        if dec_err_guess:
-            sys.stdout.write(f'    dec_err_column: "{dec_err_guess}"\n')
-        sys.stdout.write(f"    {console.dim(f'# {cols.height} columns discovered')}\n")
     else:
         try:
             tables = discover_tables(url)
@@ -1821,6 +1895,107 @@ def handle_discover(
             desc_short = (desc[:80] + "…") if len(desc) > 80 else desc
             sys.stdout.write(f"  {_pad(console.cyan(full), 45)}  {desc_short}\n")
         console.hint(f"Tip: use 'xmatch discover {endpoint} --schema <table>' for column details.")
+        console.hint(f"     or 'xmatch adopt {endpoint} <table>' to save a user-config entry.")
+    return 0
+
+
+def handle_adopt(
+    cm: CrossMatch,
+    endpoint: str,
+    table: str,
+    console: Console,
+    *,
+    catalogue_name: Optional[str] = None,
+    alias: Optional[str] = None,
+    dry_run: bool = False,
+) -> int:
+    """Probe *table* on *endpoint* and append it to the user config overlay."""
+    try:
+        archive_name, service_id, tap_url = endpoint_archive(endpoint)
+    except Exception as exc:
+        console.error(str(exc))
+        suggestion = _suggest_endpoint(endpoint, cm)
+        if suggestion:
+            console.hint(f"  {suggestion}")
+        return 1
+    if archive_name is None:
+        console.error(
+            f"Endpoint '{endpoint}' has no bundled archive mapping; "
+            "cannot adopt into xmatch.yaml yet."
+        )
+        return 1
+    if archive_name not in cm.archives_config:
+        console.error(f"Archive '{archive_name}' is not in the active config.")
+        return 1
+
+    console.info(f"Probing {console.cyan(table)} on {console.cyan(tap_url)} …")
+    try:
+        schema = get_table_schema(tap_url, table)
+    except Exception as exc:
+        console.error(f"Failed to query schema for '{table}': {exc}")
+        return 1
+    if schema["columns_count"] == 0:
+        console.error(f"Table '{table}' not found or has no columns on '{endpoint}'.")
+        return 1
+
+    try:
+        name, entry = catalogue_entry_from_schema(
+            table,
+            schema,
+            archive=archive_name,
+            service_id=service_id,
+            name=catalogue_name,
+        )
+    except Exception as exc:
+        console.error(str(exc))
+        return 1
+
+    snippet = format_catalogue_yaml(name, entry)
+    if dry_run:
+        console.info(f"Dry run — would write to {user_config_path()}:\n")
+        sys.stdout.write(snippet)
+        if alias:
+            sys.stdout.write(f"  # alias: {alias.lower()} -> {name}\n")
+        return 0
+
+    if name in cm.catalogues_config:
+        console.error(
+            f"Catalogue '{name}' already exists in the active config. "
+            "Pass --name to choose a different key."
+        )
+        return 1
+
+    if alias:
+        alias_key = alias.lower()
+        if alias_key in cm.catalogues_config:
+            console.error(
+                f"Alias '{alias_key}' collides with an existing catalogue name. "
+                "Choose a different --alias."
+            )
+            return 1
+        existing = cm.aliases_config.get(alias_key)
+        if existing is not None and existing != name:
+            console.error(
+                f"Alias '{alias_key}' already points at '{existing}'. Choose a different --alias."
+            )
+            return 1
+
+    try:
+        path = append_catalogue_to_user_config(
+            name,
+            entry,
+            alias=alias,
+            archives={archive_name: cm.archives_config[archive_name]},
+        )
+    except ConfigError as exc:
+        console.error(str(exc))
+        return 1
+
+    console.info(f"Adopted {console.bold(name)} → {path}")
+    if alias:
+        console.info(f"Alias {console.cyan(alias.lower())} → {name}")
+    console.hint(f"Try: xmatch describe {alias or name}")
+    console.hint(f"     xmatch match <local.parquet> {alias or name} --ra … --dec … --radius-deg …")
     return 0
 
 
@@ -2016,6 +2191,27 @@ def _run_completion(argv: Sequence[str]) -> int:
     # argparse already constrains args.shell to {bash,zsh,fish}, so any
     # other branch is unreachable in practice.
     return 0
+
+
+def _run_adopt_subcommand(argv: Sequence[str]) -> int:
+    parser = _build_adopt_subparser()
+    args = parser.parse_args(list(argv))
+    setup_logging(args.verbose)
+    console = _make_console(no_color=bool(getattr(args, "no_color", False)))
+    cm = CrossMatch(config_file=args.config_file)
+    return _guarded(
+        cm,
+        console,
+        lambda: handle_adopt(
+            cm,
+            args.endpoint,
+            args.table,
+            console,
+            catalogue_name=args.catalogue_name,
+            alias=args.alias,
+            dry_run=args.dry_run,
+        ),
+    )
 
 
 def _run_no_pos_subcommand(argv: Sequence[str], name: str) -> int:
@@ -2529,6 +2725,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return _run_match_subcommand(remaining)
     if cmd == "describe":
         return _run_simple_describe(remaining)
+    if cmd == "adopt":
+        return _run_adopt_subcommand(remaining)
     if cmd == "completion":
         return _run_completion(remaining)
     if cmd == "doctor":

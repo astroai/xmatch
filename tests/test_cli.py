@@ -44,7 +44,7 @@ def test_cli_requires_two_catalogues(capsys):
 def test_cli_list(capsys):
     assert main(["--list"]) == 0
     out = capsys.readouterr().out
-    assert "gaia_esa" in out
+    assert "gaia" in out
     assert "catalogues" in out.lower()
 
 
@@ -139,7 +139,7 @@ def test_cli_subcommand_list_matches_legacy_alias(capsys):
     rc = main(["list"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "gaia_esa" in out
+    assert "gaia" in out
     assert "catalogues" in out.lower()
 
 
@@ -245,7 +245,7 @@ def test_cli_global_flag_before_subcommand(capsys):
     """`xmatch -v list` should still work: '-v' is consumed by `_add_global_options`."""
     rc = main(["-v", "list"])
     assert rc == 0
-    assert "gaia_esa" in capsys.readouterr().out
+    assert "gaia" in capsys.readouterr().out
 
 
 def test_cli_global_flag_after_subcommand(capsys):
@@ -253,7 +253,7 @@ def test_cli_global_flag_after_subcommand(capsys):
     rc = main(["list", "--no-color"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "gaia_esa" in out
+    assert "gaia" in out
     assert "\033[" not in out
 
 
@@ -388,9 +388,9 @@ def test_cli_completion_bash_emits_script(capsys):
     assert "_xmatch()" in out
     # Embedded catalogue list (must include at least one real name):
     assert "_xmatch_catalogues=" in out
-    assert "gaia_esa" in out, "bundled gaia_esa catalogue should be embedded"
+    assert "gaia" in out, "bundled gaia_esa catalogue should be embedded"
     # All six subcommands advertised:
-    assert "match list describe discover search completion" in out
+    assert "match list describe discover search adopt completion" in out
     # compgen against the catalogue var:
     assert 'compgen -W "${_xmatch_catalogues[*]}"' in out
 
@@ -403,7 +403,7 @@ def test_cli_completion_zsh_emits_script(capsys):
     # Standard zsh markers + real catalogue name:
     assert "#compdef xmatch" in out
     assert "_xmatch_catalogues=" in out
-    assert "gaia_esa" in out
+    assert "gaia" in out
     # All six subcommands advertised with descriptions:
     for sub in ("match", "list", "describe", "discover", "search", "completion"):
         assert sub in out, f"zsh completion missing subcommand {sub!r}"
@@ -418,9 +418,9 @@ def test_cli_completion_fish_emits_script(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "complete -c xmatch" in out
-    assert "gaia_esa" in out, "fish script should embed real catalogue names"
+    assert "gaia" in out, "fish script should embed real catalogue names"
     # All six subcommands advertised:
-    assert "match list describe discover search completion" in out
+    assert "match list describe discover search adopt completion" in out
     # Fish predicates for each subcommand family:
     assert "_xmatch_needs_catalogue" in out
     assert "_xmatch_needs_endpoint" in out
@@ -626,4 +626,4 @@ def test_cli_completion_dispatches_through_main(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "#compdef xmatch" in out
-    assert "gaia_esa" in out
+    assert "gaia" in out

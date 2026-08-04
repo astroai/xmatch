@@ -89,6 +89,9 @@ class SideOverrides:
     columns: Optional[List[str]] = None
     """Columns to select on this side (defaults to ``CatalogueSource.default_columns``)."""
 
+    endpoint: Optional[str] = None
+    """TAP endpoint short-name for ad-hoc table-id resolution (vizier, noirlab, …)."""
+
     def as_dict(self) -> Dict[str, Any]:
         """Return a dict suitable for ``resolve_source(…, overrides=…)``."""
         d: Dict[str, Any] = {}
@@ -108,6 +111,7 @@ class SideOverrides:
             "pm_dec_column",
             "parallax_column",
             "radial_velocity_column",
+            "endpoint",
         ):
             val = getattr(self, field_name)
             if val is not None:
@@ -257,6 +261,7 @@ class MatchRequest:
                 parallax_column=params.get("parallax_column_1"),
                 radial_velocity_column=params.get("radial_velocity_column_1"),
                 columns=_parse_columns(params.get("columns_1")),
+                endpoint=params.get("endpoint"),
             ),
             side2=SideOverrides(
                 ra_column=params.get("ra_column_2"),
@@ -275,6 +280,7 @@ class MatchRequest:
                 parallax_column=params.get("parallax_column_2"),
                 radial_velocity_column=params.get("radial_velocity_column_2"),
                 columns=_parse_columns(params.get("columns_2")),
+                endpoint=params.get("endpoint"),
             ),
             ra=params.get("ra"),
             dec=params.get("dec"),

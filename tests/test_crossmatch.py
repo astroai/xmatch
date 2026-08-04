@@ -12,13 +12,13 @@ def cm():
 
 # ------------------------------------------------------------------ config
 def test_bundled_config_loads_and_validates(cm):
-    assert "gaia_esa" in cm.catalogues_config
-    assert cm.resolve_name("gaia") == "gaia_esa"
+    assert "gaia" in cm.catalogues_config
+    assert cm.resolve_name("gaia") == "gaia"
 
 
 def test_get_catalogue_config_merges_service(cm):
-    cfg = cm.get_catalogue_config("gaia_esa")
-    assert cfg["_catalogue_name"] == "gaia_esa"
+    cfg = cm.get_catalogue_config("gaia")
+    assert cfg["_catalogue_name"] == "gaia"
     assert cfg["access_method"] == "tap"  # inherited from the archive service
     assert cfg["ra_column"] == "ra"
 
@@ -46,7 +46,7 @@ def test_resolve_source_remote_alias(cm):
     src = cm.resolve_source("gaia", {})
     assert not src.is_local
     assert src.access_method == "tap"
-    assert src.name == "gaia_esa"
+    assert src.name == "gaia"
 
 
 def test_gaia_source_exposes_complete_space_motion_metadata(cm):
@@ -91,11 +91,11 @@ def test_local_source_preserves_space_motion_overrides(cm):
 def test_resolve_source_datalab_alias(cm):
     """Data Lab catalogue aliases resolve to TAP-backed CatalogueSource."""
     for alias, expected_name, expected_table, expect_ra, expect_dec in [
-        ("nsc", "nsc_noao", "nsc_dr2.object", "ra", "dec"),
-        ("des", "des_noao", "des_dr2.main", "ra", "dec"),
-        ("smash", "smash_noao", "smash_dr2.object", "ra", "dec"),
-        ("unwise", "unwise_noao", "unwise_dr1.object", "ra", "dec"),
-        ("allwise_dl", "allwise_noao", "allwise.source", "ra", "dec"),
+        ("nsc", "nsc", "nsc_dr2.object", "ra", "dec"),
+        ("des", "des", "des_dr2.main", "ra", "dec"),
+        ("smash", "smash", "smash_dr2.object", "ra", "dec"),
+        ("unwise", "unwise", "unwise_dr1.object", "ra", "dec"),
+        ("allwise_dl", "allwise", "allwise.source", "ra", "dec"),
     ]:
         src = cm.resolve_source(alias, {})
         assert not src.is_local, f"{alias} should be remote"
@@ -208,7 +208,7 @@ def test_sky_match_still_errors_when_ra_dec_missing(cm):
 def test_suggest_returns_close_match(cm):
     """cm.suggest returns similar catalogue/alias names for a typo."""
     matches = cm.suggest("gaiaesa")
-    assert "gaia_esa" in matches
+    assert "gaia" in matches
 
 
 def test_suggest_empty_for_unrelated_input(cm):
@@ -218,8 +218,8 @@ def test_suggest_empty_for_unrelated_input(cm):
 
 def test_suggest_lowercases_argument(cm):
     """Catalogues are stored lowercase; the helper should too."""
-    assert "gaia_esa" in cm.suggest("GAIAESA")
-    assert "gaia_esa" in cm.suggest("GaiaEsa")
+    assert "gaia" in cm.suggest("GAIAESA") or "gaia_esa" in cm.suggest("GAIAESA")
+    assert "gaia" in cm.suggest("GaiaEsa") or "gaia_esa" in cm.suggest("GaiaEsa")
 
 
 def test_suggest_preserves_original_case_with_mixed_case_pool():
@@ -408,7 +408,7 @@ def test_crossmatch_multi_remote_first_catalogue(cm, tmp_path):
 
     # --- 3-way: gaia_esa × local2 × local3 ----------------------------------
     out = cm.crossmatch_multi(
-        ["gaia_esa", str(local2_path), str(local3_path)],
+        ["gaia", str(local2_path), str(local3_path)],
         ra=ra_vega,
         dec=dec_vega,
         radius_deg=cone_deg,

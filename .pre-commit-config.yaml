@@ -32,7 +32,7 @@ repos:
     hooks:
       - id: codespell
         additional_dependencies: [tomli]
-        args: ["--ignore-words-list", "nd,th,te,mape,ot,aci,fpr,ois,aussian,numer,commun,multline,als,activ,strat,oen,suh,vas,mye,fo,hte,ue,nax,ags,bu,acn,vew,ecept,ure,ege,edn,whe,inh,ths,proceedure,eazy,clen,acess,astroid,degress,som,sompz,slac,ges,recal,litterature,desig,bund,fof"]
+        args: ["--ignore-words-list", "nd,th,te,mape,ot,aci,fpr,ois,aussian,numer,commun,multline,als,activ,strat,oen,suh,vas,mye,fo,hte,ue,nax,ags,bu,acn,vew,ecept,ure,ege,edn,whe,inh,ths,proceedure,eazy,clen,acess,astroid,degress,som,sompz,slac,ges,recal,litterature,desig,bund,fof,crate"]
 
   - repo: local
     hooks:
