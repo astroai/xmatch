@@ -13,3 +13,7 @@
 
 **Learning:** When using difflib or suggestion engines in CLI hints, ensure that the hint string is non-empty before interpolating it. Otherwise, dangling space and empty hint lines are rendered, resulting in poor visual UX on terminal outputs.
 **Action:** Always conditionally check the output of `_suggest` before calling `console.hint()` or formatting it into error messages.
+
+## 2026-08-05 - CLI error messages with suggestions should be on separate lines
+**Learning:** Concatenating a standard application error message with a "Did you mean?" suggestion on the same line reduces readability and can look overwhelming in the terminal.
+**Action:** When printing application error messages alongside generated hints (e.g., from `_suggest`), always use distinct lines and appropriate formatting styles (like `console.error` followed by `console.hint`) to improve user scannability.

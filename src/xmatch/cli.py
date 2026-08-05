@@ -2082,10 +2082,10 @@ def _guarded(
         source = getattr(exc, "source", None)
         if source:
             hint = _suggest(cm, source)
+
+        console.error(f"Error: {exc}")
         if hint:
-            console.error(f"Error: {exc} {hint}")
-        else:
-            console.error(f"Error: {exc}")
+            console.hint(f"  {hint}")
         return 1
     except KeyboardInterrupt:
         console.error("Interrupted.")
