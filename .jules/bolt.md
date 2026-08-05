@@ -45,3 +45,7 @@
 ## 2026-07-29 - Unnecessary Deep Copies from astype()
 **Learning:** When converting data types on NumPy arrays (e.g. `.astype(float)`), NumPy natively allocates and returns a *new, writeable array copy*. Chaining `.copy()` after `.astype(float)` as in `.astype(float).copy()` causes a completely redundant deep copy, resulting in massive unnecessary CPU and memory overhead when processing large astronomical datasets.
 **Action:** Do not chain `.copy()` on the output of `.astype()`. Use the natively returned, writeable copy directly.
+
+## 2026-08-05 - Avoid O(N) identity matrix copies in valid-only eigvalsh
+**Learning:** When performing row-wise eigenvalue calculations on massive stacked matrices via `np.linalg.eigvalsh`, deep copying the entire N x 5 x 5 block and filling invalid rows with identity matrices causes enormous memory allocations and wastes CPU time solving trivial matrices. NumPy boolean masking natively copies only the required valid elements for calculation.
+**Action:** Instead of `safe = cov.copy(); safe[~valid] = eye; res = eigvalsh(safe)`, use `res = eigvalsh(cov[valid])` and update the condition array inplace. This eliminates `O(N)` copies and irrelevant eigendecompositions.
