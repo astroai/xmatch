@@ -2822,9 +2822,10 @@ def _astropy_match(
                 sde2_r2[right_idx],
                 rho_r2[right_idx],
             )
-            order = np.argsort(d2)
+            order = np.lexsort((d2, left_idx))
             _, first_idx = np.unique(left_idx[order], return_index=True)
-            sel = order[np.sort(first_idx)]
+            sel = order[first_idx]
+            sel.sort()
             left_idx, right_idx, seps = left_idx[sel], right_idx[sel], seps[sel]
         return left_idx, right_idx, seps
 
@@ -2852,10 +2853,11 @@ def _astropy_match(
 
     if spec.find == "best" and len(left_idx) > 0:
         score = seps / np.where(combined > 0, combined, np.inf)
-        order = np.argsort(score)
+        order = np.lexsort((score, left_idx))
 
         _, first_occurrence_indices = np.unique(left_idx[order], return_index=True)
-        sel = order[np.sort(first_occurrence_indices)]
+        sel = order[first_occurrence_indices]
+        sel.sort()
 
         left_idx, right_idx, seps = left_idx[sel], right_idx[sel], seps[sel]
     return left_idx, right_idx, seps

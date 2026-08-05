@@ -49,3 +49,7 @@
 ## 2026-08-05 - Avoid O(N) identity matrix copies in valid-only eigvalsh
 **Learning:** When performing row-wise eigenvalue calculations on massive stacked matrices via `np.linalg.eigvalsh`, deep copying the entire N x 5 x 5 block and filling invalid rows with identity matrices causes enormous memory allocations and wastes CPU time solving trivial matrices. NumPy boolean masking natively copies only the required valid elements for calculation.
 **Action:** Instead of `safe = cov.copy(); safe[~valid] = eye; res = eigvalsh(safe)`, use `res = eigvalsh(cov[valid])` and update the condition array inplace. This eliminates `O(N)` copies and irrelevant eigendecompositions.
+
+## 2026-08-01 - Lexsort vectorization for astropy boolean masks
+**Learning:** Building on the lexsort vectorization pattern learned earlier, when picking the best match by Mahalanobis distance `d2` or fallback `score` in `_astropy_match`, using `np.lexsort((value, group_id))` combined with `np.unique` replaces the slow `np.argsort` approach. The previous `argsort` approach did not guarantee the group ID was the primary sorting key, causing issues.
+**Action:** Use `np.lexsort((d2, left_idx))` and `np.unique(..., return_index=True)` in `_astropy_match` for `skyellipse` match and error-based fallback. Ensure to call `sel.sort()` to preserve original array row order implicitly done by boolean masking.
