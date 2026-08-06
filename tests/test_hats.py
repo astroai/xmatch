@@ -60,17 +60,28 @@ def test_hats_crossmatch_unsupported_join_type_raises():
         )
 
 
-def test_hats_target_epoch_fails_instead_of_matching_unpropagated_coordinates():
-    src1 = CatalogueSource(
-        name="hats1", is_local=False, access_method="hats", access_identifier="/tmp/fake"
-    )
-    src2 = CatalogueSource(
-        name="hats2", is_local=False, access_method="hats", access_identifier="/tmp/fake"
-    )
-    request = MatchRequest("hats1", "hats2", spec=MatchSpec(radius_arcsec=1.0, target_epoch=2025.0))
+def test_hats_target_epoch_routes_to_native_not_lsdb():
+    """target_epoch uses native HATS path (LSDB cannot propagate PM)."""
+    from xmatch import hats_native
 
-    with pytest.raises(CrossMatchError, match="target-epoch propagation is not yet supported"):
-        CrossMatch()._dispatch(src1, src2, request)
+    request = MatchRequest("hats1", "hats2", spec=MatchSpec(radius_arcsec=1.0, target_epoch=2025.0))
+    assert hats_native.should_use_native(request) is True
+
+
+def test_hats_outer_join_and_engine_prefer_native():
+    from xmatch import hats_native
+
+    assert hats_native.should_use_native(
+        MatchRequest("a", "b", spec=MatchSpec(join_type="1or2"), engine="auto")
+    )
+    assert hats_native.should_use_native(
+        MatchRequest("a", "b", spec=MatchSpec(matcher="skyerr"), engine="auto")
+    )
+    assert hats_native.should_use_native(MatchRequest("a", "b", spec=MatchSpec(), engine="fast"))
+    assert (
+        hats_native.should_use_native(MatchRequest("a", "b", spec=MatchSpec(), engine="auto"))
+        is False
+    )
 
 
 # ---------------------------------------------------------------------------

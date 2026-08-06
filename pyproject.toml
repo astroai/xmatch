@@ -38,8 +38,10 @@ dependencies = [
 [project.optional-dependencies]
 # Fast, Arrow/Polars-native local FITS table reader.
 torchfits = ["torchfits>=1.0.0rc4"]
-# HATS / HiPSCat catalogue support.
-hats = ["lsdb"]
+# HATS / HiPSCat catalogue support (native path needs hats; LSDB is legacy).
+hats = ["hats", "lsdb"]
+# Native HATS+Ray pixel matcher (no Dask).
+hats-ray = ["hats", "ray"]
 # Tensor-native nearest-neighbour engine.
 torchsky = ["torchsky>=0.4.0.dev0"]
 # Ray distributed engine (parallel HEALPix pixel-batch matching).

@@ -1343,14 +1343,25 @@ class CrossMatch:
         progress_cb: Optional[Callable[[str], None]] = None,
     ) -> pl.LazyFrame:
         if src1.access_method == "hats" or src2.access_method == "hats":
+            from . import hats_native, hats_source
+
+            lf1 = src1.lazy() if src1.is_local else None
+            lf2 = src2.lazy() if src2.is_local else None
+            # Native path: real matchers/engines + outer joins (no LSDB/Dask).
+            if hats_native.should_use_native(req):
+                return hats_native.hats_native_crossmatch(
+                    src1,
+                    src2,
+                    req.spec,
+                    engine=req.engine,
+                    local_lf1=lf1,
+                    local_lf2=lf2,
+                    right_suffix=right_suffix,
+                ).lazy()
             if req.spec.target_epoch is not None:
                 raise CrossMatchError(
                     "target-epoch propagation is not yet supported by the HATS/LSDB engine"
                 )
-            from . import hats_source
-
-            lf1 = src1.lazy() if src1.is_local else None
-            lf2 = src2.lazy() if src2.is_local else None
             return hats_source.hats_crossmatch(
                 src1,
                 src2,

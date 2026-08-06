@@ -1,8 +1,12 @@
-"""Optional HATS (Hierarchical Adaptive Tiling Scheme) support via LSDB.
+"""Legacy HATS support via LSDB (Dask).
 
-LSDB is an optional dependency. Install it with ``pip install lsdb`` (in an
-environment where the HATS stack is available). All entry points raise a clear
-error if it is missing rather than failing at import time.
+Prefer :mod:`xmatch.hats_native` for matchers, engines, and outer joins — that
+path reads HATS parquet pixels directly and never starts a Dask cluster.
+This module remains for ``engine=auto`` + ``matcher=sky`` + ``join_type=1and2``
+when LSDB is installed.
+
+Install LSDB with ``pip install lsdb`` (or ``xmatch[hats]``). Entry points raise
+a clear error if it is missing rather than failing at import time.
 """
 
 import logging
