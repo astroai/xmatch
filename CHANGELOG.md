@@ -147,15 +147,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (including 3+); download loop guards against HATS sources.
 * **`_dist_arcsec` missing warning**: logs a warning when LSDB result lacks the
   expected column (e.g., future API change).
-* **17 HATS tests** (`tests/test_hats.py`): fully mocked (no LSDB required),
+* **18 HATS tests** (`tests/test_hats.py`): fully mocked (no LSDB required),
   covering alias resolution, crossmatch parameter passthrough, multi-row
-  `find="all"` results, join type validation, target-epoch rejection,
-  local-frame conversion, column renaming, and `crossmatch_multi` routing.
+  `find="all"` results, join type validation, native-path routing for
+  target-epoch / outer joins / engines, local-frame conversion, column
+  renaming, and `crossmatch_multi` routing.
   Names verified by the bidirectional static-scan guards in
   `tests/test_ci_smoke.py`:
 `test_lsdb_available_false`, `test_require_lsdb_raises_with_helpful_message`,
 `test_read_hats_no_path`, `test_hats_crossmatch_unsupported_join_type_raises`,
-`test_hats_target_epoch_fails_instead_of_matching_unpropagated_coordinates`,
+`test_hats_target_epoch_routes_to_native_not_lsdb`,
+`test_hats_outer_join_and_engine_prefer_native`,
 `test_hats_crossmatch_passes_n_neighbors_best`,
 `test_hats_crossmatch_passes_n_neighbors_all`,
 `test_hats_crossmatch_find_all_multi_row_rename`,
@@ -197,7 +199,7 @@ names are pinned by the bidirectional static-scan guards in
 
 ### Notes
 
-* 92 non-slow tests pass; 9 slow (real-catalogue) tests pass; 17 HATS tests;
+* 92 non-slow tests pass; 9 slow (real-catalogue) tests pass; 18 HATS tests;
   2 Data Lab tests. Zero regressions across Gaia DR3, AllWISE, USNO-B1.0.
 * No breaking changes — all existing APIs unchanged.
 
