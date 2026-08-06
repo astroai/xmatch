@@ -53,3 +53,7 @@
 ## 2026-08-01 - Lexsort vectorization for astropy boolean masks
 **Learning:** Building on the lexsort vectorization pattern learned earlier, when picking the best match by Mahalanobis distance `d2` or fallback `score` in `_astropy_match`, using `np.lexsort((value, group_id))` combined with `np.unique` replaces the slow `np.argsort` approach. The previous `argsort` approach did not guarantee the group ID was the primary sorting key, causing issues.
 **Action:** Use `np.lexsort((d2, left_idx))` and `np.unique(..., return_index=True)` in `_astropy_match` for `skyellipse` match and error-based fallback. Ensure to call `sel.sort()` to preserve original array row order implicitly done by boolean masking.
+
+## 2026-08-10 - Avoid redundant deep copies after astype conversion
+**Learning:** When pulling data out of a Polars DataFrame as a NumPy array (e.g. `df["col"].to_numpy().astype(float)`), `.astype()` natively returns a new writeable array if the data isn't natively float. Chaining `.copy()` or doing `new_arr = arr.copy()` immediately afterwards causes a redundant deep copy of the arrays, consuming twice the required memory and significant CPU cycles over large catalogs.
+**Action:** Do not chain `.copy()` on the output of `.astype()`. Rely on the writeable reference it returns, and use raw `.to_numpy()` zero-copy reads from the DataFrame when referencing the pre-mutation state of an array to calculate deltas.

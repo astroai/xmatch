@@ -652,8 +652,10 @@ def _apply_proper_motion(
                 )
             complete &= admissible
 
-        new_ra = ra_arr.copy()
-        new_dec = dec_arr.copy()
+        # ra_arr and dec_arr are already writeable copies from .astype(float)
+        # Avoid redundant deep copy; mutate in-place for target epoch
+        new_ra = ra_arr
+        new_dec = dec_arr
         covariance_done = np.zeros(df.height, dtype=bool)
         propagated_covariance = None
         covariance_data = _astrometric_covariance_mas(df, src) if propagate_covariance else None
@@ -781,11 +783,15 @@ def _apply_proper_motion(
                 int(complete.sum()),
                 df.height,
             )
+
+        # Use read-only original array directly from dataframe to avoid copies when computing delta
+        orig_ra = df[src.ra_column].to_numpy()
+        orig_dec = df[src.dec_column].to_numpy()
         logger.info(
             "PM propagation %s: max ΔRA=%.4f arcsec, max ΔDec=%.4f arcsec",
             label,
-            float(np.nanmax(np.abs((new_ra - ra_arr + 180.0) % 360.0 - 180.0))) * 3600.0,
-            float(np.nanmax(np.abs(new_dec - dec_arr))) * 3600.0,
+            float(np.nanmax(np.abs((new_ra - orig_ra + 180.0) % 360.0 - 180.0))) * 3600.0,
+            float(np.nanmax(np.abs(new_dec - orig_dec))) * 3600.0,
         )
         columns = [
             pl.Series(src.ra_column, new_ra),
