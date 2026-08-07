@@ -279,14 +279,18 @@ def ray_zone_match(
         return _scipy_match(left, right, left_src, right_src, spec)
 
     # Group left by pixel.
-    l_by_pix: dict[int, list] = {}
-    for i, pix in enumerate(l_pix):
-        l_by_pix.setdefault(int(pix), []).append(i)
+    # O(N log N) vectorized grouping to replace slow native Python loop over millions of points.
+    l_sort = np.argsort(l_pix)
+    l_unique_pix, l_start_idx = np.unique(l_pix[l_sort], return_index=True)
+    l_splits = np.split(l_sort, l_start_idx[1:])
+    l_by_pix: dict[int, list] = {int(pix): split.tolist() for pix, split in zip(l_unique_pix, l_splits)}
 
     # Group right by pixel.
-    _, r_inv = np.unique(r_pix, return_inverse=True)
-    unique_pix = np.unique(r_pix)
-    r_groups = {int(pix): np.where(r_pix == pix)[0] for pix in unique_pix}
+    # O(N log N) grouping optimization to replace O(N * K) boolean masking.
+    r_sort = np.argsort(r_pix)
+    unique_pix, r_start_idx = np.unique(r_pix[r_sort], return_index=True)
+    r_splits = np.split(r_sort, r_start_idx[1:])
+    r_groups = {int(pix): split for pix, split in zip(unique_pix, r_splits)}
     r_xyz_by_pix = {int(pix): _radec_to_xyz(r_ra[idx], r_dec[idx]) for pix, idx in r_groups.items()}
 
     # Place right-side pixel data in Ray's object store (zero-copy for workers).

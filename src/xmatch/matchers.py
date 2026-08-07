@@ -2553,8 +2553,11 @@ def _zone_match_healpix(
     r_pix = np.asarray(hp.lonlat_to_healpix(np.radians(r_ra), np.radians(r_dec), NSIDE), dtype=int)
 
     # Cache per-pixel right xyz buffers and per-pixel cKDTree instances.
-    unique_pix, pix_inv = np.unique(r_pix, return_inverse=True)
-    r_groups = {int(pix): np.where(pix_inv == k)[0] for k, pix in enumerate(unique_pix)}
+    # O(N log N) grouping optimization to replace O(N * K) boolean masking.
+    r_sort = np.argsort(r_pix)
+    unique_pix, r_start_idx = np.unique(r_pix[r_sort], return_index=True)
+    r_splits = np.split(r_sort, r_start_idx[1:])
+    r_groups = {int(pix): split for pix, split in zip(unique_pix, r_splits)}
     tree_cache: dict[int, "cKDTree"] = {}
     xyz_cache: dict[int, np.ndarray] = {}
     for pix in unique_pix:
@@ -2566,9 +2569,11 @@ def _zone_match_healpix(
 
     # Group left points by HEALPix pixel so we can batch-query each right
     # pixel's tree once (instead of spawning worker threads per point).
-    l_by_pix: dict[int, list] = {}
-    for i, pix in enumerate(l_pix):
-        l_by_pix.setdefault(int(pix), []).append(i)
+    # O(N log N) vectorized grouping to replace slow native Python loop over millions of points.
+    l_sort = np.argsort(l_pix)
+    l_unique_pix, l_start_idx = np.unique(l_pix[l_sort], return_index=True)
+    l_splits = np.split(l_sort, l_start_idx[1:])
+    l_by_pix: dict[int, list] = {int(pix): split.tolist() for pix, split in zip(l_unique_pix, l_splits)}
 
     # Pre-compute per-right-pixel global-index arrays for fast margin merging.
     r_global_by_pix: dict[int, np.ndarray] = {int(pix): r_groups[int(pix)] for pix in unique_pix}

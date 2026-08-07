@@ -53,3 +53,7 @@
 ## 2026-08-01 - Lexsort vectorization for astropy boolean masks
 **Learning:** Building on the lexsort vectorization pattern learned earlier, when picking the best match by Mahalanobis distance `d2` or fallback `score` in `_astropy_match`, using `np.lexsort((value, group_id))` combined with `np.unique` replaces the slow `np.argsort` approach. The previous `argsort` approach did not guarantee the group ID was the primary sorting key, causing issues.
 **Action:** Use `np.lexsort((d2, left_idx))` and `np.unique(..., return_index=True)` in `_astropy_match` for `skyellipse` match and error-based fallback. Ensure to call `sel.sort()` to preserve original array row order implicitly done by boolean masking.
+
+## 2026-08-08 - O(N log N) vectorized grouping instead of native loop
+**Learning:** When grouping large arrays (like HEALPix indices) into dictionaries by unique values, using a native Python loop with `setdefault` or iterating over unique values with `np.where(arr == k)` results in extremely slow O(N) or O(N*K) performance due to Python overhead or repeated full-array boolean scans.
+**Action:** Replace slow grouping loops with O(N log N) vectorized sorting and splitting: `sort_idx = np.argsort(arr)`, then `unique, start_idx = np.unique(arr[sort_idx], return_index=True)`, followed by `splits = np.split(sort_idx, start_idx[1:])` and a quick dictionary comprehension `dict(zip(unique, splits))`.
