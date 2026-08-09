@@ -1,0 +1,279 @@
+"""Mirroring + incremental cache tests: TAP fake on 127.0.0.1, remote HATS over HTTP.
+
+Covers the ``xmatch sync`` data plane behind :func:`xmatch.mirror.sync_catalogue`:
+
+* cold TAP sync → local HATS catalogue (proven readable via
+  :func:`xmatch.hats_native.list_hats_pixels`)
+* incremental re-sync with zero page downloads (probe-only),
+* :code:`--force` re-fetch,
+* window-shrink re-sync (one refetched page),
+* append-only continuation (new tail page),
+* remote HATS mirror over ``http://127.0.0.1`` (``partition_info.parquet``
+  listing + per-partition GETs + ``_metadata``/``properties`` HEADs).
+"""
+
+from __future__ import annotations
+
+import functools
+import threading
+from collections.abc import Iterator
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import polars as pl
+import pytest
+
+from xmatch import hats_native, mirror
+from xmatch.sources import CatalogueSource
+
+from .tap_fake import FakeTAPServer, make_rows
+
+PAGE = 100
+
+
+@pytest.fixture()
+def tap_server() -> "Iterator[FakeTAPServer]":
+    srv = FakeTAPServer(make_rows(200))
+    yield srv
+    srv.shutdown()
+
+
+def _tap_source(srv: FakeTAPServer, name: str = "probe") -> CatalogueSource:
+    return CatalogueSource(
+        name=name,
+        is_local=False,
+        access_method="tap",
+        access_identifier="tap.probe",
+        tap_url=srv.url,
+        ra_column="ra",
+        dec_column="dec",
+        id_column="id",
+        default_columns=["id", "ra", "dec"],
+    )
+
+
+def _mirror_rows(cache_root: str, src: CatalogueSource) -> pl.DataFrame:
+    root, rel = mirror.locate_mirrored(src, cache_root=cache_root)
+    pixels = hats_native.list_hats_pixels(Path(root) / rel)
+    frames = [pl.read_parquet(p) for _, _, p in pixels]
+    return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+
+
+def _sync(src: CatalogueSource, cache_root: str, **kw) -> mirror.SyncStats:
+    return mirror.sync_catalogue(
+        src,
+        cache_root=cache_root,
+        page_size=100,
+        estimated_size=300,
+        rate_limit_rps=0.0,
+        **kw,
+    )
+
+
+def test_tap_cold_then_incremental_zero_download(tmp_path: Path, tap_server) -> None:
+    src = _tap_source(tap_server)
+    cache = str(tmp_path / "cache")
+
+    cold = _sync(src, cache)
+    assert cold.pages == 2  # 200 rows / 100 per page
+    assert cold.files_downloaded == 2
+    assert cold.converted is True
+
+    rows = _mirror_rows(cache, src)
+    assert rows.height == 200
+    assert set(rows.columns) >= {"id", "ra", "dec"}
+
+    # incremental: no pages, no bytes, no rebuild
+    snap_len = len(tap_server.queries)
+    again = _sync(src, cache)
+    assert again.pages == 0
+    assert again.bytes_downloaded == 0
+    assert again.converted is False
+    # only key/count probes went out (no LIMIT page fetches)
+    assert any('ORDER BY t."id" DESC' in q for q in tap_server.queries[snap_len:])
+    assert tap_server.count_queries("COUNT(*)") >= 2
+
+
+def test_tap_force_refetches(tmp_path: Path, tap_server) -> None:
+    src = _tap_source(tap_server)
+    cache = str(tmp_path / "cache")
+    _sync(src, cache)
+    forced = _sync(src, cache, force=True)
+    # 200 rows @ page_size=100 -> two non-empty pages (the OFFSET 200 probe
+    # returns an empty frame and is not counted)
+    assert forced.pages == 2
+    assert forced.files_downloaded == 2
+    assert forced.converted is True
+
+
+def test_tap_window_shrink_refetches_only_changed_page(tmp_path: Path, tap_server) -> None:
+    src = _tap_source(tap_server)
+    cache = str(tmp_path / "cache")
+    _sync(src, cache)
+
+    # shrink the table: [0..199] -> [0..179]; the stored [100,199] window probe
+    # (COUNT(*)) returns 80 != 100, so exactly that window is refetched
+    tap_server.update(make_rows(180))
+    st = _sync(src, cache)
+    assert st.pages == 1  # single refetch of the shrunk window
+    assert st.files_downloaded == 1
+    rows = mirror_rows(cache, src)
+    assert rows.height == 180
+
+
+def test_tap_append_adds_tail_page(tmp_path: Path, tap_server) -> None:
+    src = _tap_source(tap_server)
+    cache = str(tmp_path / "cache")
+    _sync(src, cache)
+
+    tap_server.update(make_rows(250))  # append-only growth
+    st = _sync(src, cache)
+    assert st.pages == 1  # keyset continuation past the stored last key
+    assert st.files_downloaded == 1
+    rows = mirror_rows(cache, src)
+    assert rows.height == 250
+    assert int(rows["id"].max()) == 249
+
+
+def test_hats_over_http_mirror(tmp_path: Path) -> None:
+    """A HATS catalogue served over plain HTTP mirrors file-for-file."""
+    frame = pl.DataFrame(
+        {
+            "id": list(range(120)),
+            "ra": [10.0 + (i % 40) * 0.001 for i in range(120)],
+            "dec": [-5.0 + (i % 30) * 0.001 for i in range(120)],
+        }
+    )
+    serve_dir = tmp_path / "serve"
+    serve_dir.mkdir()
+    mirror._write_hats_native(
+        frame, serve_dir / "cat", ra_column="ra", dec_column="dec", threshold=50
+    )
+    httpd = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        functools.partial(SimpleHTTPRequestHandler, directory=str(serve_dir)),
+    )
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        src = CatalogueSource(
+            name="remote-hats",
+            is_local=False,
+            access_method="hats",
+            access_identifier=f"http://127.0.0.1:{httpd.server_address[1]}/cat",
+            ra_column="ra",
+            dec_column="dec",
+        )
+        cache = str(tmp_path / "cache")
+        st = mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=False)
+        assert st.failed == 0
+        assert st.files_downloaded >= 2  # partition files + properties/metadata
+        rows = mirror_rows(cache, src)
+        assert rows.height == 120
+        # second run: everything is skipped by the manifest
+        st2 = mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=False)
+        assert st2.files_skipped == st.files_downloaded
+        assert st2.files_downloaded == 0
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+def test_hats_over_vos_mirror(tmp_path: Path, monkeypatch) -> None:
+    """A ``vos:`` HATS source mirrors node-for-node through the Storage path.
+
+    Regression: ``do_fetch`` routed every source through the HTTP fetcher,
+    which hard-raises for ``vos:`` identifiers — every file failed and the
+    mirror stayed empty.  A fake ``vos:`` backend (monkeypatched
+    ``open_storage``) exercises the real listing + fetch branches."""
+    frame = pl.DataFrame(
+        {
+            "id": list(range(120)),
+            "ra": [10.0 + (i % 40) * 0.001 for i in range(120)],
+            "dec": [-5.0 + (i % 30) * 0.001 for i in range(120)],
+        }
+    )
+    vos_root = tmp_path / "vos"
+    mirror._write_hats_native(
+        frame, vos_root / "cat", ra_column="ra", dec_column="dec", threshold=50
+    )
+
+    from xmatch.storage import LocalStorage
+
+    class _VlsLikeStorage(LocalStorage):
+        """LocalStorage with the real ``vls`` quirks _walk_storage must handle:
+
+        direct-children basenames, no trailing slash on directories, and a
+        leaf file echoing its own basename when listed.
+        """
+
+        def list(self, rel: str):
+            p = self._path(rel)
+            if not p.is_dir():
+                return [p.name]  # vls on a leaf file echoes the file itself
+            return sorted(e.name for e in p.iterdir())
+
+    def fake_open_storage(root):
+        if isinstance(root, str) and root.startswith("vos:"):
+            return _VlsLikeStorage(str(vos_root / "cat"))
+        return LocalStorage(root)
+
+    monkeypatch.setattr(mirror, "open_storage", fake_open_storage)
+
+    src = CatalogueSource(
+        name="vos-hats",
+        is_local=False,
+        access_method="hats",
+        access_identifier="vos:fake/cat",
+        ra_column="ra",
+        dec_column="dec",
+    )
+    cache = str(tmp_path / "cache")
+    st = mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=False)
+    assert st.failed == 0
+    assert st.files_downloaded >= 2  # partition files + properties/metadata
+    rows = mirror_rows(cache, src)
+    assert rows.height == 120
+    # second run: everything is skipped by the manifest
+    st2 = mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=False)
+    assert st2.files_skipped == st.files_downloaded
+    assert st2.files_downloaded == 0
+
+
+def test_ensure_mirrored_local_conversion(tmp_path: Path) -> None:
+    """Plain local parquet inputs are converted once into the cache as HATS."""
+    frame = list(make_rows(37, ra0=200.0, dec0=10.0))
+    df = pl.DataFrame(frame)
+    path = tmp_path / "local.parquet"
+    df.write_parquet(path)
+    src = CatalogueSource(
+        name="local-cat",
+        is_local=True,
+        access_method="local",
+        path=path,
+        ra_column="ra",
+        dec_column="dec",
+        default_columns=["id", "ra", "dec"],
+    )
+    cache = str(tmp_path / "cache")
+    mirrored = mirror.ensure_mirrored(src, cache_root=cache, hats_threshold=10)
+    assert mirrored.access_method == "hats"
+    assert mirrored.hats_cache_rel
+    rows = mirror_rows(cache, mirrored)
+    assert rows.height == 37
+    root, rel = mirror.locate_mirrored(mirrored, cache_root=cache)
+    n_parts_first = len(hats_native.list_hats_pixels(Path(root) / rel))
+    # second call reuses the conversion: with hats_threshold=1 a rebuild would
+    # produce far more (smaller) HEALPix partitions — pin the partition count.
+    again = mirror.ensure_mirrored(src, cache_root=cache, hats_threshold=1)
+    assert again.hats_cache_rel == mirrored.hats_cache_rel
+    root2, rel2 = mirror.locate_mirrored(again, cache_root=cache)
+    assert len(hats_native.list_hats_pixels(Path(root2) / rel2)) == n_parts_first
+
+
+def mirror_rows(cache_root: str, src: CatalogueSource) -> pl.DataFrame:
+    root, rel = mirror.locate_mirrored(src, cache_root=cache_root)
+    pixels = hats_native.list_hats_pixels(Path(root) / rel)
+    frames = [pl.read_parquet(p) for _, _, p in pixels]
+    return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()

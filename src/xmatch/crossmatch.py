@@ -19,6 +19,7 @@ Top-level operations:
 import difflib
 import logging
 import multiprocessing
+import os
 from dataclasses import replace
 from itertools import product as cartesian_product
 from pathlib import Path
@@ -66,6 +67,31 @@ def _find_default_config_path() -> Optional[Path]:
 
 
 DEFAULT_CONFIG_PATH = _find_default_config_path()
+
+# Defaults shared with the CLI for the engine='ray-union' route (mirror + plan).
+DEFAULT_SYNC_RATE_LIMIT = 1.0
+DEFAULT_SYNC_WORKERS = 8
+DEFAULT_HATS_THRESHOLD = 100_000
+DEFAULT_RADIUS_ARCSEC = 1.0
+
+# Geometry/identity overrides the ray-union route honours per catalogue
+# (mirrors the MatchRequest.from_legacy side mapping; --columns-* filtering
+# is sequential-path output concern the union output does not implement).
+_SIDE_OVERRIDE_KEYS = ("ra_column", "dec_column", "id_column")
+
+
+def _side_overrides(params: Dict[str, Any], side: int) -> Dict[str, Any]:
+    """Extract ``--<key>-<side>`` params as ``{key: value}`` for one catalogue."""
+    suffix = f"_{side}"
+    out: Dict[str, Any] = {}
+    for key, value in params.items():
+        if (
+            key.endswith(suffix)
+            and key[: -len(suffix)] in _SIDE_OVERRIDE_KEYS
+            and value is not None
+        ):
+            out[key[: -len(suffix)]] = value
+    return out
 
 
 class CrossMatch:
@@ -272,6 +298,19 @@ class CrossMatch:
         if resolved in self.catalogues_config:
             return self._remote_source(self.get_catalogue_config(resolved), overrides)
 
+        if text.startswith(("http://", "https://", "vos:")):
+            # Remote HATS catalogue over HTTP / vos: — mirrored on demand by the
+            # ray-union pipeline and `xmatch sync`.
+            name = text.rstrip("/").rsplit("/", 1)[-1] or "remote-hats"
+            return CatalogueSource(
+                name=name,
+                is_local=False,
+                access_method="hats",
+                access_identifier=text,
+                ra_column=overrides.get("ra_column"),
+                dec_column=overrides.get("dec_column"),
+            )
+
         path = Path(text)
         if io_utils.is_hats_dir(path):
             return self._hats_source(path, overrides)
@@ -462,6 +501,17 @@ class CrossMatch:
         ``progress_cb``, when supplied, is forwarded to :meth:`_download_remote`
         so the CLI can render a spinner during TAP/CDS downloads.
         """
+        engine_choice = (params.get("engine") or "auto").lower()
+        if engine_choice == "ray-union":
+            # the distributed N-way join *is* the union engine: two inputs go
+            # through the same full-outer-join pipeline as any N
+            return self.union_match(
+                [catalogue_1_input, catalogue_2_input],
+                output_file=output_file,
+                lazy=lazy,
+                progress_cb=progress_cb,
+                **params,
+            )
         req = MatchRequest.from_legacy(
             catalogue_1_input,
             catalogue_2_input,
@@ -834,6 +884,102 @@ class CrossMatch:
     # ------------------------------------------------------------------ #
     # Shared multi-catalogue implementation (crossmatch_multi + union_match).
     # ------------------------------------------------------------------ #
+    def _ray_union_multi(
+        self,
+        catalogues: List[FrameInput],
+        output_file: Optional[Union[str, Path]],
+        progress_cb: Optional[Callable[[str], None]] = None,
+        *,
+        union_requested: bool = False,
+        **params: Any,
+    ) -> None:
+        """Distributed N-survey full-outer join via :mod:`xmatch.ray_union`.
+
+        Every input is mirrored into the cache first (:func:`.mirror.ensure_mirrored`),
+        then the HATS-sharded Ray pipeline runs.  Writes the joined HATS catalogue
+        at ``output_file`` and returns ``None`` (like every other output-file path
+        in this module).
+        """
+        if output_file is None:
+            raise CrossMatchError("engine='ray-union' requires an output file (-o/--output .hats).")
+        engine_choice = (params.get("engine") or "auto").lower()
+        matcher = params.get("matcher") or "sky"
+        if matcher != "sky":
+            raise CrossMatchError(
+                f"engine='ray-union' supports matcher='sky' only, got matcher='{matcher}'."
+            )
+        # engine='ray-union' *is* the union engine, so a default join type is
+        # treated as the full outer join (only an explicit non-outer choice is
+        # an error); engine='ray' needs --union/--join 1or2 to mean "union".
+        join_type = params.get("join_type") or "1and2"
+        if (union_requested or engine_choice == "ray-union") and join_type == "1and2":
+            join_type = "1or2"
+        if join_type not in ("1or2", "all"):
+            raise CrossMatchError(
+                "engine='ray-union' supports full-outer join types '1or2'/'all' only; "
+                f"got join_type='{join_type}'."
+            )
+
+        from . import ray_union
+        from .mirror import ensure_mirrored, locate_mirrored
+
+        cache_cfg = self.config.get("cache", {}) if isinstance(self.config, dict) else {}
+        cache_root = (
+            params.get("cache_root") or os.environ.get("XMATCH_CACHE_ROOT") or cache_cfg.get("root")
+        )
+        synclimit = params.get("synclimit")
+        rate_limit = float(
+            synclimit
+            if synclimit is not None
+            else (cache_cfg.get("rate_limit_rps") or DEFAULT_SYNC_RATE_LIMIT)
+        )
+        threads = params.get("threads")
+        workers = int(threads if threads is not None else DEFAULT_SYNC_WORKERS)
+
+        # Per-catalogue column overrides exactly like MatchRequest.from_legacy
+        # (--ra1/--dec1/--id1 apply to the first catalogue, --ra2/--dec2/--id2
+        # to the second); extras beyond catalogue 2 resolve like the sequential
+        # path — with no overrides.
+        sources: List[CatalogueSource] = []
+        for i, cat in enumerate(catalogues, start=1):
+            overrides = _side_overrides(params, min(i, 2))
+            sources.append(self.resolve_source(cat, overrides))
+        if not params.get("no_sync"):
+            sources = [
+                ensure_mirrored(
+                    src,
+                    cache_root=cache_root,
+                    rate_limit_rps=rate_limit,
+                    workers=workers,
+                    force=bool(params.get("force_sync")),
+                    progress_cb=progress_cb,
+                    hats_threshold=int(params.get("hats_threshold", DEFAULT_HATS_THRESHOLD)),
+                )
+                for src in sources
+            ]
+        else:
+            # --no-sync: require cached HATS copies up front, with the actionable
+            # "run xmatch sync" error instead of a path-shaped crash downstream.
+            for src in sources:
+                if src.access_method == "tap" or (
+                    src.access_method == "hats"
+                    and (src.access_identifier or "").startswith(("http://", "https://", "vos:"))
+                ):
+                    locate_mirrored(src, cache_root=cache_root)
+        ray_union.ray_union_match(
+            sources,
+            sep_arcsec=float(params.get("radius_arcsec", DEFAULT_RADIUS_ARCSEC)),
+            output_file=str(output_file),
+            hats_threshold=int(params.get("hats_threshold", DEFAULT_HATS_THRESHOLD)),
+            task_rows=params.get("task_rows"),
+            chunk_memory_gb=params.get("chunk_memory_gb"),
+            max_tuples=params.get("max_tuples"),
+            cache_root=cache_root,
+            progress_cb=progress_cb,
+        )
+        self.last_ray_union_plan = ray_union.last_plan()  # for tests / doctor
+        return None
+
     def _multi_match_impl(
         self,
         catalogues: List[FrameInput],
@@ -846,6 +992,31 @@ class CrossMatch:
     ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
         if len(catalogues) < 2:
             raise CrossMatchError("At least two catalogues are required for crossmatching.")
+
+        engine_choice = (params.get("engine") or "auto").lower()
+        if engine_choice == "ray-union":
+            # the distributed N-way join *is* the union engine: route
+            # unconditionally (README's `--engine ray-union` examples never
+            # pass --union), regardless of the default join_type.
+            self._ray_union_multi(
+                catalogues,
+                output_file,
+                progress_cb=progress_cb,
+                union_requested=union_match,
+                **params,
+            )
+            return None
+        if engine_choice == "ray" and (
+            union_match or (params.get("join_type") or "1and2") in ("1or2", "all")
+        ):
+            self._ray_union_multi(
+                catalogues,
+                output_file,
+                progress_cb=progress_cb,
+                union_requested=union_match,
+                **params,
+            )
+            return None
 
         req = MatchRequest.from_legacy(
             catalogues[0],

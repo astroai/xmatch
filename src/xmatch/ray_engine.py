@@ -23,6 +23,7 @@ import logging
 from typing import Tuple
 
 import numpy as np
+from astropy.coordinates import Latitude, Longitude
 
 from .exceptions import CrossMatchError
 
@@ -74,7 +75,7 @@ def _get_ray_pixel_batch():
         import cdshealpix as hp
         from scipy.spatial import cKDTree
 
-        from .matchers import _chord_to_arcsec
+        from .matchers import _chord_to_arcsec, _cone_search_pixels
 
         empty = (
             np.array([], dtype=np.int64),
@@ -85,16 +86,23 @@ def _get_ray_pixel_batch():
         l_xyz = l_xyz_ref  # already numpy array via object store
         batch_xyz = l_xyz[indices_arr]
 
+        # Nested ObjectRefs are NOT resolved by Ray 2.x when passed inside a
+        # dict argument — resolve the right-side pixel buffers here.
+        import ray  # noqa: PLC0415
+
+        r_xyz = {pix: ray.get(ref) for pix, ref in r_xyz_refs.items()}
+
         # Determine neighbouring right pixels via cone search.
         mid = len(indices_arr) // 2
         rep_xyz = batch_xyz[mid]
         rep_lon = float(np.arctan2(rep_xyz[1], rep_xyz[0]))
         rep_lat = float(np.arcsin(np.clip(rep_xyz[2], -1.0, 1.0)))
-        npix = hp.cone_search_lonlat(
-            lon=rep_lon,
-            lat=rep_lat,
-            radius=float(np.radians(radius_deg)),
-            depth=5,
+        npix = _cone_search_pixels(
+            hp,
+            rep_lon,
+            rep_lat,
+            float(np.radians(radius_deg)),
+            5,
         )
 
         # Build merged margin tree from all neighbouring right pixels.
@@ -104,7 +112,7 @@ def _get_ray_pixel_batch():
             rpix_int = int(rpix)
             if rpix_int not in r_xyz_refs:
                 continue
-            margin_xyz_parts.append(r_xyz_refs[rpix_int])
+            margin_xyz_parts.append(r_xyz[rpix_int])
             margin_global_parts.append(r_groups_ref[rpix_int])
 
         if not margin_xyz_parts:
@@ -261,13 +269,21 @@ def ray_zone_match(
     try:
         import cdshealpix as hp
 
-        NSIDE = 32
+        DEPTH = 5  # nside = 2 ** DEPTH == 32
         l_pix = np.asarray(
-            hp.lonlat_to_healpix(np.radians(l_ra), np.radians(l_dec), NSIDE),
+            hp.lonlat_to_healpix(
+                Longitude(np.radians(l_ra), unit="rad"),
+                Latitude(np.radians(l_dec), unit="rad"),
+                DEPTH,
+            ),
             dtype=int,
         )
         r_pix = np.asarray(
-            hp.lonlat_to_healpix(np.radians(r_ra), np.radians(r_dec), NSIDE),
+            hp.lonlat_to_healpix(
+                Longitude(np.radians(r_ra), unit="rad"),
+                Latitude(np.radians(r_dec), unit="rad"),
+                DEPTH,
+            ),
             dtype=int,
         )
     except ImportError as exc:

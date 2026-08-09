@@ -91,6 +91,12 @@ measurements as publication-grade evidence.
   - **zone** – Tier 2: HEALPix-sharded cone match via `cdshealpix`. When
     `cdshealpix` is not importable the engine transparently falls back to
     Tier 1 with a logged warning, so the API contract is unchanged.
+  - **ray-union** – distributed N-survey full-outer join: fans HEALPix chunk
+    plans out to Ray workers over (auto-mirrored) HATS inputs and writes the
+    union as a native HATS catalogue (no LSDB required).
+- **Incremental mirroring** – `xmatch sync` mirrors configured remote
+  catalogues (TAP, or HATS over HTTP / `vos:`) into a durable HATS cache with
+  probe-only re-syncs, `--force`, rate limiting, and a resumable manifest.
 - Bayesian qualification (engine-agnostic): `--probabilistic --priors g,r`
   appends a Budavári-style assumed-prior posterior `p_match` column in `[0, 1]`
   to every matched pair. It is not a calibrated probability. Priors are fitted
@@ -175,6 +181,11 @@ xmatch --describe gaia   # legacy alias kept for backwards compatibility
 xmatch adopt vizier II/349/ps1 --name ps1
 # Or match an ad-hoc table id without writing config (endpoint auto-guessed)
 xmatch match sources.csv II/349/ps1 --ra 150.1 --dec 2.18 --radius-deg 0.05
+
+# Mirror configured remote catalogues into the HATS cache (incremental)
+xmatch sync gaia allwise twomass
+# Distributed N-way union over mirrored HATS inputs -> native HATS output
+xmatch match gaia allwise twomass --engine ray-union -o master.hats --max-tuples 4
 ```
 
 ### Help, colour, and discovery
@@ -373,6 +384,45 @@ from exact membership overlap. A separate bijective, content-addressed member
 equivalence release preserves reviewed continuity across intentional
 input-release namespace changes without guessing from bare catalogue IDs.
 
+## Mirroring remote catalogues (`xmatch sync`)
+
+`xmatch sync` mirrors remote catalogues (TAP tables, or HATS served over
+HTTP / `vos:`) into a durable cache root as local HATS catalogues:
+
+```bash
+# Cold mirror + subsequent incremental runs (probe-only when unchanged)
+xmatch sync gaia allwise --cache-root /scratch/$USER/xmatch-cache
+# Refetch everything, ignoring the incremental manifest
+xmatch sync gaia --force
+```
+
+* Cache layout: `cache/<name>/<version>/` holds the HATS catalogue,
+  `cache/<name>/raw/` the incremental TAP page store with a resumable
+  manifest. The root honours `$XMATCH_CACHE_ROOT` (`~/.cache/xmatch`
+  when unset). Local parquet inputs are converted into the same cache on
+  first use, so every input to a match can be a HATS catalogue.
+* TAP re-syncs probe stored key windows with `COUNT(*)` and refetch only
+  moved pages (plus appended tails); `--rate-limit`, `--threads`,
+  `--hats-threshold`, and `--no-sync`/`--synclimit` tune the data plane.
+
+The distributed union engine consumes whatever `sync` produces:
+
+```bash
+xmatch match gaia allwise twomass --engine ray-union -o master.hats
+```
+
+`--engine ray-union` fans a HEALPix chunk plan out to Ray workers over the
+mirrored HATS inputs. Every catalogue gets one column block per output row;
+rows radiate from the lowest-indexed catalogue present, `_src_cats` records
+membership, `sep_arcsec` is the closest used edge, singleton rows appear only
+for sources without any mate, and the result is written as a single-tiling
+HATS catalogue readable via `hats` — no LSDB needed.
+Per-chunk parquets under `<out>/chunks/` double as resume points, so a
+re-invocation skips finished chunks (changing the radius/inputs into the same
+output directory wipes the stale chunks first). `--task-rows`, `--max-tuples`,
+and `--chunk-memory-gb` shape the plan. A lab smoke is at
+[`scripts/canfar-smoke.sh`](scripts/canfar-smoke.sh).
+
 ## HATS output
 
 When the output path ends with `.hats`, xmatch writes the result as a
@@ -389,7 +439,8 @@ especially valuable for:
 xmatch gaia allwise_dl twomass_dl --union -r 1.5 -o master.hats --hats-threshold 50000
 ```
 
-**Requirements:** HATS output needs the optional `lsdb` package (`pip install lsdb`).
+**Requirements:** HATS output needs the optional `lsdb` package (`pip install lsdb`),
+except `--engine ray-union`, which writes HATS natively via `hats` + `cdshealpix`.
 The `--hats-threshold` flag (default 100 000) controls the maximum rows per
 HEALPix pixel — lower values give finer spatial partitioning at the cost of
 more files.
@@ -434,6 +485,7 @@ result = cat.crossmatch(lsdb.read_hats("new_data.hats"), radius_arcsec=1.0)
 | remote TAP / remote TAP (same svc)  | ADQL spatial self-join on the service               |
 | remote / remote (other)             | download both for a region, then local match        |
 | any HATS                            | LSDB partition-aware crossmatch                      |
+| `--engine ray-union`                | distributed native-HATS union over mirrored inputs  |
 
 ## Configuration
 

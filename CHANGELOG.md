@@ -87,6 +87,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   install with `pip install 'xmatch[ray]'`.
 * **`sky_match`**: accepts `engine="ray"`.
 
+### Added — HATS Mirroring + Distributed Union
+
+* **`xmatch sync`** subcommand: mirrors remote catalogues (TAP, or HATS over
+  HTTP / `vos:`) into the durable cache root as local HATS catalogues, with
+  incremental re-sync (probe-only on unchanged data), `--force` re-fetch,
+  per-catalogue rate limiting, and a resumable manifest. Remote HATS mirrors
+  reuse `partition_info.parquet` listings with per-partition GETs.
+* **`engine=ray-union`**: distributed N-survey full-outer join on Ray over
+  mirrored HATS inputs (`xmatch match a b --engine ray-union -o out.hats`).
+  Every catalogue gets one column block per output row; rows radiate from the
+  lowest-indexed catalogue present, memberships are tracked in `_src_cats`,
+  singleton rows appear only for sources without any mate (matching the
+  sequential-union oracle), and the result is written as a single-tiling HATS
+  catalogue readable via `hats`. Residual matches (`sep_arcsec`) use the
+  closest used edge. Partitions no earlier cone covers are emitted exactly
+  once by a "rest" task. The
+  `--no-sync`, `--synclimit`, `--cache-root`, `--task-rows`, `--max-tuples`,
+  and `--chunk-memory-gb` flags tune mirroring and the plan.
+* **`src/xmatch/storage.py`**: `Storage` abstraction (local + VOSpace) used
+  by mirroring and the union output writer; `default_cache_root()` honours
+  `$XMATCH_CACHE_ROOT`.
+* **`src/xmatch/mirror.py`**: `sync_catalogue` / `ensure_mirrored` engine
+  behind both `xmatch sync` and the ray-union route's auto-mirroring.
+* **`src/xmatch/ray_union.py`**: `build_union_plan` (+ `last_plan()`) and
+  the chunk/rest Ray pipeline; per-chunk parquets under `<out>/chunks/` act
+  as resume points; reruns with identical parameters skip finished chunks
+  (stale parameters wipe the stale chunks first).
+* **Tests**: 7 `tests/test_mirror_sync.py` tests (incremental TAP sync,
+  force re-fetch, window-shrink/append continuation, HATS-over-HTTP mirror,
+  HATS-over-`vos:` mirror),
+  8 `tests/test_ray_union.py` tests (3-catalogue-vs-oracle,
+  brute-force-oracle comparison, resume skip, far-partner singles,
+  cone-covering regression, rest-partition dedup, block-combination
+  gating, max-tuples cap) — plus 3 CLI sync tests
+  (`test_cli_sync.py`) and 10 `tests/test_storage.py` tests.
+
 ### Changed — Performance
 
 * **HEALPix margin caching**: `_zone_match_healpix` now merges all neighbouring
@@ -96,9 +132,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed — Correctness
 
+* **HEALPix zone/ray engines with cdshealpix >= 0.8** (`matchers.py`,
+  `ray_engine.py`, `hats_native.py`): unit-less `Longitude` construction
+  crashed under astropy >= 7, `nside` was passed where cdshealpix expects
+  `depth` (failing its 0..29 validation), the removed
+  `cone_search_lonlat` alias was still called, and Ray 2.x no longer
+  resolves ObjectRefs nested inside dict arguments — every zone/ray match
+  now passes explicit `Longitude`/`Latitude`/`Angle` units, uses
+  `depth=5`, and the shared `_cone_search_pixels` helper (parents expanded
+  to full-depth children) wraps the current `cone_search` API.
 * **PM propagation**: `_apply_proper_motion` now correctly processes both left
   and right sides (previously returned after first side due to early-return
   bug). Added debug log when neither side has PM+epoch info.
+* **ray-union rest duplication** (`ray_union.py`): rows of a partition no
+  earlier cone covers were emitted twice — once as a centre-only single by
+  their own chunk and again by the rest task. Rest partitions now suppress
+  centre-only combos in their chunk, rest tasks drop rows that have a mate in
+  a higher catalogue (checked against the same cone candidate pools), and
+  each rest run writes one atomic file.
+* **ray-union cone under-coverage** (`ray_union.py`): `_cone_pixels` expanded a
+  fully-inside parent pixel (returned by `cdshealpix.cone_search`) to only its
+  first child, silently dropping sibling cells from candidate pools and
+  coverage tracking; parents now expand to every descendant at the target
+  depth.
+* **ray-union singleton parity** (`ray_union.py`): centre-only singles were
+  always kept, so matched hub rows got an extra singleton the sequential
+  `union_match` oracle never emits; the oracle test encoded the same
+  deviation. Singles are now emitted only for rows without any mate.
+* **`vos:` HATS mirroring** (`mirror.py`): `sync` advertised `vos:` sources as
+  mirrorable but every fetch went through the HTTP path, which hard-raises
+  for `vos:` identifiers — every file failed and the mirror stayed empty.
+  `vos:` sources now transfer node → temp file → cache via the
+  `Storage`/`vos` CLI path.
+* **VOSpace rm no-op** (`storage.py`): `VOSpaceStorage.rm` compared bytes
+  against a text stderr, raising `TypeError` on the missing-node path.
 
 ### Fixed — Math & Correctness
 

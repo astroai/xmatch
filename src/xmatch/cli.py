@@ -34,7 +34,10 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Union
+
+if TYPE_CHECKING:
+    import polars as pl
 
 import yaml
 
@@ -271,7 +274,17 @@ def _make_console(no_color: bool = False) -> Console:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-SUBCOMMANDS = ("match", "list", "describe", "discover", "search", "adopt", "completion", "doctor")
+SUBCOMMANDS = (
+    "match",
+    "list",
+    "describe",
+    "discover",
+    "search",
+    "adopt",
+    "completion",
+    "sync",
+    "doctor",
+)
 
 TAGLINE = (
     "Cross-match two or more astronomical catalogues — local files, HATS "
@@ -667,6 +680,12 @@ def _build_params(args) -> dict:
         probabilistic=args.probabilistic,
         hats_threshold=args.hats_threshold,
         endpoint=getattr(args, "endpoint", None),
+        no_sync=bool(getattr(args, "no_sync", False)),
+        synclimit=getattr(args, "synclimit", None),
+        task_rows=getattr(args, "task_rows", None),
+        cache_root=getattr(args, "cache_root", None),
+        max_tuples=getattr(args, "max_tuples", None),
+        chunk_memory_gb=getattr(args, "chunk_memory_gb", None),
     )
 
 
@@ -786,6 +805,44 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Friends-of-Friends transitive closure across all catalogues.",
     )
+
+    g_ray = parser.add_argument_group("Distributed (engine=ray-union)")
+    g_ray.add_argument(
+        "--no-sync",
+        dest="no_sync",
+        action="store_true",
+        help="Skip auto-mirroring of remote inputs; require cached HATS copies.",
+    )
+    g_ray.add_argument(
+        "--synclimit",
+        dest="synclimit",
+        type=float,
+        help="Requests/sec rate limit for mirroring remote catalogues (default 1.0).",
+    )
+    g_ray.add_argument(
+        "--cache-root",
+        dest="cache_root",
+        help="Durable cache root for mirrored HATS catalogues (default: $XMATCH_CACHE_ROOT "
+        "or ~/.cache/xmatch).",
+    )
+    g_ray.add_argument(
+        "--task-rows",
+        dest="task_rows",
+        type=int,
+        help="Target rows per Ray chunk task (default 2,000,000).",
+    )
+    g_ray.add_argument(
+        "--max-tuples",
+        dest="max_tuples",
+        type=int,
+        help="Max output tuples per hub source row (default 10,000).",
+    )
+    g_ray.add_argument(
+        "--chunk-memory-gb",
+        dest="chunk_memory_gb",
+        type=float,
+        help="Per-chunk candidate-pool memory guard in GiB (default 8.0).",
+    )
     g_alg.add_argument(
         "--find",
         choices=["best", "all"],
@@ -794,11 +851,12 @@ def build_legacy_parser() -> argparse.ArgumentParser:
     )
     g_alg.add_argument(
         "--engine",
-        choices=["auto", "stilts", "astropy", "fast", "torchsky", "zone", "ray"],
+        choices=["auto", "stilts", "astropy", "fast", "torchsky", "zone", "ray", "ray-union"],
         default="auto",
         help=(
             "Sky-match engine (fast=scipy.cKDTree, torchsky=tensor-native nearest, "
-            "zone=HEALPix pixellated, ray=distributed)."
+            "zone=HEALPix, ray=distributed, ray-union=distributed N-way outer join on "
+            "Ray with mirrored HATS inputs)."
         ),
     )
 
@@ -1061,11 +1119,12 @@ def _build_match_subparser() -> argparse.ArgumentParser:
     )
     g_alg.add_argument(
         "--engine",
-        choices=["auto", "stilts", "astropy", "fast", "torchsky", "zone", "ray"],
+        choices=["auto", "stilts", "astropy", "fast", "torchsky", "zone", "ray", "ray-union"],
         default="auto",
         help=(
             "Sky-match engine (fast=scipy.cKDTree, torchsky=tensor-native nearest, "
-            "zone=HEALPix, ray=distributed)."
+            "zone=HEALPix, ray=distributed, ray-union=distributed N-way outer join on "
+            "Ray with mirrored HATS inputs)."
         ),
     )
     g_alg.add_argument(
@@ -1079,6 +1138,44 @@ def _build_match_subparser() -> argparse.ArgumentParser:
         dest="fof_match",
         action="store_true",
         help="Friends-of-Friends transitive closure across all catalogues.",
+    )
+
+    g_ray = parser.add_argument_group("Distributed (engine=ray-union)")
+    g_ray.add_argument(
+        "--no-sync",
+        dest="no_sync",
+        action="store_true",
+        help="Skip auto-mirroring of remote inputs; require cached HATS copies.",
+    )
+    g_ray.add_argument(
+        "--synclimit",
+        dest="synclimit",
+        type=float,
+        help="Requests/sec rate limit for mirroring remote catalogues (default 1.0).",
+    )
+    g_ray.add_argument(
+        "--cache-root",
+        dest="cache_root",
+        help="Durable cache root for mirrored HATS catalogues (default: $XMATCH_CACHE_ROOT "
+        "or ~/.cache/xmatch).",
+    )
+    g_ray.add_argument(
+        "--task-rows",
+        dest="task_rows",
+        type=int,
+        help="Target rows per Ray chunk task (default 2,000,000).",
+    )
+    g_ray.add_argument(
+        "--max-tuples",
+        dest="max_tuples",
+        type=int,
+        help="Max output tuples per hub source row (default 10,000).",
+    )
+    g_ray.add_argument(
+        "--chunk-memory-gb",
+        dest="chunk_memory_gb",
+        type=float,
+        help="Per-chunk candidate-pool memory guard in GiB (default 8.0).",
     )
 
     g_id = parser.add_argument_group("ID join")
@@ -1186,6 +1283,64 @@ def _build_match_subparser() -> argparse.ArgumentParser:
         help="TAP endpoint for ad-hoc table ids (vizier, noirlab, gaia).",
     )
 
+    _add_global_options(parser)
+    return parser
+
+
+def _build_sync_subparser() -> argparse.ArgumentParser:
+    """Standalone parser for the ``sync`` subcommand."""
+    parser = argparse.ArgumentParser(
+        prog="xmatch sync",
+        description=(
+            "Mirror remote catalogues (TAP, or HATS over HTTP / vos:) into the durable "
+            "cache root as HATS, with incremental re-sync on later runs."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  xmatch sync gaia allwise twomass\n"
+            "  xmatch sync my_tap_table --rate-limit 2 --threads 4 --cache-root /data/xmatch-cache\n"
+            "  xmatch sync --force allwise        # refetch everything\n"
+        ),
+    )
+    parser.add_argument(
+        "catalogues",
+        nargs="+",
+        help="Catalogues to mirror: configured names, HATS URLs (https://…, vos:…), "
+        "or remote table ids.",
+    )
+    parser.add_argument(
+        "--rate-limit",
+        dest="rate_limit_rps",
+        type=float,
+        help="Requests/sec per remote host (default 1.0; 0 disables throttling).",
+    )
+    parser.add_argument(
+        "--force",
+        dest="force_sync",
+        action="store_true",
+        help="Refetch every file/page, ignoring the incremental manifest.",
+    )
+    parser.add_argument(
+        "--cache-root",
+        dest="cache_root",
+        help="Durable cache root for mirrored HATS catalogues (default: $XMATCH_CACHE_ROOT "
+        "or ~/.cache/xmatch).",
+    )
+    parser.add_argument(
+        "--threads",
+        dest="workers",
+        type=int,
+        default=8,
+        help="Parallel download workers (default 8).",
+    )
+    parser.add_argument(
+        "--hats-threshold",
+        dest="hats_threshold",
+        type=int,
+        default=100_000,
+        help="Max rows per HEALPix pixel for the converted HATS catalogue.",
+    )
     _add_global_options(parser)
     return parser
 
@@ -1433,7 +1588,7 @@ _xmatch_endpoints=(
 {ep_array}
 )
 _xmatch_shells=( bash zsh fish )
-_xmatch_subcommands=( match list describe discover search adopt completion )
+_xmatch_subcommands=( match list describe discover search adopt completion sync )
 
 _xmatch() {{
     local cur="" words="" cword=0 i subcmd=""
@@ -1455,7 +1610,7 @@ _xmatch() {{
     # Skip past leading flag tokens to locate the subcommand keyword.
     for ((i = 1; i < cword; i++)); do
         case "${{words[i]}}" in
-            match|list|describe|discover|search|adopt|completion)
+            match|list|describe|discover|search|adopt|completion|sync)
                 subcmd="${{words[i]}}"; break ;;
         esac
     done
@@ -1473,7 +1628,7 @@ _xmatch() {{
     fi
 
     case "$subcmd" in
-        match|describe)
+        match|describe|sync)
             COMPREPLY=( $(compgen -W "${{_xmatch_catalogues[*]}}" -- "$cur") )
             ;;
         discover|adopt)
@@ -1503,6 +1658,7 @@ def _emit_zsh(catalogues: Sequence[str], endpoints: Sequence[str]) -> str:
 
 _xmatch_subcommands=(
     'match:cross-match two or more catalogues'
+    'sync:mirror remote catalogues into the local HATS cache'
     'list:list every configured catalogue'
     'describe:show columns and access info for a catalogue'
     'discover:browse tables on a remote TAP endpoint'
@@ -1530,7 +1686,7 @@ _xmatch() {{
                 return
             fi
             case $words[1] in
-                match|describe)
+                match|describe|sync)
                     _describe 'catalogue' _xmatch_catalogues
                     ;;
                 discover|adopt)
@@ -1559,7 +1715,7 @@ def _emit_fish(catalogues: Sequence[str], endpoints: Sequence[str]) -> str:
 function _xmatch_subcmd
     for token in $argv
         switch $token
-            case match list describe discover search adopt completion
+            case match list describe discover search adopt completion sync
                 echo $token
                 return
         end
@@ -1581,7 +1737,7 @@ function _xmatch_needs_shell
     test "$cmd" = completion
 end
 
-set -l _xmatch_subcommands match list describe discover search adopt completion
+set -l _xmatch_subcommands match list describe discover search adopt completion sync
 
 {cat_lines}
 
@@ -1622,6 +1778,7 @@ def _build_top_parser() -> argparse.ArgumentParser:
         "  discover    browse tables and columns on a remote TAP endpoint\n"
         "  search      search every endpoint for tables matching a substring\n"
         "  adopt       save a remote table into ~/.config/xmatch/xmatch.yaml\n"
+        "  sync        mirror remote catalogues into the local HATS cache\n"
         "\n"
         "Run `xmatch COMMAND --help` for command-specific options.  The legacy\n"
         "flat form (`xmatch --list`, `xmatch --describe NAME`, `xmatch --search`,\n"
@@ -2020,7 +2177,7 @@ def _execute_match(args, cm: CrossMatch, console: Console) -> int:
     with progress:
         progress.update("preparing inputs")
         if args.fof_match:
-            result = cm.fof_match(
+            result: Optional[Union[pl.DataFrame, pl.LazyFrame]] = cm.fof_match(
                 args.catalogues,
                 output_file=args.output_file,
                 radius_arcsec=params.pop("radius_arcsec", 1.0),
@@ -2145,6 +2302,58 @@ def _run_match_subcommand(argv: Sequence[str]) -> int:
     console = _make_console(no_color=bool(getattr(args, "no_color", False)))
     cm = CrossMatch(config_file=args.config_file)
     return _guarded(cm, console, lambda: _execute_match(args, cm, console))
+
+
+def _run_sync_subcommand(argv: Sequence[str]) -> int:
+    parser = _build_sync_subparser()
+    args = parser.parse_args(list(argv))
+    setup_logging(args.verbose)
+    console = _make_console(no_color=bool(getattr(args, "no_color", False)))
+    cm = CrossMatch(config_file=args.config_file)
+
+    def body() -> int:
+        from .mirror import SyncStats, sync_catalogue
+        from .storage import default_cache_root
+
+        cache_cfg = cm.config.get("cache", {}) if isinstance(cm.config, dict) else {}
+        cache_root = (
+            args.cache_root
+            or os.environ.get("XMATCH_CACHE_ROOT")
+            or cache_cfg.get("root")
+            or default_cache_root()
+        )
+        rate_limit = args.rate_limit_rps
+        if rate_limit is None:
+            rate_limit = float(cache_cfg.get("rate_limit_rps", 1.0))
+        total = SyncStats()
+        for name in args.catalogues:
+            resolved = cm.resolve_name(name)
+            cat_cfg = cm.catalogues_config.get(resolved, {})
+            src = cm.resolve_source(name, {})
+            one_limit = rate_limit
+            if args.rate_limit_rps is None:
+                one_limit = float((cat_cfg.get("sync") or {}).get("rate_limit_rps", rate_limit))
+            console.info(f"Syncing {name} (cache: {cache_root}) …")
+            stats = sync_catalogue(
+                src,
+                cache_root=cache_root,
+                rate_limit_rps=one_limit,
+                workers=int(args.workers),
+                force=bool(args.force_sync),
+                hats_threshold=int(args.hats_threshold),
+            )
+            total.merge(stats)
+            console.info(
+                f"  {name}: {stats.bytes_downloaded} bytes, {stats.files_downloaded} file(s), "
+                f"{stats.pages} page(s) ({stats.files_skipped} skipped, {stats.failed} failed)"
+            )
+        console.info(
+            f"Sync complete: {total.files_downloaded} file(s), {total.bytes_downloaded} bytes "
+            f"({total.files_skipped} skipped, {total.failed} failed)."
+        )
+        return 0 if total.failed == 0 else 1
+
+    return _guarded(cm, console, body)
 
 
 def _run_simple_describe(argv: Sequence[str]) -> int:
@@ -2723,6 +2932,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if cmd == "match":
         return _run_match_subcommand(remaining)
+    if cmd == "sync":
+        return _run_sync_subcommand(remaining)
     if cmd == "describe":
         return _run_simple_describe(remaining)
     if cmd == "adopt":

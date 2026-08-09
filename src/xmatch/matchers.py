@@ -47,6 +47,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import polars as pl
+from astropy.coordinates import Latitude, Longitude
 
 from .exceptions import CrossMatchError
 from .sources import ASTROMETRIC_COVARIANCE_KEYS, CatalogueSource
@@ -2458,6 +2459,38 @@ def _torchsky_match(
 # --------------------------------------------------------------------------- #
 # Tier 2 — HEALPix zone engine
 # --------------------------------------------------------------------------- #
+def _cone_search_pixels(
+    hp_module,
+    lon_rad: float,
+    lat_rad: float,
+    radius_rad: float,
+    depth: int,
+) -> np.ndarray:
+    """Depth-``depth`` pixels covered by a cone (cdshealpix >= 0.8 API).
+
+    ``cone_search`` returns *parent* cells for fully-contained subtrees, so
+    parents are expanded to all children at the requested depth — callers get
+    a flat set of same-depth pixels like the pre-0.8 ``cone_search_lonlat``.
+    """
+    from astropy.coordinates import Angle, Latitude, Longitude  # noqa: PLC0415
+
+    ipix, depths, _ = hp_module.cone_search(
+        Longitude(lon_rad, unit="rad"),
+        Latitude(lat_rad, unit="rad"),
+        Angle(radius_rad, unit="rad"),
+        np.uint8(depth),
+    )
+    out: List[int] = []
+    for ipx, d in zip(np.asarray(ipix).tolist(), np.asarray(depths).tolist(), strict=True):
+        dif = depth - int(d)
+        if dif <= 0:
+            out.append(int(ipx))
+            continue
+        base = int(ipx) << (2 * dif)
+        out.extend(range(base, base + (1 << (2 * dif))))
+    return np.asarray(out, dtype=np.int64)
+
+
 def _zone_match(
     left: pl.DataFrame,
     right: pl.DataFrame,
@@ -2547,10 +2580,23 @@ def _zone_match_healpix(
     if radius_deg <= 0:
         return empty
 
-    NSIDE = 32
-    DEPTH = 5  # 2 ** 5 == 32
-    l_pix = np.asarray(hp.lonlat_to_healpix(np.radians(l_ra), np.radians(l_dec), NSIDE), dtype=int)
-    r_pix = np.asarray(hp.lonlat_to_healpix(np.radians(r_ra), np.radians(r_dec), NSIDE), dtype=int)
+    DEPTH = 5  # nside = 2 ** DEPTH == 32
+    l_pix = np.asarray(
+        hp.lonlat_to_healpix(
+            Longitude(np.radians(l_ra), unit="rad"),
+            Latitude(np.radians(l_dec), unit="rad"),
+            DEPTH,
+        ),
+        dtype=int,
+    )
+    r_pix = np.asarray(
+        hp.lonlat_to_healpix(
+            Longitude(np.radians(r_ra), unit="rad"),
+            Latitude(np.radians(r_dec), unit="rad"),
+            DEPTH,
+        ),
+        dtype=int,
+    )
 
     # Cache per-pixel right xyz buffers and per-pixel cKDTree instances.
     unique_pix, pix_inv = np.unique(r_pix, return_inverse=True)
@@ -2593,11 +2639,12 @@ def _zone_match_healpix(
             # Cone search once per pixel (same for all points in pixel).
             mid = len(left_indices) // 2
             rep_i = left_indices[mid]
-            npix = hp.cone_search_lonlat(
-                lon=float(np.radians(l_ra[rep_i])),
-                lat=float(np.radians(l_dec[rep_i])),
-                radius=float(np.radians(radius_deg)),
-                depth=DEPTH,
+            npix = _cone_search_pixels(
+                hp,
+                float(np.radians(l_ra[rep_i])),
+                float(np.radians(l_dec[rep_i])),
+                float(np.radians(radius_deg)),
+                DEPTH,
             )
             batch_xyz = l_xyz[indices_arr]  # (n_pix, 3)
 

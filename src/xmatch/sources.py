@@ -66,6 +66,9 @@ class CatalogueSource:
     tap_url: Optional[str] = None
     default_columns: Optional[List[str]] = None
 
+    # Mirror location inside the xmatch cache root (set by ensure_mirrored).
+    hats_cache_rel: Optional[str] = None
+
     # Local payload (exactly one is set for local sources).
     path: Optional[Path] = None
     _frame: Optional[pl.LazyFrame] = field(default=None, repr=False)

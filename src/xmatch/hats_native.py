@@ -148,11 +148,14 @@ def _healpix_neighbors(order: int, center_pix: int) -> List[int]:
             lon = lon.to_value("rad")
             lat = lat.to_value("rad")
         pix_scale = np.sqrt(4.0 * np.pi / (12.0 * nside * nside))
-        neigh = chp.cone_search_lonlat(
-            lon=float(lon[0]),
-            lat=float(lat[0]),
-            radius=float(1.5 * pix_scale),
-            depth=int(order),
+        from .matchers import _cone_search_pixels  # noqa: PLC0415
+
+        neigh = _cone_search_pixels(
+            chp,
+            float(lon[0]),
+            float(lat[0]),
+            float(1.5 * pix_scale),
+            int(order),
         )
         for n in np.atleast_1d(neigh).astype(int).ravel():
             if n >= 0:
@@ -238,7 +241,7 @@ def _match_frames(
         engine=eng,
         right_suffix=right_suffix,
     )
-    if hasattr(result, "collect"):
+    if isinstance(result, pl.LazyFrame):
         return result.collect()
     return result
 

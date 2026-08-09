@@ -11,7 +11,10 @@ ci-local = "pixi run preflight-push && pytest tests/test_ci_smoke.py -q"
 test = "pytest"
 
 [dependencies]
-python = ">=3.10"
+# <3.14: hats / cdshealpix / ray do not all ship cp314 wheels yet.
+python = ">=3.11,<3.14"
+# hats → numba needs numpy<2.5; conda solve alone picks 2.5.x.
+numpy = ">=1.26,<2.5"
 pandas = ">=1.3"
 astropy = ">=5.0"
 pyyaml = ">=5.4"
@@ -27,3 +30,8 @@ mypy = "*"
 [pypi-dependencies]
 xmatch = { path = ".", editable = true }
 nway = ">=4.7.1, <5"
+# HATS-native Ray union engine: always in the dev env so CI runs the new tests.
+# (Optional extras `hats` / `hats-ray` / `ray` in pyproject.toml stay for pip users.)
+hats = "*"
+ray = "*"
+cdshealpix = "*"
