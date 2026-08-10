@@ -722,9 +722,47 @@ class CrossMatch:
         >>> # Every row has: cat-1 cols (Gaia), cat-2 cols (_2 suffix),
         >>> # cat-3 cols (_3 suffix), _src_cats, sep_arcsec
         >>> print(master["_src_cats"].value_counts())
+
+        Notes
+        -----
+        When every catalogue is a remote survey and no ``ra``/``dec``/
+        ``radius_deg`` is given, :meth:`union_match` auto-routes to
+        ``engine='ray-union'``: the full tables are mirrored and joined
+        sky-wide (an ``output_file`` is required). A region or an explicit
+        ``engine`` keeps the sequential in-process path.
         """  # Force full outer join at every pairwise step.
         union_params = dict(params)
         union_params.setdefault("join_type", "1or2")
+
+        # Full-sky unions of N remote surveys: with no region the sequential
+        # path has no local footprint to download around, so route all-remote
+        # union requests to the distributed engine — it mirrors full tables
+        # and needs no position. An explicit engine or any region keeps the
+        # sequential in-process path.
+        engine_choice = str(params.get("engine") or "auto").lower()
+        region_given = (
+            params.get("ra") is not None
+            and params.get("dec") is not None
+            and params.get("radius_deg") is not None
+        )
+        if engine_choice == "auto" and not region_given:
+            try:
+                all_remote = all(not self.resolve_source(cat, {}).is_local for cat in catalogues)
+            except CrossMatchError:
+                all_remote = False
+            if all_remote:
+                if output_file is None:
+                    raise CrossMatchError(
+                        "Full-sky unions of remote surveys write the joined HATS catalogue "
+                        "to disk; pass -o/--output <out>.hats and xmatch will auto-route "
+                        "to engine='ray-union'."
+                    )
+                logger.info(
+                    "auto-routed %d remote surveys to engine='ray-union' "
+                    "(no region given; full-sky union)",
+                    len(catalogues),
+                )
+                union_params["engine"] = "ray-union"
         return self._multi_match_impl(
             catalogues,
             output_file,

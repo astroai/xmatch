@@ -736,3 +736,73 @@ def test_fof_match_column_averaging_and_strings():
     # label should be first value (string)
     assert "label" in out.columns
     assert out["label"][0] == "detection_A"
+
+
+# ---------------------------------------------------------- union auto-route
+def _fake_remote(name: str = "remote-survey"):
+    from xmatch.sources import CatalogueSource
+
+    return CatalogueSource(
+        name=name,
+        is_local=False,
+        access_method="hats",
+        access_identifier="vos:cadc:test",
+    )
+
+
+def test_union_match_auto_routes_all_remote_full_sky(monkeypatch, tmp_path):
+    """No region + every input remote -> union routes to engine='ray-union'."""
+    cm = CrossMatch()
+    monkeypatch.setattr(cm, "resolve_source", lambda value, overrides: _fake_remote())
+    seen = {}
+
+    def spy_ray(*args, **kwargs):
+        seen["n"] = len(args[0])
+        seen["engine"] = kwargs.get("engine")
+        seen["out"] = args[1] if len(args) > 1 else kwargs.get("output_file")
+        seen["join_type"] = kwargs.get("join_type")
+
+    monkeypatch.setattr(cm, "_ray_union_multi", spy_ray)
+    out = tmp_path / "fullsky.hats"
+    cm.union_match(["gaia", "desils", "allwise"], output_file=out, radius_arcsec=1.5)
+    assert seen.get("n") == 3
+    assert seen.get("engine") == "ray-union"
+    assert seen.get("join_type") in ("1or2", "all")
+    assert seen.get("out") == out
+
+
+def test_union_match_all_remote_without_output_gives_actionable_error(monkeypatch):
+    cm = CrossMatch()
+    monkeypatch.setattr(cm, "resolve_source", lambda value, overrides: _fake_remote())
+    with pytest.raises(CrossMatchError, match=r"-o/--output"):
+        cm.union_match(["gaia", "desils"], radius_arcsec=1.5)
+
+
+def test_union_match_with_region_does_not_auto_route(monkeypatch):
+    """An explicit region keeps the sequential path even for remote inputs."""
+    cm = CrossMatch()
+    monkeypatch.setattr(cm, "resolve_source", lambda value, overrides: _fake_remote())
+    seen = {}
+
+    def spy_multi(*args, **kwargs):
+        seen["engine"] = kwargs.get("engine")
+        return pl.DataFrame()
+
+    monkeypatch.setattr(cm, "_multi_match_impl", spy_multi)
+    cm.union_match(["gaia", "desils"], ra=180, dec=-30, radius_deg=0.01, radius_arcsec=1.5)
+    assert seen.get("engine") in (None, "auto")
+
+
+def test_union_match_local_frames_stay_in_process(monkeypatch):
+    """Local inputs are never auto-routed; the sequential union still runs."""
+    cm = CrossMatch()
+    monkeypatch.setattr(
+        cm, "_ray_union_multi", lambda *args, **kwargs: pytest.fail("ray-union must not run")
+    )
+    left = pl.DataFrame({"ra": [1.0], "dec": [2.0], "m": [3.0]})
+    right = pl.DataFrame({"ra": [1.00001], "dec": [2.00001], "m2": [4.0]})
+    out = cm.union_match([left, right], radius_arcsec=5.0)
+    assert out.height == 1
+    assert "_src_cats" in out.columns
+    assert "sep_arcsec" in out.columns
+    assert out["m"][0] == 3.0 and out["m2"][0] == 4.0  # both column sets survive

@@ -133,6 +133,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed — Mirroring
 
+* **Full-sky unions of N remote surveys auto-route to the distributed
+  engine**: `--union` with every input remote and no `--ra/--dec/
+  --radius-deg` mirrors the full tables and joins them sky-wide via
+  `engine='ray-union'` (an output file is required; a region or an explicit
+  `--engine` keeps the sequential path).
 * **Pairwise matches reuse mirrored copies**: plain `xmatch match` cone
   downloads (local × remote and remote × remote paths) are served from the
   durable HATS cache when a mirrored copy exists and holds the requested

@@ -423,6 +423,13 @@ rows radiate from the lowest-indexed catalogue present, `_src_cats` records
 membership, `sep_arcsec` is the closest used edge, singleton rows appear only
 for sources without any mate, and the result is written as a single-tiling
 HATS catalogue readable via `hats` — no LSDB needed.
+
+**Full-sky unions need no position**: when `--union` is given, every input is
+a remote survey, and no `--ra/--dec/--radius-deg` is provided, xmatch
+auto-routes to the distributed engine — the full tables are mirrored on
+demand and joined sky-wide (an output file is required, e.g.
+`-o fullsky.hats`). Pass a region or any explicit `--engine` to keep the
+sequential in-process path.
 Per-chunk parquets under `<out>/chunks/` double as resume points, so a
 re-invocation skips finished chunks (changing the radius/inputs into the same
 output directory wipes the stale chunks first). `--task-rows`, `--max-tuples`,
