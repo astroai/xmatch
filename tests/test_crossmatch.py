@@ -12,15 +12,18 @@ def cm():
 
 # ------------------------------------------------------------------ config
 def test_bundled_config_loads_and_validates(cm):
-    assert "gaia" in cm.catalogues_config
-    assert cm.resolve_name("gaia") == "gaia"
+    assert "gaia_cds" in cm.catalogues_config
+    assert "gaia_esa" in cm.catalogues_config
+    assert cm.resolve_name("gaia") == "gaia_cds"
 
 
 def test_get_catalogue_config_merges_service(cm):
     cfg = cm.get_catalogue_config("gaia")
-    assert cfg["_catalogue_name"] == "gaia"
+    assert cfg["_catalogue_name"] == "gaia_cds"
     assert cfg["access_method"] == "tap"  # inherited from the archive service
-    assert cfg["ra_column"] == "ra"
+    assert cfg["ra_column"] == "RA_ICRS"
+    esa = cm.get_catalogue_config("gaia_esa")
+    assert esa["ra_column"] == "ra"
 
 
 def test_get_catalogue_config_unknown(cm):
@@ -46,17 +49,22 @@ def test_resolve_source_remote_alias(cm):
     src = cm.resolve_source("gaia", {})
     assert not src.is_local
     assert src.access_method == "tap"
-    assert src.name == "gaia"
+    assert src.name == "gaia_cds"
 
 
 def test_gaia_source_exposes_complete_space_motion_metadata(cm):
+    # `gaia` defaults to CDS VizieR (`I/355/gaiadr3`)
     src = cm.resolve_source("gaia", {})
-    assert src.parallax_column == "parallax"
-    assert src.radial_velocity_column == "radial_velocity"
-    assert "parallax" in src.default_columns
-    assert "radial_velocity" in src.default_columns
-    assert src.astrometric_covariance_columns is not None
-    assert src.astrometric_covariance_columns["pmra_pmdec_corr"] == "pmra_pmdec_corr"
+    assert src.parallax_column == "Plx"
+    assert src.radial_velocity_column == "RV"
+    assert "Plx" in src.default_columns
+    assert "RV" in src.default_columns
+    assert src.astrometric_covariance_columns is None
+    # the ESA mirror keeps the archive schema + covariance block
+    esa = cm.resolve_source("gaia_esa", {})
+    assert esa.parallax_column == "parallax"
+    assert esa.astrometric_covariance_columns is not None
+    assert esa.astrometric_covariance_columns["pmra_pmdec_corr"] == "pmra_pmdec_corr"
 
 
 def test_local_source_preserves_space_motion_overrides(cm):

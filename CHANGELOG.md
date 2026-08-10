@@ -123,6 +123,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   gating, max-tuples cap) — plus 3 CLI sync tests
   (`test_cli_sync.py`) and 10 `tests/test_storage.py` tests.
 
+### Changed — Catalogues
+
+* **`gaia` now defaults to CDS VizieR** (`I/355/gaiadr3`) instead of the ESA
+  Gaia Archive: `gaia`, `gaia_dr3`, and `gaiadr3` all resolve to the VizieR
+  TAP table (RA_ICRS/DE_ICRS columns). The ESA mirror stays available as
+  `gaia_esa` (`gaiadr3.gaia_source`, lowercase columns) for users who need
+  the archive's native schema or its full astrometric covariance block.
+
 ### Changed — Performance
 
 * **HEALPix margin caching**: `_zone_match_healpix` now merges all neighbouring

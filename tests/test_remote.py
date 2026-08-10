@@ -28,7 +28,7 @@ def test_local_vs_remote_tap_downloads_then_matches(cm, monkeypatch):
     monkeypatch.setattr(rt, "download_from_tap", fake_download)
 
     local = pl.DataFrame({"ra": [10.0], "dec": [5.0], "my_id": [1]})
-    out = cm.crossmatch(local, "gaia", radius_arcsec=1.0)
+    out = cm.crossmatch(local, "gaia_esa", radius_arcsec=1.0)
     assert out.height == 1
     assert "source_id" in out.columns
 
@@ -45,7 +45,7 @@ def test_local_vs_remote_forwards_correct_side_columns(cm, monkeypatch):
 
     monkeypatch.setattr(rt, "download_from_tap", fake_download)
     local = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
-    cm.crossmatch(local, "gaia", radius_arcsec=1.0, columns_2=["ra", "dec", "source_id"])
+    cm.crossmatch(local, "gaia_esa", radius_arcsec=1.0, columns_2=["ra", "dec", "source_id"])
     assert captured["columns"] == ["ra", "dec", "source_id"]
 
 
@@ -59,10 +59,10 @@ def test_target_epoch_forces_remote_space_motion_columns(cm, monkeypatch):
         return pl.DataFrame()
 
     monkeypatch.setattr(rt, "download_from_tap", fake_download)
-    src = cm.resolve_source("gaia", {})
+    src = cm.resolve_source("gaia_esa", {})
     req = MatchRequest(
-        "gaia",
-        "gaia",
+        "gaia_esa",
+        "gaia_esa",
         spec=MatchSpec(target_epoch=2025.0),
         ra=10.0,
         dec=5.0,
@@ -94,10 +94,10 @@ def test_target_epoch_skyellipse_forces_remote_astrometric_covariance(cm, monkey
         return pl.DataFrame()
 
     monkeypatch.setattr(rt, "download_from_tap", fake_download)
-    src = cm.resolve_source("gaia", {})
+    src = cm.resolve_source("gaia_esa", {})
     req = MatchRequest(
-        "gaia",
-        "gaia",
+        "gaia_esa",
+        "gaia_esa",
         spec=MatchSpec(target_epoch=2025.0, matcher="skyellipse"),
         ra=10.0,
         dec=5.0,
@@ -117,11 +117,11 @@ def test_target_epoch_skyellipse_forces_remote_astrometric_covariance(cm, monkey
 def test_target_epoch_bypasses_unpropagated_tap_self_join(cm, monkeypatch):
     import xmatch.remote_tap as rt
 
-    src1 = cm.resolve_source("gaia", {})
-    src2 = cm.resolve_source("gaia", {})
+    src1 = cm.resolve_source("gaia_esa", {})
+    src2 = cm.resolve_source("gaia_esa", {})
     req = MatchRequest(
-        "gaia",
-        "gaia",
+        "gaia_esa",
+        "gaia_esa",
         spec=MatchSpec(target_epoch=2025.0),
         ra=10.0,
         dec=5.0,
@@ -146,7 +146,7 @@ def test_target_epoch_bypasses_unpropagated_tap_self_join(cm, monkeypatch):
     result = cm._remote_vs_remote(src1, src2, req).collect()
 
     assert result["ok"].to_list() == [True]
-    assert downloads == ["gaia", "gaia"]
+    assert downloads == ["gaia_esa", "gaia_esa"]
 
 
 def test_target_epoch_bypasses_unpropagated_cds_xmatch(cm, monkeypatch):
@@ -187,7 +187,7 @@ def test_target_epoch_bypasses_unpropagated_cds_xmatch(cm, monkeypatch):
 def test_download_remote_requires_region_when_no_local(cm):
     from xmatch.exceptions import CrossMatchError
 
-    src = cm.resolve_source("gaia", {})
+    src = cm.resolve_source("gaia_esa", {})
     req = MatchRequest("gaia", "gaia")  # no ra/dec/radius set
     with pytest.raises(CrossMatchError):
         cm._download_remote(src, req, prefix="1")  # no ra/dec/radius and no local extent

@@ -60,10 +60,11 @@ catalogue_aliases:
   # Short survey names are the catalogue keys themselves.
   # These aliases are synonyms, version pins, and archive-specific mirrors.
 
-  # Gaia — default is ESA Archive; CDS/NOAO mirrors remain as separate catalogues
-  gaia_dr3: "gaia"
-  gaiadr3: "gaia"
-  gaia_esa: "gaia"
+  # Gaia — default is CDS VizieR (`I/355/gaiadr3`); the ESA Gaia Archive
+  # mirror stays available as `gaia_esa`.
+  gaia: "gaia_cds"
+  gaia_dr3: "gaia_cds"
+  gaiadr3: "gaia_cds"
 
   # Optical / NIR
   panstarrs: "ps1"
@@ -675,8 +676,8 @@ catalogues:
     default_pos_error_arcsec: 0.2
 
   # --- ESA Archive Catalogues ---
-  gaia:
-    description: "Gaia Data Release 3 (ESA Archive)"
+  gaia_esa:
+    description: "Gaia Data Release 3 (ESA Archive mirror; `gaia` defaults to CDS VizieR)"
     archive: esa_gaia
     service_id: tap_service
     release: "dr3"

@@ -54,10 +54,10 @@ def test_looks_like_table_id_and_guess():
 
 def test_get_catalogue_config_resolves_aliases():
     cm = CrossMatch()
-    cfg = cm.get_catalogue_config("gaia_esa")
-    assert cfg["_catalogue_name"] == "gaia"
-    cfg2 = cm.get_catalogue_config("desils_noao")
-    assert cfg2["_catalogue_name"] == "desils"
+    cfg = cm.get_catalogue_config("gaia")
+    assert cfg["_catalogue_name"] == "gaia_cds"
+    cfg2 = cm.get_catalogue_config("gaia_esa")
+    assert cfg2["_catalogue_name"] == "gaia_esa"
 
 
 def test_catalogue_entry_from_schema_builds_yaml_ready_dict():
@@ -121,7 +121,8 @@ def test_deep_merge_and_user_overlay(tmp_path, monkeypatch):
     cfg, primary = load_merged_config(include_user_overlay=True)
     assert primary == user
     assert "ps1" in cfg["catalogues"]
-    assert "gaia" in cfg["catalogues"]  # from real bundled baseline
+    assert "gaia_cds" in cfg["catalogues"]
+    assert "gaia_esa" in cfg["catalogues"]  # from real bundled baseline
 
 
 def test_append_catalogue_merges_archives_on_second_adopt(tmp_path):
