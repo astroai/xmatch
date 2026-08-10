@@ -277,3 +277,60 @@ def mirror_rows(cache_root: str, src: CatalogueSource) -> pl.DataFrame:
     pixels = hats_native.list_hats_pixels(Path(root) / rel)
     frames = [pl.read_parquet(p) for _, _, p in pixels]
     return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+
+
+def _backdate_manifest(cache: str, name: str, days: float, raw: bool = True) -> None:
+    """Rewind the manifest's fetched_at timestamp (simulates an older sync)."""
+    import json
+    import time as _t
+
+    rel = Path(cache) / name / ("raw" if raw else "") / "sync.json"
+    man = json.loads(rel.read_text())
+    man["fetched_at"] = _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(_t.time() - days * 86400))
+    rel.write_text(json.dumps(man))
+
+
+def test_fresh_after_skips_probe_and_network(tmp_path: Path, tap_server, monkeypatch) -> None:
+    """A mirror synced within --fresh-after days: zero TAP queries, no probe."""
+    src = _tap_source(tap_server)
+    cache = str(tmp_path / "cache")
+    assert _sync(src, cache).pages == 2  # cold sync builds the HATS mirror
+    queries_before = len(tap_server.queries)
+    _backdate_manifest(cache, "probe", days=1)
+
+    def boom(*args, **kwargs):  # the probe path must not run at all
+        raise AssertionError("_mirror_tap ran despite a fresh mirror")
+
+    monkeypatch.setattr(mirror, "_mirror_tap", boom)
+    stats = _sync(src, cache, fresh_after=30)
+    assert stats.pages == 0
+    assert stats.files_downloaded == 0
+    assert len(tap_server.queries) == queries_before  # truly zero network
+
+
+def test_fresh_after_still_probes_when_stale(tmp_path: Path, tap_server) -> None:
+    """Older than --fresh-after: the incremental probe runs (COUNT(*), no refetch)."""
+    src = _tap_source(tap_server)
+    cache = str(tmp_path / "cache")
+    assert _sync(src, cache).pages == 2
+    _backdate_manifest(cache, "probe", days=40)
+    queries_before = len(tap_server.queries)
+
+    stats = _sync(src, cache, fresh_after=30)
+    assert stats.pages == 0  # table unchanged: no page refetched
+    assert len(tap_server.queries) > queries_before  # probe queries did run
+
+
+def test_headroom_gate_blocks_sync_when_disk_full(tmp_path: Path, tap_server, monkeypatch) -> None:
+    """--min-free-gb: fail fast before any fetch when the cache root is nearly full."""
+    src = _tap_source(tap_server)
+    cache = str(tmp_path / "cache")
+    import collections
+
+    DU = collections.namedtuple("DU", "total used free")
+    monkeypatch.setattr(
+        "xmatch.storage.shutil.disk_usage",
+        lambda p: DU(1000, 900, 5.0),  # 5 bytes free
+    )
+    with pytest.raises(mirror.CrossMatchError, match=r"min-free-gb"):
+        _sync(src, cache, min_free_gb=10)

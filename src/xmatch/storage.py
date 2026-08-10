@@ -411,3 +411,21 @@ def open_storage(root: Union[str, Path]) -> Storage:
 def default_cache_root() -> str:
     """Effective default cache root: ``XMATCH_CACHE_ROOT`` else ``~/.cache/xmatch``."""
     return os.environ.get("XMATCH_CACHE_ROOT") or str(Path.home() / ".cache" / "xmatch")
+
+
+def assert_headroom(path: Union[str, Path], min_free_gb: float, label: str) -> None:
+    """Fail fast when ``path``'s filesystem has less than ``min_free_gb`` GiB free.
+
+    Runs before any day-scale mirror/union starts so a multi-day run cannot
+    die at 95% into a full disk. ``label`` names the mount in the error.
+    The directory is created if missing (every caller writes into it next).
+    """
+    from .exceptions import CrossMatchError
+
+    os.makedirs(str(path), exist_ok=True)
+    free_gb = shutil.disk_usage(str(path)).free / 1e9
+    if free_gb < min_free_gb:
+        raise CrossMatchError(
+            f"{label} has only {free_gb:.1f} GiB free, below the --min-free-gb floor "
+            f"of {min_free_gb:g} GiB; refusing to start a sync/union it cannot fit."
+        )

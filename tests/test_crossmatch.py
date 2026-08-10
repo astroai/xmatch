@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import polars as pl
 import pytest
 
@@ -806,3 +808,71 @@ def test_union_match_local_frames_stay_in_process(monkeypatch):
     assert "_src_cats" in out.columns
     assert "sep_arcsec" in out.columns
     assert out["m"][0] == 3.0 and out["m2"][0] == 4.0  # both column sets survive
+
+
+# ---------------------------------------------------- driver-level resilience
+def _tiny_hats(tmp_path, name: str, ra: float, dec: float) -> Path:
+    """One-partition local HATS catalogue (mirror-free offline input)."""
+    d = tmp_path / name
+    (d / "dataset" / "Norder=0" / "Dir=0").mkdir(parents=True)
+    pl.DataFrame({"ra": [ra], "dec": [dec], "m": [1.0]}).write_parquet(
+        d / "dataset" / "Norder=0" / "Dir=0" / "Npix=0.parquet"
+    )
+    (d / "properties").write_text(
+        "dataproduct_type=object\nobs_collection=xmatch-test\n"
+        "hats_col_ra=ra\nhats_col_dec=dec\nhats_ordering=NESTED\nhats_nrows=1\n"
+    )
+    return d
+
+
+def test_ray_union_driver_retries_transient_failures(monkeypatch, tmp_path):
+    """--retries N: a driver death resumes; run.jsonl records every attempt."""
+    import json as _json
+
+    import xmatch.ray_union as ru
+
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("transient driver death")
+        ru._LAST_PLAN = None
+
+    monkeypatch.setattr(ru, "ray_union_match", flaky)
+    cm = CrossMatch()
+    out = tmp_path / "fullsky.hats"
+    cm.union_match(
+        [str(_tiny_hats(tmp_path, "a", 0.0, 0.0)), str(_tiny_hats(tmp_path, "b", 0.01, 0.01))],
+        output_file=out,
+        engine="ray-union",
+        no_sync=True,
+        retries=2,
+        radius_arcsec=1.5,
+    )
+    assert calls["n"] == 3  # two retries after the first failure
+    events = [_json.loads(line) for line in (out / "run.jsonl").read_text().splitlines()]
+    kinds = [e["event"] for e in events]
+    assert kinds.count("attempt_start") == 3
+    assert kinds.count("attempt_failed") == 2
+    assert "done" in kinds
+
+
+def test_ray_union_driver_retries_exhausted_reraise(monkeypatch, tmp_path):
+    """After --retries N failures the original error still propagates."""
+    import xmatch.ray_union as ru
+
+    def always_boom(*args, **kwargs):
+        raise RuntimeError("driver death")
+
+    monkeypatch.setattr(ru, "ray_union_match", always_boom)
+    cm = CrossMatch()
+    with pytest.raises(RuntimeError, match="driver death"):
+        cm.union_match(
+            [str(_tiny_hats(tmp_path, "a", 0.0, 0.0)), str(_tiny_hats(tmp_path, "b", 0.01, 0.01))],
+            output_file=tmp_path / "fullsky.hats",
+            engine="ray-union",
+            no_sync=True,
+            retries=1,
+            radius_arcsec=1.5,
+        )

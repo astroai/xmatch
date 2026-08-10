@@ -65,6 +65,15 @@ _TAP_CEILING_FACTOR = 1.5
 _MANIFEST_NAME = "sync.json"
 _HTTP_RETRIES = 3
 _HTTP_BACKOFF_CAP_S = 60.0
+_DEFAULT_MIN_FREE_GB = 10.0
+
+
+def _min_free_gb(explicit: Optional[float]) -> float:
+    """Resolve the free-space floor: explicit > env > 10 GiB default."""
+    if explicit is not None:
+        return float(explicit)
+    env = os.environ.get("XMATCH_MIN_FREE_GB")
+    return float(env) if env else _DEFAULT_MIN_FREE_GB
 
 
 # --------------------------------------------------------------------------- #
@@ -533,6 +542,8 @@ def _mirror_remote_hats(
             stats.files_downloaded += 1
             stats.bytes_downloaded += max(0, stored) if stored >= 0 else 0
             manifest.setdefault("files", {})[rel] = {"size": stored}
+            if progress_cb:
+                progress_cb(f"sync {src.name}: fetched {rel}")
         except Exception as exc:  # noqa: BLE001
             stats.failed += 1
             logger.warning("sync %s: failed to fetch %s: %s", src.name, rel, exc)
@@ -716,6 +727,11 @@ def _mirror_tap(
             stats.pages += 1
             stats.files_downloaded += 1
             stats.bytes_downloaded += cache.size(page_rel)
+            if progress_cb:
+                progress_cb(
+                    f"sync {src.name}: page {idx:04d} fetched "
+                    f"({df.height} rows, {stats.pages} page(s) so far)"
+                )
         return df
 
     def record_page(idx: int, df: pl.DataFrame) -> None:
@@ -1004,9 +1020,20 @@ def sync_catalogue(
     page_size: int = DEFAULT_PAGE_SIZE,
     hats_threshold: int = 100_000,
     estimated_size: Optional[int] = None,
+    fresh_after: Optional[float] = None,
+    min_free_gb: Optional[float] = None,
 ) -> SyncStats:
-    """Mirror ``src`` into the cache, incrementally. Returns :class:`SyncStats`."""
-    from .storage import default_cache_root
+    """Mirror ``src`` into the cache, incrementally. Returns :class:`SyncStats`.
+
+    ``fresh_after`` (days): when the stored mirror completed a full sync less
+    than this many days ago (and the HATS catalogue exists), skip the
+    change-probe network round-trips entirely and trust the copy — the
+    day-scale re-union pattern ("synced Monday, union Tuesday…") never re-pays
+    the probe hours.  ``min_free_gb`` floors the free space on ``root`` before
+    any fetch begins (default 10 GiB; env ``XMATCH_MIN_FREE_GB`` or config
+    ``cache.min_free_gb`` override).
+    """
+    from .storage import assert_headroom, default_cache_root
 
     root = cache_root or default_cache_root()
     cache = open_storage(root)
@@ -1017,6 +1044,36 @@ def sync_catalogue(
         raise CrossMatchError(
             f"Cannot sync access method '{src.access_method}'; only TAP and HATS are mirrorable."
         )
+
+    min_free = _min_free_gb(min_free_gb)
+    assert_headroom(root, min_free, f"cache root '{root}'")
+
+    if fresh_after is not None and not force:
+        name = _safe_name(src.name)
+        prefix = f"{name}/{_version_dir(src)}"
+        manifest_rel = (
+            f"{prefix}/{_MANIFEST_NAME}"
+            if src.access_method == "hats"
+            else f"{name}/raw/{_MANIFEST_NAME}"
+        )
+        manifest = _read_json(cache, manifest_rel)
+        fetched = manifest.get("fetched_at") if manifest else None
+        if fetched and cache.exists(f"{prefix}/properties"):
+            try:
+                fetched_ts = time.mktime(time.strptime(fetched, "%Y-%m-%dT%H:%M:%SZ"))
+            except (ValueError, OverflowError):
+                fetched_ts = 0.0
+            age_days = (time.time() - fetched_ts) / 86400.0
+            if 0.0 <= age_days < fresh_after:
+                logger.info(
+                    "sync %s: mirror fetched %s (%.1f days ago, < fresh-after %.1f); "
+                    "skipping the change probe",
+                    src.name,
+                    fetched,
+                    age_days,
+                    fresh_after,
+                )
+                return stats
     bucket = TokenBucket(rate_limit_rps) if rate_limit_rps else TokenBucket(0.0)
     if src.access_method == "hats":
         _mirror_remote_hats(
@@ -1089,15 +1146,18 @@ def ensure_mirrored(
     auth_session: Any = None,
     hats_threshold: int = 100_000,
     estimated_size: Optional[int] = None,
+    fresh_after: Optional[float] = None,
+    min_free_gb: Optional[float] = None,
 ) -> CatalogueSource:
     """Mirror a remote source and return a source pointing at the local HATS copy.
 
     Local HATS catalogues are returned unchanged; other local inputs (plain
     parquet/csv/fits) are converted once into the cache as HATS.
     """
-    from .storage import default_cache_root
+    from .storage import assert_headroom, default_cache_root
 
     root = cache_root or default_cache_root()
+    assert_headroom(root, _min_free_gb(min_free_gb), f"cache root '{root}'")
     if src.access_method == "hats" and not _is_remote_hats(src):
         return src
     if src.is_local:
@@ -1140,6 +1200,7 @@ def ensure_mirrored(
         auth_session=auth_session,
         hats_threshold=hats_threshold,
         estimated_size=estimated_size,
+        fresh_after=fresh_after,
     )
     if stats.failed:
         raise CrossMatchError(

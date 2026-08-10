@@ -114,10 +114,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the chunk/rest Ray pipeline; per-chunk parquets under `<out>/chunks/` act
   as resume points; reruns with identical parameters skip finished chunks
   (stale parameters wipe the stale chunks first).
-* **Tests**: 7 `tests/test_mirror_sync.py` tests (incremental TAP sync,
+* **Tests**: 10 `tests/test_mirror_sync.py` tests (incremental TAP sync,
   force re-fetch, window-shrink/append continuation, HATS-over-HTTP mirror,
   HATS-over-`vos:` mirror),
-  8 `tests/test_ray_union.py` tests (3-catalogue-vs-oracle,
+  9 `tests/test_ray_union.py` tests (3-catalogue-vs-oracle,
   brute-force-oracle comparison, resume skip, far-partner singles,
   cone-covering regression, rest-partition dedup, block-combination
   gating, max-tuples cap) — plus 3 CLI sync tests
@@ -133,6 +133,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed — Mirroring
 
+* **Multi-day runs finish**: `--retries N` re-runs a failed distributed
+  union with backoff (incremental mirror refill + finished-chunk skip make
+  re-entry cheap), `--fresh-after N` skips the change-probe for mirrors
+  fully synced within N days, and `--min-free-gb` fails fast when the cache
+  root or output filesystem is nearly full. The union driver reports live
+  progress (`done/total tasks, %, rate, ETA`), updates `resume.state`
+  incrementally, and appends every event (attempts, mirror progress, chunk
+  completions, done/failed) to `<out>/run.jsonl`.
 * **Full-sky unions of N remote surveys auto-route to the distributed
   engine**: `--union` with every input remote and no `--ra/--dec/
   --radius-deg` mirrors the full tables and joins them sky-wide via

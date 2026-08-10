@@ -410,6 +410,11 @@ xmatch sync gaia --force
   cone downloads from the mirrored copy automatically when one exists —
   no TAP round-trip. Requests the mirror cannot satisfy (extra columns,
   target-epoch motion fields) fall back to the live service.
+* Day-scale operations: `--fresh-after N` skips the change-probe entirely
+  for mirrors fully synced within N days (re-unions re-pay zero network),
+  and `--min-free-gb` fails fast before a fetch/join when the cache root
+  or output filesystem is nearly full (default 10 GiB, env
+  `XMATCH_MIN_FREE_GB` overrides).
 
 The distributed union engine consumes whatever `sync` produces:
 
@@ -435,6 +440,14 @@ re-invocation skips finished chunks (changing the radius/inputs into the same
 output directory wipes the stale chunks first). `--task-rows`, `--max-tuples`,
 and `--chunk-memory-gb` shape the plan. A lab smoke is at
 [`scripts/canfar-smoke.sh`](scripts/canfar-smoke.sh).
+
+**Multi-day runs finish.** `--retries N` re-runs the whole union on failure
+with backoff: mirror gaps refill incrementally and finished chunks are
+skipped, so a driver death (laptop sleep, SSH drop, OOM) resumes instead of
+restarting. Live progress reports `done/total tasks (%, rate, ETA)` at 1 Hz,
+`resume.state` tracks status/counts, and every event (attempt, mirror
+progress, chunk completion, done/failed) lands in `<out>/run.jsonl` — an
+append-only audit trail that survives the console.
 
 ## HATS output
 

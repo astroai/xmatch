@@ -310,8 +310,8 @@ def test_changelog_smoke_mirror_union_test_count() -> None:
     """Pin the mirroring/union test inventories documented in CHANGELOG.md.
 
     The v0.5 ``[Unreleased]`` "Added — HATS Mirroring + Distributed
-    Union" section claims 7 mirror tests (``tests/test_mirror_sync.py``),
-    8 ray-union tests (``tests/test_ray_union.py``), 3 CLI sync tests
+    Union" section claims 10 mirror tests (``tests/test_mirror_sync.py``),
+    9 ray-union tests (``tests/test_ray_union.py``), 3 CLI sync tests
     (``tests/test_cli_sync.py``) and 10 storage tests
     (``tests/test_storage.py``).  This guard pins all four counts.
 
@@ -331,15 +331,16 @@ def test_changelog_smoke_mirror_union_test_count() -> None:
     cli = _collect_test_names("cli_sync")
     storage = _collect_test_names("test_storage.py")
 
-    assert len(mirror) == 7, (
-        f"Expected 7 mirror tests in tests/test_mirror_sync.py, "
+    assert len(mirror) == 10, (
+        f"Expected 10 mirror tests in tests/test_mirror_sync.py, "
         f"but pytest collected {len(mirror)}.\n"
         f"Update the test file and the CHANGELOG.md bullet "
         f"'Added — HATS Mirroring + Distributed Union' together.\n\n"
         f"Collected {len(mirror)} test(s):\n  " + "\n  ".join(mirror)
     )
-    assert len(ray) == 9, (
-        f"Expected 9 ray-union tests (8 tests/test_ray_union.py + 1 CLI), "
+    assert len(ray) == 12, (
+        f"Expected 12 ray-union tests (9 tests/test_ray_union.py + 1 CLI + "
+        f"2 driver-retry tests in tests/test_crossmatch.py), "
         f"but pytest collected {len(ray)}.\n"
         f"Update the test files and the CHANGELOG.md bullet "
         f"'Added — HATS Mirroring + Distributed Union' together.\n\n"

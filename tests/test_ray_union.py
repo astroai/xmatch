@@ -594,3 +594,63 @@ def test_max_tuples_cap_full_product_under_cap_and_sep_cut() -> None:
     assert len(seps) == 10, seps
     expected = 0.00002 * np.arange(1, 11) * 3600.0  # 0.072" .. 0.72"
     assert np.allclose(np.sort(seps), expected, atol=0.01), (np.sort(seps), expected)
+
+
+# --------------------------------------------------------------------------- #
+# driver-level resilience: progress, resume.state, run.jsonl on a real run
+# --------------------------------------------------------------------------- #
+def test_driver_progress_state_and_run_log(tmp_path: Path) -> None:
+    """A real (tiny) ray-union leaves a progress trail + audit log."""
+    import json as _json
+
+    from xmatch import CrossMatch
+
+    a = _catalogue(
+        tmp_path / "a",
+        "cat_a",
+        pl.DataFrame(
+            {
+                "ra": [0.0, 0.5, 10.0],
+                "dec": [0.0, 0.5, 10.0],
+                "m": [1.0, 2.0, 3.0],
+            }
+        ),
+    )
+    b = _catalogue(
+        tmp_path / "b",
+        "cat_b",
+        pl.DataFrame(
+            {
+                "ra": [0.00001, 0.50001, 80.0],
+                "dec": [0.00001, 0.50001, -80.0],
+                "n": [4.0, 5.0, 6.0],
+            }
+        ),
+    )
+    out = tmp_path / "driver.hats"
+    msgs: List[str] = []
+    cm = CrossMatch()
+    cm.union_match(
+        [a.path, b.path],
+        output_file=out,
+        engine="ray-union",
+        radius_arcsec=1.5,
+        progress_cb=msgs.append,
+    )
+    assert (out / "run.jsonl").exists()
+    assert (out / "resume.state").exists()
+
+    state = _json.loads((out / "resume.state").read_text())
+    assert state["status"] == "done"
+    assert state["rows"] >= 3  # 2 matched pairs + 2 singles (1+2 == 3 rows)
+
+    events = [_json.loads(line) for line in (out / "run.jsonl").read_text().splitlines()]
+    kinds = [e["event"] for e in events]
+    assert kinds[0] == "attempt_start"  # crossmatch driver wrapper
+    assert "start" in kinds  # ray-union pipeline start
+    assert kinds[-1] == "done"
+    assert "chunk_done" in kinds
+    assert any("ray-union:" in m and "%" in m for m in msgs), msgs
+
+    joined = _read_output(out)
+    assert {c for c in ("ra", "dec", "m", "n", "_src_cats", "sep_arcsec")} <= set(joined.columns)

@@ -20,6 +20,7 @@ import difflib
 import logging
 import multiprocessing
 import os
+import time
 from dataclasses import replace
 from itertools import product as cartesian_product
 from pathlib import Path
@@ -70,6 +71,7 @@ DEFAULT_CONFIG_PATH = _find_default_config_path()
 
 # Defaults shared with the CLI for the engine='ray-union' route (mirror + plan).
 DEFAULT_SYNC_RATE_LIMIT = 1.0
+DEFAULT_MIN_FREE_GB = 10.0
 DEFAULT_SYNC_WORKERS = 8
 DEFAULT_HATS_THRESHOLD = 100_000
 DEFAULT_RADIUS_ARCSEC = 1.0
@@ -1079,10 +1081,14 @@ class CrossMatch:
 
         from . import ray_union
         from .mirror import ensure_mirrored, locate_mirrored
+        from .storage import assert_headroom, default_cache_root
 
         cache_cfg = self.config.get("cache", {}) if isinstance(self.config, dict) else {}
         cache_root = (
-            params.get("cache_root") or os.environ.get("XMATCH_CACHE_ROOT") or cache_cfg.get("root")
+            params.get("cache_root")
+            or os.environ.get("XMATCH_CACHE_ROOT")
+            or cache_cfg.get("root")
+            or default_cache_root()
         )
         synclimit = params.get("synclimit")
         rate_limit = float(
@@ -1092,50 +1098,125 @@ class CrossMatch:
         )
         threads = params.get("threads")
         workers = int(threads if threads is not None else DEFAULT_SYNC_WORKERS)
-
-        # Per-catalogue column overrides exactly like MatchRequest.from_legacy
-        # (--ra1/--dec1/--id1 apply to the first catalogue, --ra2/--dec2/--id2
-        # to the second); extras beyond catalogue 2 resolve like the sequential
-        # path — with no overrides.
-        sources: List[CatalogueSource] = []
-        for i, cat in enumerate(catalogues, start=1):
-            overrides = _side_overrides(params, min(i, 2))
-            sources.append(self.resolve_source(cat, overrides))
-        if not params.get("no_sync"):
-            sources = [
-                ensure_mirrored(
-                    src,
-                    cache_root=cache_root,
-                    rate_limit_rps=rate_limit,
-                    workers=workers,
-                    force=bool(params.get("force_sync")),
-                    progress_cb=progress_cb,
-                    hats_threshold=int(params.get("hats_threshold", DEFAULT_HATS_THRESHOLD)),
-                )
-                for src in sources
-            ]
-        else:
-            # --no-sync: require cached HATS copies up front, with the actionable
-            # "run xmatch sync" error instead of a path-shaped crash downstream.
-            for src in sources:
-                if src.access_method == "tap" or (
-                    src.access_method == "hats"
-                    and (src.access_identifier or "").startswith(("http://", "https://", "vos:"))
-                ):
-                    locate_mirrored(src, cache_root=cache_root)
-        ray_union.ray_union_match(
-            sources,
-            sep_arcsec=float(params.get("radius_arcsec", DEFAULT_RADIUS_ARCSEC)),
-            output_file=str(output_file),
-            hats_threshold=int(params.get("hats_threshold", DEFAULT_HATS_THRESHOLD)),
-            task_rows=params.get("task_rows"),
-            chunk_memory_gb=params.get("chunk_memory_gb"),
-            max_tuples=params.get("max_tuples"),
-            cache_root=cache_root,
-            progress_cb=progress_cb,
+        min_free = float(
+            params.get("min_free_gb")
+            or os.environ.get("XMATCH_MIN_FREE_GB")
+            or cache_cfg.get("min_free_gb")
+            or DEFAULT_MIN_FREE_GB
         )
-        self.last_ray_union_plan = ray_union.last_plan()  # for tests / doctor
-        return None
+        # Fail-fast headroom: a multi-day run must not die at 95% into a full disk.
+        assert_headroom(cache_root, min_free, f"cache root '{cache_root}'")
+        out_dir = Path(str(output_file))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        assert_headroom(str(out_dir.parent), min_free, f"output directory '{out_dir.parent}'")
+
+        # Append-only audit trail for day-scale runs: <out>/run.jsonl gains one
+        # JSON object per event (attempt, mirror progress, chunk progress, done).
+        run_log = out_dir / "run.jsonl"
+        import json as _json
+
+        def _append_run(event: str, **fields: Any) -> None:
+            try:
+                with open(run_log, "a") as fh:
+                    fh.write(
+                        _json.dumps(
+                            {
+                                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                "event": event,
+                                **fields,
+                            },
+                            default=str,
+                        )
+                        + "\n"
+                    )
+            except OSError:  # never let logging kill the run
+                pass
+
+        def progress(msg: str) -> None:
+            if progress_cb:
+                progress_cb(msg)
+            _append_run("progress", msg=msg)
+
+        fresh_after = params.get("fresh_after")
+        if fresh_after is not None:
+            fresh_after = float(fresh_after)
+        retries = int(params.get("retries") or 0)
+
+        # Driver-level retry: mirror gaps refill incrementally and finished
+        # chunks are skipped on re-entry, so a failed attempt (driver OOM,
+        # SSH drop, a day-long WAN outage) resumes from where it died.
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                _append_run("attempt_start", attempt=attempt)
+                # Per-catalogue column overrides exactly like MatchRequest.from_legacy
+                # (--ra1/--dec1/--id1 apply to the first catalogue, --ra2/--dec2/--id2
+                # to the second); extras beyond catalogue 2 resolve like the sequential
+                # path — with no overrides.
+                sources: List[CatalogueSource] = []
+                for i, cat in enumerate(catalogues, start=1):
+                    overrides = _side_overrides(params, min(i, 2))
+                    sources.append(self.resolve_source(cat, overrides))
+                if not params.get("no_sync"):
+                    sources = [
+                        ensure_mirrored(
+                            src,
+                            cache_root=cache_root,
+                            rate_limit_rps=rate_limit,
+                            workers=workers,
+                            force=bool(params.get("force_sync")),
+                            progress_cb=progress,
+                            hats_threshold=int(
+                                params.get("hats_threshold", DEFAULT_HATS_THRESHOLD)
+                            ),
+                            fresh_after=fresh_after,
+                            min_free_gb=min_free,
+                        )
+                        for src in sources
+                    ]
+                else:
+                    # --no-sync: require cached HATS copies up front, with the actionable
+                    # "run xmatch sync" error instead of a path-shaped crash downstream.
+                    for src in sources:
+                        if src.access_method == "tap" or (
+                            src.access_method == "hats"
+                            and (src.access_identifier or "").startswith(
+                                ("http://", "https://", "vos:")
+                            )
+                        ):
+                            locate_mirrored(src, cache_root=cache_root)
+                _append_run("mirror_done", attempt=attempt, sources=[s.name for s in sources])
+                ray_union.ray_union_match(
+                    sources,
+                    sep_arcsec=float(params.get("radius_arcsec", DEFAULT_RADIUS_ARCSEC)),
+                    output_file=str(output_file),
+                    hats_threshold=int(params.get("hats_threshold", DEFAULT_HATS_THRESHOLD)),
+                    task_rows=params.get("task_rows"),
+                    chunk_memory_gb=params.get("chunk_memory_gb"),
+                    max_tuples=params.get("max_tuples"),
+                    cache_root=cache_root,
+                    progress_cb=progress,
+                )
+                self.last_ray_union_plan = ray_union.last_plan()  # for tests / doctor
+                _append_run("done", attempt=attempt)
+                return None
+            except Exception as exc:  # noqa: BLE001
+                if attempt > retries:
+                    _append_run("failed", attempt=attempt, error=str(exc))
+                    raise
+                delay = min(10.0 * 2 ** (attempt - 1), 300.0)
+                logger.warning(
+                    "ray-union attempt %d/%d failed (%s: %s); backing off %.0fs and resuming "
+                    "(mirror gaps refill incrementally, finished chunks are skipped)",
+                    attempt,
+                    retries + 1,
+                    type(exc).__name__,
+                    exc,
+                    delay,
+                )
+                _append_run("attempt_failed", attempt=attempt, error=str(exc), backoff_s=delay)
+                time.sleep(delay)
 
     def _multi_match_impl(
         self,

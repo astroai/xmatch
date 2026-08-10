@@ -687,6 +687,9 @@ def _build_params(args) -> dict:
         cache_root=getattr(args, "cache_root", None),
         max_tuples=getattr(args, "max_tuples", None),
         chunk_memory_gb=getattr(args, "chunk_memory_gb", None),
+        retries=getattr(args, "retries", None),
+        fresh_after=getattr(args, "fresh_after", None),
+        min_free_gb=getattr(args, "min_free_gb", None),
     )
 
 
@@ -843,6 +846,29 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         dest="chunk_memory_gb",
         type=float,
         help="Per-chunk candidate-pool memory guard in GiB (default 8.0).",
+    )
+    g_ray.add_argument(
+        "--retries",
+        dest="retries",
+        type=int,
+        default=0,
+        help="Driver-level retries for the distributed union: on failure, re-run "
+        "the same request after a backoff (mirror gaps refill incrementally, "
+        "finished chunks are skipped). Default 0 (no retries).",
+    )
+    g_ray.add_argument(
+        "--fresh-after",
+        dest="fresh_after",
+        type=float,
+        help="Skip the mirror change-probe for copies fully synced within this many "
+        "days (default: always probe).",
+    )
+    g_ray.add_argument(
+        "--min-free-gb",
+        dest="min_free_gb",
+        type=float,
+        help="Fail fast when the cache root or output filesystem has less free space "
+        "than this (default 10.0; env XMATCH_MIN_FREE_GB overrides).",
     )
     g_alg.add_argument(
         "--find",
@@ -1180,6 +1206,29 @@ def _build_match_subparser() -> argparse.ArgumentParser:
         type=float,
         help="Per-chunk candidate-pool memory guard in GiB (default 8.0).",
     )
+    g_ray.add_argument(
+        "--retries",
+        dest="retries",
+        type=int,
+        default=0,
+        help="Driver-level retries for the distributed union: on failure, re-run "
+        "the same request after a backoff (mirror gaps refill incrementally, "
+        "finished chunks are skipped). Default 0 (no retries).",
+    )
+    g_ray.add_argument(
+        "--fresh-after",
+        dest="fresh_after",
+        type=float,
+        help="Skip the mirror change-probe for copies fully synced within this many "
+        "days (default: always probe).",
+    )
+    g_ray.add_argument(
+        "--min-free-gb",
+        dest="min_free_gb",
+        type=float,
+        help="Fail fast when the cache root or output filesystem has less free space "
+        "than this (default 10.0; env XMATCH_MIN_FREE_GB overrides).",
+    )
 
     g_id = parser.add_argument_group("ID join")
     g_id.add_argument(
@@ -1343,6 +1392,20 @@ def _build_sync_subparser() -> argparse.ArgumentParser:
         type=int,
         default=100_000,
         help="Max rows per HEALPix pixel for the converted HATS catalogue.",
+    )
+    parser.add_argument(
+        "--fresh-after",
+        dest="fresh_after",
+        type=float,
+        help="Skip the change-probe for copies fully synced within this many days "
+        "(default: always probe).",
+    )
+    parser.add_argument(
+        "--min-free-gb",
+        dest="min_free_gb",
+        type=float,
+        help="Fail fast when the cache root has less free space than this "
+        "(default 10.0; env XMATCH_MIN_FREE_GB overrides).",
     )
     _add_global_options(parser)
     return parser
@@ -2349,6 +2412,8 @@ def _run_sync_subcommand(argv: Sequence[str]) -> int:
                 workers=int(args.workers),
                 force=bool(args.force_sync),
                 hats_threshold=int(args.hats_threshold),
+                fresh_after=args.fresh_after,
+                min_free_gb=args.min_free_gb,
             )
             total.merge(stats)
             console.info(

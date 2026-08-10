@@ -51,6 +51,7 @@ import itertools
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -1151,6 +1152,30 @@ def _assemble(plan: UnionPlan) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # public driver
 # --------------------------------------------------------------------------- #
+def _append_event(out: Path, event: str, **fields: Any) -> None:
+    """Append one JSON object to ``<out>/run.jsonl`` (best-effort, never fatal).
+
+    The audit trail for day-scale runs: every driver attempt, mirror progress
+    message, chunk completion, and the final ``done`` record land here so a
+    watched run leaves a verifiable log even when the console is lost.
+    """
+    try:
+        with open(out / "run.jsonl", "a") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "event": event,
+                        **fields,
+                    },
+                    default=str,
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
 def ray_union_match(
     sources: Sequence[CatalogueSource],
     *,
@@ -1240,13 +1265,56 @@ def ray_union_match(
         chunk_fn = _chunk_task_factory()
         rest_fn = _rest_task_factory()
         todo = []
+        key_of = {}
         for chunk in plan.chunks:
             if not (out / "chunks" / f"{chunk.key}.parquet").exists():
-                todo.append(chunk_fn.remote(plan_ref, chunk))
+                fref = chunk_fn.remote(plan_ref, chunk)
+                key_of[fref] = chunk.key
+                todo.append(fref)
         for rest in plan.rest:
-            if not (out / "chunks" / f"rest-{rest.cat}-{rest.part_idx:05d}.parquet").exists():
-                todo.append(rest_fn.remote(plan_ref, rest))
-        ray.get(todo)  # rest runs are fire-and-forget; gather before assemble
+            fname = f"rest-{rest.cat}-{rest.part_idx:05d}.parquet"
+            if not (out / "chunks" / fname).exists():
+                fref = rest_fn.remote(plan_ref, rest)
+                key_of[fref] = fname.removesuffix(".parquet")
+                todo.append(fref)
+        total = len(todo)
+        if progress_cb:
+            progress_cb(f"ray-union: {total} task(s) to run")
+        _append_event(out, "start", tasks=total)
+        started_at = time.time()
+        done = 0
+        last_report = 0.0
+        while todo:
+            ready, todo = ray.wait(todo, num_returns=min(32, len(todo)), timeout=5.0)
+            if not ready:
+                continue
+            ray.get(ready)  # surface task errors (Ray retries each task first)
+            done += len(ready)
+            for fref in ready:
+                _append_event(out, "chunk_done", key=key_of.get(fref))
+            now = time.time()
+            if now - last_report >= 1.0:
+                last_report = now
+                rate = done / max(now - started_at, 1e-6)
+                eta = int((total - done) / rate) if rate > 0 else None
+                eta_s = f", ETA {eta}s" if eta is not None else ""
+                if progress_cb:
+                    progress_cb(
+                        f"ray-union: {done}/{total} tasks "
+                        f"({100.0 * done / max(total, 1):.0f}%, {rate:.1f}/s{eta_s})"
+                    )
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "status": "running",
+                            "done": done,
+                            "total": total,
+                            "fingerprint": fingerprint,
+                            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        },
+                        indent=2,
+                    )
+                )
         assembled = _assemble(plan)
         rows = int(assembled.get("rows", 0))  # assembled total, not the task delta
         (out / _STATE_NAME).write_text(
@@ -1260,9 +1328,8 @@ def ray_union_match(
                 indent=2,
             )
         )
+        _append_event(out, "done", rows=rows, chunks=assembled["chunks"])
         if progress_cb:
-            progress_cb(
-                f"ray-union: {len(todo)} tasks, {rows} rows, {assembled['chunks']} partitions"
-            )
+            progress_cb(f"ray-union: {total} tasks, {rows} rows, {assembled['chunks']} partitions")
     finally:
         ray.shutdown()
