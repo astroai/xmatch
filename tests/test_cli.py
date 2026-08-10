@@ -389,7 +389,7 @@ def test_cli_completion_bash_emits_script(capsys):
     # Embedded catalogue list (must include at least one real name):
     assert "_xmatch_catalogues=" in out
     assert "gaia" in out, "bundled gaia_esa catalogue should be embedded"
-    # All six subcommands advertised:
+    # All subcommands advertised:
     assert "match list describe discover search adopt completion" in out
     # compgen against the catalogue var:
     assert 'compgen -W "${_xmatch_catalogues[*]}"' in out
@@ -404,7 +404,7 @@ def test_cli_completion_zsh_emits_script(capsys):
     assert "#compdef xmatch" in out
     assert "_xmatch_catalogues=" in out
     assert "gaia" in out
-    # All six subcommands advertised with descriptions:
+    # All subcommands advertised with descriptions:
     for sub in ("match", "list", "describe", "discover", "search", "completion"):
         assert sub in out, f"zsh completion missing subcommand {sub!r}"
     # Uses _describe (the modern zsh helper):
@@ -419,7 +419,7 @@ def test_cli_completion_fish_emits_script(capsys):
     out = capsys.readouterr().out
     assert "complete -c xmatch" in out
     assert "gaia" in out, "fish script should embed real catalogue names"
-    # All six subcommands advertised:
+    # All subcommands advertised:
     assert "match list describe discover search adopt completion" in out
     # Fish predicates for each subcommand family:
     assert "_xmatch_needs_catalogue" in out
