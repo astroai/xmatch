@@ -138,6 +138,7 @@ explicit subcommands.
 | Browse a remote endpoint          | `xmatch discover noirlab`                             |
 | Schema + YAML hint for a table    | `xmatch discover noirlab --schema nsc_dr2.object`     |
 | Adopt a remote table into config  | `xmatch adopt vizier II/349/ps1 --name ps1`            |
+| Mirror remotes into the HATS cache | `xmatch sync gaia allwise twomass`                     |
 
 ```bash
 # Two local files (coordinate columns auto-detected); CSV result on stdout
@@ -190,11 +191,11 @@ xmatch match gaia allwise twomass --engine ray-union -o master.hats --max-tuples
 
 ### Help, colour, and discovery
 
-* Every command has rich, grouped `--help`: `xmatch --help` shows the five
+* Every command has rich, grouped `--help`: `xmatch --help` shows all
   subcommands and a one-screen example block; `xmatch match --help` shows
   only the match options, grouped into **Output / Geometry / Match algorithm
-  / ID join / Probabilistic / Proper motion / Advanced filters /
-  Matcher-specific / Region** sections.
+  / Distributed (engine=ray-union) / ID join / Probabilistic / Proper motion
+  / Advanced filters / Matcher-specific / Region** sections.
 * Output is **auto-colourised** when stdout and stderr are TTYs, and
   automatically disabled otherwise (CI logs, pipes, `pytest -s`, etc.).
   Override with `--no-color`, or set `NO_COLOR=1` (or `XMATCH_NO_COLOR=1`)
@@ -217,7 +218,8 @@ applies only to `sky`).
 inputs exceed the budget. It currently accepts two local CSV/Parquet catalogues,
 `sky` or `skyerr`, inner or full-outer (`--join 1or2`) output, and Parquet/CSV
 output. A two-catalogue `--union` uses the same spill path and adds `_src_cats`;
-N-way union is not yet supported. Scratch partitions are removed after success
+N-way union via the spill path is not yet supported (use `--engine ray-union`
+for distributed N-way unions). Scratch partitions are removed after success
 or failure and the final file is replaced atomically. Large FITS, anti/one-sided
 outer joins, probabilistic, proper-motion, and advanced-filter requests fail
 explicitly instead of silently collecting.
@@ -441,7 +443,7 @@ xmatch gaia allwise_dl twomass_dl --union -r 1.5 -o master.hats --hats-threshold
 
 **Requirements:** HATS output needs the optional `lsdb` package (`pip install lsdb`),
 except `--engine ray-union`, which writes HATS natively via `hats` + `cdshealpix`.
-The `--hats-threshold` flag (default 100 000) controls the maximum rows per
+The `--hats-threshold` flag (default 100,000) controls the maximum rows per
 HEALPix pixel — lower values give finer spatial partitioning at the cost of
 more files.
 

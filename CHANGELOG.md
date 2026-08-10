@@ -477,6 +477,15 @@ common case for modern catalogues such as Gaia.
 * Enhanced `--list` (table-format output with archive, access, row estimates)
   and `--describe` (richer output with error columns, default columns).
 
+* `astro_utils.sky_extent_from_frame(frame, ra_col, dec_col) -> Dict | None`
+  computes the bounding cone of a polars `DataFrame`/`LazyFrame` purely as
+  polars aggregations. The eager numpy version (`sky_extent`) is unchanged.
+* `docs/API.md` — concise public surface reference.
+* `docs/AUDIT.md` — the audit's findings + rollout. (`docs/` is a new top-level
+  folder; not deleted from the repo root.)
+* IO tests verify bytes-decoding and multi-D column dropping.
+* `tests/test_astro_utils.py` covers the new lazy `sky_extent_from_frame`.
+
 ### Changed
 
 * `io_utils.write_frame()` now uses polars streaming engine for
@@ -500,31 +509,6 @@ common case for modern catalogues such as Gaia.
   `MatchRequest` instead of `spec + params` dict.
 * Removed `_side_overrides` helper (superseded by `SideOverrides.as_dict()`).
 * Version bumped to `0.4.0`.
-
-### Notes
-
-* The legacy `**params` API is still fully supported via
-  `MatchRequest.from_legacy()`. No breaking changes.
-* `SideOverrides.as_dict()` no longer carries `columns` (consumed later).
-
----
-
-## [Unreleased] — v0.3 audit batch
-
-### Added
-
-* `astro_utils.sky_extent_from_frame(frame, ra_col, dec_col) -> Dict | None`
-  computes the bounding cone of a polars `DataFrame`/`LazyFrame` purely as
-  polars aggregations. The eager numpy version (`sky_extent`) is unchanged.
-* `MatchSpec` was *not* extended — placeholder kept open per `MatchRequest`
-  in AUDIT.md (deferred to v0.4).
-* `docs/API.md` — concise public surface reference.
-* `docs/AUDIT.md` — the audit's findings + rollout. (`docs/` is a new top-level
-  folder; not deleted from the repo root.)
-* IO tests verify bytes-decoding and multi-D column dropping.
-* `tests/test_astro_utils.py` covers the new lazy `sky_extent_from_frame`.
-
-### Changed
 
 * `io_utils.astropy_table_to_polars` and `polars_to_astropy` now use
   `Table.to_arrow` / `Table.from_arrow` (Apache Arrow) instead of pandas.
@@ -558,6 +542,6 @@ common case for modern catalogues such as Gaia.
 
 ### Notes
 
-* No deprecations yet — Tier 2 changes (the `MatchRequest` dataclass and the
-  real-data benchmark suite) require breaking-change consent and remain on the
-  deferred list (see `AUDIT.md`).
+* The legacy `**params` API is still fully supported via
+  `MatchRequest.from_legacy()`. No breaking changes.
+* `SideOverrides.as_dict()` no longer carries `columns` (consumed later).

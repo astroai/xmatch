@@ -8,8 +8,9 @@ The CLI is split into:
 * :class:`Console` — a tiny ANSI-colour helper that auto-disables for
   non-TTY streams, ``NO_COLOR`` (https://no-color.org/), ``XMATCH_NO_COLOR``,
   or ``--no-color``.
-* Five dedicated subcommand parsers (``match``, ``list``, ``describe``,
-  ``discover``, ``search``).  Each lives in its own function that produces
+* Nine dedicated subcommand parsers (``match``, ``list``, ``describe``,
+  ``discover``, ``search``, ``adopt``, ``sync``, ``completion``, ``doctor``).
+  Each lives in its own function that produces
   an argparse ``Namespace`` plus a colour-aware printer so help, output and
   errors are easy to scan.
 * A backwards-compatible legacy flat parser that retains every original
@@ -854,9 +855,10 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         choices=["auto", "stilts", "astropy", "fast", "torchsky", "zone", "ray", "ray-union"],
         default="auto",
         help=(
-            "Sky-match engine (fast=scipy.cKDTree, torchsky=tensor-native nearest, "
-            "zone=HEALPix, ray=distributed, ray-union=distributed N-way outer join on "
-            "Ray with mirrored HATS inputs)."
+            "Sky-match engine (auto=default dispatch, stilts=Java tmatch2, "
+            "astropy=pure-Python KD-tree, fast=scipy.cKDTree, torchsky=tensor-native, "
+            "zone=HEALPix, ray=distributed zone match, ray-union=distributed N-way "
+            "outer join on Ray with mirrored HATS inputs)."
         ),
     )
 
@@ -1122,9 +1124,10 @@ def _build_match_subparser() -> argparse.ArgumentParser:
         choices=["auto", "stilts", "astropy", "fast", "torchsky", "zone", "ray", "ray-union"],
         default="auto",
         help=(
-            "Sky-match engine (fast=scipy.cKDTree, torchsky=tensor-native nearest, "
-            "zone=HEALPix, ray=distributed, ray-union=distributed N-way outer join on "
-            "Ray with mirrored HATS inputs)."
+            "Sky-match engine (auto=default dispatch, stilts=Java tmatch2, "
+            "astropy=pure-Python KD-tree, fast=scipy.cKDTree, torchsky=tensor-native, "
+            "zone=HEALPix, ray=distributed zone match, ray-union=distributed N-way "
+            "outer join on Ray with mirrored HATS inputs)."
         ),
     )
     g_alg.add_argument(
@@ -1295,7 +1298,7 @@ def _build_sync_subparser() -> argparse.ArgumentParser:
             "Mirror remote catalogues (TAP, or HATS over HTTP / vos:) into the durable "
             "cache root as HATS, with incremental re-sync on later runs."
         ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
             "  xmatch sync gaia allwise twomass\n"
@@ -1588,7 +1591,7 @@ _xmatch_endpoints=(
 {ep_array}
 )
 _xmatch_shells=( bash zsh fish )
-_xmatch_subcommands=( match list describe discover search adopt completion sync )
+_xmatch_subcommands=( match list describe discover search adopt completion sync doctor )
 
 _xmatch() {{
     local cur="" words="" cword=0 i subcmd=""
@@ -1665,6 +1668,7 @@ _xmatch_subcommands=(
     'search:search every endpoint for tables matching a substring'
     'adopt:save a remote table into the user config overlay'
     'completion:emit a shell completion script'
+    'doctor:report drift against the bundled baseline'
 )
 _xmatch_catalogues=( {cat_array} )
 _xmatch_endpoints=( {ep_array} )
@@ -1737,7 +1741,7 @@ function _xmatch_needs_shell
     test "$cmd" = completion
 end
 
-set -l _xmatch_subcommands match list describe discover search adopt completion sync
+set -l _xmatch_subcommands match list describe discover search adopt completion sync doctor
 
 {cat_lines}
 
@@ -1768,7 +1772,7 @@ def _build_top_parser() -> argparse.ArgumentParser:
     argparse's subparsers "ambiguous option" restrictions.  This parser
     also serves as the top-level help blurb so users running
     ``xmatch --help`` see the friendly one-screen summary instead of the
-    full 40-flag flat-form help.
+    full flat-form help.
     """
     subcommand_blurb = (
         "\n\nAvailable commands:\n"
@@ -1779,6 +1783,8 @@ def _build_top_parser() -> argparse.ArgumentParser:
         "  search      search every endpoint for tables matching a substring\n"
         "  adopt       save a remote table into ~/.config/xmatch/xmatch.yaml\n"
         "  sync        mirror remote catalogues into the local HATS cache\n"
+        "  completion  emit a shell tab-completion script (bash | zsh | fish)\n"
+        "  doctor      report drift between your xmatch.yaml and the bundled baseline\n"
         "\n"
         "Run `xmatch COMMAND --help` for command-specific options.  The legacy\n"
         "flat form (`xmatch --list`, `xmatch --describe NAME`, `xmatch --search`,\n"
@@ -1810,10 +1816,12 @@ def list_catalogues(cm: CrossMatch, console: Console) -> None:
     console.header(header)
     console.dim_print("\u2500" * _visible_len(header))
     # Prefer primary surveys; demote archive mirrors of the same survey.
+    # With `gaia` defaulting to CDS VizieR, gaia_cds is primary and the
+    # ESA / NOIRLab mirrors are demoted.
     primary: list[str] = []
     mirrors: list[str] = []
     for name in sorted(cm.catalogues_config):
-        if name in {"gaia_cds", "gaia_noao"}:
+        if name in {"gaia_esa", "gaia_noao"}:
             mirrors.append(name)
         else:
             primary.append(name)
@@ -1834,7 +1842,7 @@ def list_catalogues(cm: CrossMatch, console: Console) -> None:
         _emit(name)
     if mirrors:
         console.dim_print("")
-        console.dim_print("  Archive mirrors (prefer the short name above):")
+        console.dim_print("  Alternative Gaia archives (gaia defaults to CDS VizieR):")
         for name in mirrors:
             _emit(name, mirror=True)
     sys.stdout.write("\n")
@@ -2900,7 +2908,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     Dispatch rules (in order):
 
     * ``xmatch --help`` / ``xmatch -h``  → top-level help blurb showing the
-      five subcommands and a few examples (via :func:`_build_top_parser`).
+      subcommands and a few examples (via :func:`_build_top_parser`).
     * ``xmatch --version``            → handled natively by every parser
       via ``argparse``'s ``action="version"`` (prints version, exits 0).
     * ``xmatch <subcommand> …``      → dedicated subcommand parser, with

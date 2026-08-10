@@ -1042,7 +1042,8 @@ class CrossMatch:
             elif len(catalogues) > 2:
                 raise CrossMatchError(
                     "Bounded-memory union matching currently supports exactly two local "
-                    "CSV/Parquet catalogues; N-way spill matching is not yet supported."
+                    "CSV/Parquet catalogues; N-way spill matching is not yet supported. "
+                    "Use --engine ray-union for distributed N-way unions."
                 )
             else:
                 raise CrossMatchError(
