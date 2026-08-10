@@ -2,6 +2,7 @@
 
 import sys
 import types
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -15,6 +16,18 @@ from xmatch.sources import CatalogueSource
 @pytest.fixture
 def cm():
     return CrossMatch()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cache(monkeypatch, tmp_path):
+    """Pin the durable cache root to an empty temp dir.
+
+    The pairwise cone-download path now serves from a mirrored HATS copy
+    when one exists; without this fixture a mirror on the developer's
+    machine (~/.cache/xmatch) would silently divert the mocked-download
+    tests.
+    """
+    monkeypatch.setenv("XMATCH_CACHE_ROOT", str(tmp_path / "cache"))
 
 
 def test_local_vs_remote_tap_downloads_then_matches(cm, monkeypatch):
@@ -263,3 +276,67 @@ def test_cds_xmatch_local_remote_rejoins_on_surrogate_id(monkeypatch):
     assert out.height == 1
     assert out["my_id"][0] == 101  # original local column preserved
     assert "remote_mag" in out.columns
+
+
+def _write_fake_mirror(cm, tmp_path, rows):
+    """Build a minimal mirrored HATS copy for ``gaia_cds`` under tmp_path cache."""
+    from xmatch.mirror import _safe_name, _version_dir
+
+    src = cm.resolve_source("gaia_cds", {})
+    hats = Path(tmp_path / "cache") / f"{_safe_name(src.name)}/{_version_dir(src)}"
+    part = hats / "dataset" / "Norder=0" / "Dir=2" / "Npix=0"
+    part.mkdir(parents=True)
+    rows.write_parquet(part / "Npix=0.parquet")
+    (hats / "properties").write_text("hats_col_ra=RA_ICRS\nhats_col_dec=DE_ICRS\n")
+
+
+def test_mirrored_hats_cone_serves_download_without_tap(cm, monkeypatch, tmp_path):
+    """A mirrored HATS copy in the cache serves the pairwise cone download:
+    no TAP call happens and rows come from the local partitions."""
+    import xmatch.remote_tap as rt
+
+    def _no_tap(*args, **kwargs):
+        raise AssertionError("mirrored cone must not hit TAP")
+
+    monkeypatch.setattr(rt, "download_from_tap", _no_tap)
+    _write_fake_mirror(
+        cm,
+        tmp_path,
+        pl.DataFrame(
+            {
+                "RA_ICRS": [10.0, 10.00015, 80.0],
+                "DE_ICRS": [5.0, 5.00015, -30.0],
+                "Source": [1, 999, 2],
+            }
+        ),
+    )
+
+    local = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
+    out = cm.crossmatch(local, "gaia_cds", radius_arcsec=1.5)
+
+    assert out.height == 1
+    assert "Source" in out.columns  # mirror columns served, not the TAP schema
+    assert out["Source"][0] == 1  # nearest mirror row, far row filtered by the cone
+
+
+def test_mirrored_cone_falls_back_to_tap_when_column_missing(cm, monkeypatch, tmp_path):
+    """Requested columns the mirror does not hold fall back to the live TAP."""
+    import xmatch.remote_tap as rt
+
+    captured = {}
+
+    def fake_download(src, **kwargs):
+        captured["columns"] = kwargs.get("columns")
+        return pl.DataFrame({"RA_ICRS": [10.00005], "DE_ICRS": [5.00005], "Source": [1]})
+
+    monkeypatch.setattr(rt, "download_from_tap", fake_download)
+    _write_fake_mirror(
+        cm,
+        tmp_path,
+        pl.DataFrame({"RA_ICRS": [10.0], "DE_ICRS": [5.0], "Source": [1]}),
+    )
+
+    local = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
+    cm.crossmatch(local, "gaia_cds", radius_arcsec=1.0, columns_2=["ra", "dec", "source_id"])
+
+    assert captured["columns"] == ["ra", "dec", "source_id"]

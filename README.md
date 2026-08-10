@@ -406,6 +406,10 @@ xmatch sync gaia --force
 * TAP re-syncs probe stored key windows with `COUNT(*)` and refetch only
   moved pages (plus appended tails); `--rate-limit`, `--threads`,
   `--hats-threshold`, and `--no-sync`/`--synclimit` tune the data plane.
+* Plain pairwise matches (local × remote, remote × remote) serve their
+  cone downloads from the mirrored copy automatically when one exists —
+  no TAP round-trip. Requests the mirror cannot satisfy (extra columns,
+  target-epoch motion fields) fall back to the live service.
 
 The distributed union engine consumes whatever `sync` produces:
 

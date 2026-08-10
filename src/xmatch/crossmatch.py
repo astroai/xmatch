@@ -94,6 +94,125 @@ def _side_overrides(params: Dict[str, Any], side: int) -> Dict[str, Any]:
     return out
 
 
+def _angsep_deg(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
+    """Great-circle separation in degrees."""
+    r1, d1, r2, d2 = np.radians((ra1, dec1, ra2, dec2))
+    return float(
+        np.degrees(
+            np.arccos(
+                np.clip(
+                    np.sin(d1) * np.sin(d2) + np.cos(d1) * np.cos(d2) * np.cos(r1 - r2),
+                    -1.0,
+                    1.0,
+                )
+            )
+        )
+    )
+
+
+def _cone_filter_frame(
+    frame: "pl.DataFrame",
+    ra_col: str,
+    dec_col: str,
+    ra_deg: float,
+    dec_deg: float,
+    radius_deg: float,
+) -> "pl.DataFrame":
+    """Keep rows within ``radius_deg`` of the cone centre (vectorised polars).
+
+    The pixel-level cone test in :func:`_try_mirrored_cone` is deliberately
+    over-inclusive; this exact radial filter runs over the concatenated
+    partitions (with a tiny float epsilon).
+    """
+    dec_r = np.radians(dec_deg)
+    ra_r = np.radians(ra_deg)
+    dec_expr = pl.col(dec_col).cast(pl.Float64)
+    ra_expr = pl.col(ra_col).cast(pl.Float64)
+    dist = (
+        dec_expr.radians().sin() * np.sin(dec_r)
+        + dec_expr.radians().cos() * np.cos(dec_r) * (ra_expr.radians() - ra_r).cos()
+    ).arccos()
+    return frame.filter(dist <= np.radians(radius_deg) + 1e-9)
+
+
+def _try_mirrored_cone(
+    src: "CatalogueSource",
+    columns: Optional[List[str]],
+    ra: float,
+    dec: float,
+    radius_deg: float,
+) -> Optional["pl.DataFrame"]:
+    """Serve a cone download from the mirrored HATS cache copy, when present.
+
+    Returns a DataFrame when a mirror exists, is on local storage, and holds
+    every requested column; ``None`` falls back to the live remote (no
+    mirror, missing columns — e.g. target-epoch motion columns — or an
+    unreadable local copy).  When ``columns`` is ``None`` (plain sky match,
+    TAP ``SELECT *``) the mirror's own column set is served.
+    """
+    if src.access_method not in ("tap", "hats"):
+        return None
+    try:
+        from .mirror import locate_mirrored
+        from .storage import default_cache_root
+
+        root, rel = locate_mirrored(src, cache_root=default_cache_root())
+    except CrossMatchError:
+        return None  # not mirrored yet — plain remote download
+    if str(root).startswith("vos:") or not Path(root).is_dir():
+        return None  # vos: roots need staging; the ray-union engine owns those
+    try:
+        from .hats_native import _ra_dec_columns, list_hats_pixels
+        from .ray_union import _pixel_center_deg, _pixel_diagonal_deg
+
+        hats_dir = Path(root) / rel
+        partitions = list_hats_pixels(hats_dir)
+        if not partitions:
+            return None
+        schema: Optional[set] = None
+        first_files: Optional[List[Path]] = None
+        for _order, _pix, part_path in partitions:
+            files = [part_path] if part_path.is_file() else sorted(part_path.glob("*.parquet"))
+            if files:
+                schema = set(pl.scan_parquet(files[0]).collect_schema().names())
+                first_files = files
+                break
+        if schema is None or first_files is None:
+            return None
+        want = set(columns) if columns else schema
+        if not want.issubset(schema):
+            return None
+        ra_col, dec_col = _ra_dec_columns(src, hats_dir)
+        if ra_col not in schema or dec_col not in schema:
+            return None
+        lazy_parts: List["pl.LazyFrame"] = []
+        for order, pix, part_path in partitions:
+            cen_ra, cen_dec = _pixel_center_deg(order, pix)
+            if _angsep_deg(cen_ra, cen_dec, ra, dec) > radius_deg + _pixel_diagonal_deg(order):
+                continue
+            if part_path.is_file():
+                lazy_parts.append(pl.scan_parquet(part_path))
+            else:
+                files = sorted(part_path.glob("*.parquet"))
+                if files:
+                    lazy_parts.append(pl.scan_parquet(files))
+        if not lazy_parts:
+            return pl.scan_parquet(first_files).head(0).collect()
+        frame = pl.concat(lazy_parts, how="vertical").collect()
+        out = _cone_filter_frame(frame, ra_col, dec_col, ra, dec, radius_deg)
+        logger.info(
+            "served cone for '%s' from the mirrored HATS cache (%d rows)", src.name, out.height
+        )
+        return out
+    except Exception as exc:  # corrupted/incomplete cache -> live remote
+        logger.warning(
+            "mirrored HATS copy of '%s' unreadable (%s); falling back to the remote",
+            src.name,
+            exc,
+        )
+        return None
+
+
 class CrossMatch:
     """Configuration holder and crossmatch entry point."""
 
@@ -1707,6 +1826,9 @@ class CrossMatch:
             columns = list(
                 dict.fromkeys([*(columns or src.default_columns or []), *filter(None, required)])
             )
+        mirrored = _try_mirrored_cone(src, columns, ra, dec, radius_deg)
+        if mirrored is not None:
+            return mirrored
         auth_session = self.auth_config.get_auth_session(src.archive)
         if src.access_method == "tap":
             from .remote_tap import download_from_tap

@@ -131,6 +131,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `gaia_esa` (`gaiadr3.gaia_source`, lowercase columns) for users who need
   the archive's native schema or its full astrometric covariance block.
 
+### Changed — Mirroring
+
+* **Pairwise matches reuse mirrored copies**: plain `xmatch match` cone
+  downloads (local × remote and remote × remote paths) are served from the
+  durable HATS cache when a mirrored copy exists and holds the requested
+  columns — no TAP round-trip. Requests the mirror cannot satisfy
+  (extra columns, target-epoch motion fields) fall back to the live
+  service automatically; `xmatch sync <name>` still materialises the copy.
+
 ### Changed — Performance
 
 * **HEALPix margin caching**: `_zone_match_healpix` now merges all neighbouring
