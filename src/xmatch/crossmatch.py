@@ -320,7 +320,9 @@ class CrossMatch:
     def get_catalogue_config(self, name: str) -> Dict[str, Any]:
         name = self.resolve_name(name)
         if name not in self.catalogues_config:
-            raise CrossMatchError(f"Catalogue '{name}' not found in configuration.")
+            exc = CrossMatchError(f"Catalogue '{name}' not found in configuration.")
+            exc.source = name
+            raise exc
         cat = self.catalogues_config[name]
         archive = cat.get("archive")
         service_id = cat.get("service_id")
