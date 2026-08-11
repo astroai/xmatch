@@ -39,6 +39,7 @@ def test_canfar_ray_job_dry_run_output() -> None:
     assert "astroai-workload cluster ensure --workers 4 --cores 1 --ram 4" in out
     assert "astroai-workload submit --cmd" in out
     assert "--wait" in out
+    assert "--address" in out  # the submit line names its target truthfully
     assert "RAY_ADDRESS" not in out  # no Slurm-era leftovers
     assert "Submitted batch job" not in out
 

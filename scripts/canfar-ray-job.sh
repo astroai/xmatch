@@ -34,15 +34,17 @@
 #   --workers N          ray-worker sessions to launch (default 4)
 #   --cores N            CPUs per worker (default 1)
 #   --ram GiB            RAM per worker (default 4)
-#   --cpus N             entrypoint CPUs for the job (default 4)
+#   --cpus N             entrypoint CPUs for the job (default 2)
 #   --memory GiB         entrypoint memory reservation (optional)
 #   --env KEY=VALUE      environment for the job (repeatable)
-#   --cwd DIR            job working directory; default: the current
-#                        directory when it holds a pixi.toml (the repo on
-#                        the manager).  Ray uploads --cwd to the head
-#                        (tracked files only — .gitignore is respected,
-#                        including nested files, so .pixi/ is skipped);
-#                        from a laptop, self-locate instead:
+#   --cwd DIR            job working directory, uploaded to the head
+#                        (tracked files only — Ray respects .gitignore,
+#                        including nested files, so .pixi/ is skipped).
+#                        Default: none — on the platform (webterm, /arc
+#                        mounted) the command is self-located into the
+#                        current directory instead, so nothing uploads,
+#                        the installed pixi env is reused and outputs
+#                        land in the repo.  From a laptop, self-locate:
 #                        --command "bash -lc 'cd /arc/... && pixi run ...'"
 #   --create-manager IMG create the ray-manager session first
 #   --manager-name NAME  manager session name (default xmatch-ray)
@@ -122,15 +124,27 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# Job working directory: default to the current directory when it looks
-# like the project (pixi.toml present) — Ray uploads it to the head,
-# respecting .gitignore (nested too, so .pixi/ is never packaged).
-if [ -z "$CWD" ] && [ -f pixi.toml ]; then
-    CWD="$(pwd)"
-elif [ -z "$CWD" ]; then
-    echo "note: no pixi.toml in $(pwd); the job runs in the head's default" >&2
-    echo "  working directory.  Run this from the repo on the manager, pass" >&2
-    echo "  --cwd, or self-locate with: --command \"bash -lc 'cd /abs && pixi run ...'\"" >&2
+# Job working directory.  On the platform (webterm; /arc mounted) the repo
+# at $(pwd) already lives on the head pod via the shared /arc volume — so
+# default to SELF-LOCATING the command (`bash -c 'cd <pwd> && CMD'`): zero
+# upload, the installed pixi env is reused, and outputs land in the repo.
+# Off-platform (laptop) there is no safe default: the user passes --cwd
+# (explicit upload) or a self-locating command.
+SELF_LOCATE=""
+if [ -z "$CWD" ]; then
+    if [ -f pixi.toml ] && [ -d /arc ]; then
+        SELF_LOCATE="bash -c $(shq "cd $(pwd) && $CMD")"
+    else
+        echo "note: no self-locating default (needs pixi.toml + the /arc mount);" >&2
+        echo "  the job would run in the head's default working directory." >&2
+        echo "  Run this from the repo on the manager, pass --cwd (uploads this" >&2
+        echo "  copy; tracked files only — .pixi is excluded via its nested" >&2
+        echo "  .gitignore), or self-locate:" >&2
+        echo "  --command \"bash -lc 'cd /abs/manager/path && pixi run ...'\"" >&2
+    fi
+elif [ ! -f "$CWD/.gitignore" ]; then
+    echo "note: --cwd $CWD has no .gitignore — Ray uploads everything in it" >&2
+    echo "  (secrets included).  Add a .gitignore or use a self-locating command." >&2
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -148,8 +162,11 @@ if [ "$DRY_RUN" -eq 1 ]; then
     else
         echo "  astroai-workload cluster ensure --workers $WORKERS --cores $CORES --ram $RAM${MANAGER:+ --address $(shq "$MANAGER")}"
     fi
+    RUN_CMD="$CMD"
+    [ -n "$SELF_LOCATE" ] && RUN_CMD="$SELF_LOCATE"
+    ADDR_DISP="${ADDRESS:-${ASTROAI_RAY_JOBS_ADDRESS:-<resolved by cluster ensure>}}"
     echo "submit:"
-    echo "  astroai-workload submit --cmd $(shq "$CMD") --cpus $CPUS${MEMORY:+ --memory $(shq "$MEMORY")}${CWD:+ --cwd $(shq "$CWD")} --wait$ENVS"
+    echo "  astroai-workload submit --cmd $(shq "$RUN_CMD") --cpus $CPUS --address $(shq "$ADDR_DISP")${MEMORY:+ --memory $(shq "$MEMORY")}${CWD:+ --cwd $(shq "$CWD")} --wait$ENVS"
     exit 0
 fi
 
@@ -201,11 +218,13 @@ else
 fi
 
 # ---------------------------------------------------------------- submit
-set -- astroai-workload submit --cmd "$CMD" --cpus "$CPUS" \
+RUN_CMD="$CMD"
+[ -n "$SELF_LOCATE" ] && RUN_CMD="$SELF_LOCATE"
+set -- astroai-workload submit --cmd "$RUN_CMD" --cpus "$CPUS" \
     --address "$ADDRESS" --wait
 [ -n "$MEMORY" ] && set -- "$@" --memory "$MEMORY"
 [ -n "$CWD" ] && set -- "$@" --cwd "$CWD"
 eval "set -- \"\$@\"$ENVS"
-echo "submitting as a Ray job: $CMD"
+echo "submitting as a Ray job: $RUN_CMD"
 "$@"
 exit $?

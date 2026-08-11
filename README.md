@@ -473,12 +473,14 @@ Jobs CLI: [astroai-workload](https://github.com/astroai/astroai-workload)).
    The script checks auth, launches `--workers N` worker sessions
    (`astroai-workload cluster ensure`), submits the command to the Jobs API
    and streams its logs; the exit code is the job's. Run it from the repo
-   on the manager: the job's working directory defaults to the current
-   directory when it holds `pixi.toml` (Ray uploads it to the head —
-   `.gitignore` is respected, including nested files, so `.pixi/` is never
-   packaged). From a laptop, self-locate instead:
-   `--command "bash -lc 'cd /arc/.../xmatch && pixi run …'"`. Both
-   `engine='ray'` and `engine='ray-union'` join the cluster in
+   on the manager: the command is self-located into the current directory
+   (the repo already lives on the head via the shared `/arc` volume) — no
+   upload, the installed pixi env is reused, and outputs land in the repo.
+   From a laptop, self-locate instead:
+   `--command "bash -lc 'cd /arc/.../xmatch && pixi run …'"`, or pass
+   `--cwd` to upload a copy (tracked files only — Ray respects
+   `.gitignore`, including nested files, so `.pixi/` is never packaged).
+   Both `engine='ray'` and `engine='ray-union'` join the cluster in
    `RAY_ADDRESS`; unset, they start a local cluster exactly as before (on
    the manager pod, `ray.init(address="auto")` also works).
 3. The **union cache must be visible to every worker pod** — pass
