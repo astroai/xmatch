@@ -250,7 +250,7 @@ def ray_zone_match(
 
     if not ray.is_initialized():
         # Join the cluster in $RAY_ADDRESS when one is running (CANFAR:
-        # `sbatch scripts/canfar-cluster.sh …`); with the env unset this
+        # a ray-manager session — see scripts/canfar-ray-job.sh); with the env unset this
         # starts a fresh local cluster exactly as before.  A dead address
         # (ConnectionError) falls back to local — same pattern as
         # ray_union.ray_union_match.

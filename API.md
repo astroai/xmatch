@@ -319,9 +319,9 @@ result = cm.crossmatch("large_a.parquet", "large_b.parquet", spec=spec,
 Fans out HEALPix pixel-batch matching across Ray workers for distributed
 crossmatching. Right-side pixel data placed in Ray's object store for zero-copy
 sharing. Falls back to single-machine zone match when Ray is unavailable.
-When `RAY_ADDRESS` is set (e.g. `export RAY_ADDRESS=head:6379` on a
-CANFAR Slurm cluster started by `scripts/canfar-cluster.sh`), the engine
-joins that cluster instead of starting a local one.
+When `RAY_ADDRESS` is set (e.g. on the head pod of a CANFAR ray-manager
+session — see `scripts/canfar-ray-job.sh`), the engine joins that cluster
+instead of starting a local one.
 
 ```bash
 pip install 'xmatch[ray]'

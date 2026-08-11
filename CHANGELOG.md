@@ -127,12 +127,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   largest partition diagonal across all inputs (every in-radius pair is
   guaranteed), and RING-ordered copies (`hats_ordering=RING`) are converted
   to NESTED when the plan builds.
-* **`scripts/canfar-cluster.sh`**: one `sbatch` starts a Ray cluster sized
-  to the Slurm allocation (the batch script fans itself out one instance
-  per node via `srun`; rank 0 is the head, workers join, all ranks stop
-  their raylets on exit) and runs `--command` with `RAY_ADDRESS` exported;
-  `--dry-run` prints the plan without submitting. `engine='ray'` and
-  `engine='ray-union'` join the cluster in `RAY_ADDRESS` when set.
+* **`scripts/canfar-ray-job.sh`**: runs `--command` as a Ray Job on the
+  CANFAR science platform (VOSpace + Skaha sessions — no Slurm): checks
+  `canfar` auth, launches `--workers N` ray-worker sessions through
+  `astroai-workload cluster ensure`, submits the command to the Ray Jobs
+  API (`astroai-workload submit --wait`) and propagates the job's exit
+  code; `--dry-run` prints the plan without calling the platform.
+  `engine='ray'` and `engine='ray-union'` join the cluster in
+  `RAY_ADDRESS` when set.
 * **Tests**: 14 `tests/test_mirror_sync.py` tests (incremental TAP sync,
   force re-fetch, window-shrink/append continuation, HATS-over-HTTP mirror,
   HATS-over-`vos:` mirror, endpoint failover, partial-transfer failover,
@@ -145,7 +147,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   tests (`all_cache_roots` precedence), a `RAY_ADDRESS` join test in
   `test_matchers.py`, 3 driver-level ray-union tests in
   `test_crossmatch.py` (2 driver-retry + 1 replica-read), and 3
-  `tests/test_canfar_script.py` script tests.
+  `tests/test_canfar_ray_job.py` script tests.
 
 ### Changed — Catalogues
 

@@ -449,32 +449,40 @@ restarting. Live progress reports `done/total tasks (%, rate, ETA)` at 1 Hz,
 progress, chunk completion, done/failed) lands in `<out>/run.jsonl` — an
 append-only audit trail that survives the console.
 
-### CANFAR / Slurm
+### CANFAR
 
-On CANFAR (or any Slurm cluster with the pixi env installed), one `sbatch`
-starts a Ray cluster sized to your allocation and runs a full-sky union
-inside it:
+CANFAR is the CADC science platform (VOSpace + Skaha container sessions —
+no Slurm). Ray runs as a contributed `ray-manager` Skaha session (the
+head) plus headless `ray-worker` sessions (the workers), and jobs are
+submitted through the Ray Jobs API (cluster lifecycle: [astroai-containers
+`docs/RAY.md`](https://github.com/astroai/astroai-containers/blob/main/docs/RAY.md);
+Jobs CLI: [astroai-workload](https://github.com/astroai/astroai-workload)).
 
-```bash
-sbatch scripts/canfar-cluster.sh --nodes 4 --time 12:00:00 \
-    --command "pixi run xmatch match gaia desils --union -o full.hats --retries 2"
-squeue            # find the job
-cat full.hats/resume.state   # inside the allocation, once it starts
-```
+1. Start a **ray-manager session** (AstroAI hub → *Start batch compute*, or
+   `canfar create --name xmatch-ray contributed
+   images.canfar.net/astroai/ray-manager:<tag>`), clone the repo on it and
+   `pixi install`.
+2. From any session with the platform CLIs (the manager's webterm is
+   easiest), submit the union as a Ray Job:
 
-The script submits itself (`scripts/canfar-cluster.sh --nodes 4 --command
-"…"` from a login node does the same), starts `ray start --head` on rank 0,
-joins the other ranks, waits until every node reports, and exports
-`RAY_ADDRESS=<head>:6379` for the command. Both `engine='ray'` and
-`engine='ray-union'` join the cluster in `RAY_ADDRESS`; unset, they start a
-local cluster exactly as before. The **union cache must live on storage
-shared by all compute nodes** — point `XMATCH_CACHE_ROOT` / `--cache-root`
-at a shared path, or use a `vos:` root with `cache.roots` replicas; a
-node-local `/scratch` breaks remote workers' reads. `--retries`/resume work
-unchanged inside the allocation (mirror gaps refill, finished chunks are
-skipped). CANFAR has no KubeRay, so the cluster scales to the `--nodes`
-allocation rather than elastically; all union tasks are submitted up front,
-which is what lets Ray spread them across the nodes automatically.
+   ```bash
+   scripts/canfar-ray-job.sh \
+       --command "pixi run xmatch match gaia desils --union -o full.hats --retries 2"
+   ```
+
+   The script checks auth, launches `--workers N` worker sessions
+   (`astroai-workload cluster ensure`), submits the command to the Jobs API
+   and streams its logs; the exit code is the job's. Both `engine='ray'`
+   and `engine='ray-union'` join the cluster in `RAY_ADDRESS`; unset, they
+   start a local cluster exactly as before (on the manager pod,
+   `ray.init(address="auto")` also works).
+3. The **union cache must be visible to every worker pod** — pass
+   `--env XMATCH_CACHE_ROOT=vos:xmatch-cache` (or a shared `/arc/...`
+   path); CANFAR `/scratch` is per-pod and breaks remote workers' reads.
+   `cache.roots` replicas work unchanged. `--retries`/resume work the same
+   in a job (mirror gaps refill, finished chunks are skipped).
+4. Tear down: `astroai-workload cluster stop` destroys the workers; delete
+   the manager session from the portal (`canfar delete xmatch-ray`).
 
 ### Replicas & data-centre fallbacks
 
