@@ -2384,15 +2384,13 @@ def _run_sync_subcommand(argv: Sequence[str]) -> int:
 
     def body() -> int:
         from .mirror import SyncStats, sync_catalogue
-        from .storage import default_cache_root
+        from .storage import all_cache_roots
 
         cache_cfg = cm.config.get("cache", {}) if isinstance(cm.config, dict) else {}
-        cache_root = (
-            args.cache_root
-            or os.environ.get("XMATCH_CACHE_ROOT")
-            or cache_cfg.get("root")
-            or default_cache_root()
-        )
+        roots = all_cache_roots(cache_cfg)
+        if args.cache_root:
+            roots = [args.cache_root, *(r for r in roots if r != args.cache_root)]
+        cache_root = roots[0]
         rate_limit = args.rate_limit_rps
         if rate_limit is None:
             rate_limit = float(cache_cfg.get("rate_limit_rps", 1.0))
@@ -2408,6 +2406,7 @@ def _run_sync_subcommand(argv: Sequence[str]) -> int:
             stats = sync_catalogue(
                 src,
                 cache_root=cache_root,
+                replica_roots=roots[1:],
                 rate_limit_rps=one_limit,
                 workers=int(args.workers),
                 force=bool(args.force_sync),

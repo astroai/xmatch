@@ -110,18 +110,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `$XMATCH_CACHE_ROOT`.
 * **`src/xmatch/mirror.py`**: `sync_catalogue` / `ensure_mirrored` engine
   behind both `xmatch sync` and the ray-union route's auto-mirroring.
+* **Endpoint failover & replicas**: `fallback:` catalogue entries (same
+  `default_columns` — checked) let a sync survive a dead primary TAP/HATS
+  endpoint by re-fetching from the fallback; the cache identity stays tied
+  to the primary, so `locate_mirrored` finds the copy whichever endpoint
+  served it. After a complete sync (`stats.failed == 0`) the mirrored tree
+  is copied best-effort onto every `cache.roots` replica, and the union's
+  `--no-sync` reader probes primary-then-replicas in order, using the first
+  surviving copy. `storage.all_cache_roots()` resolves primary + replicas
+  from `$XMATCH_CACHE_ROOT` / `cache.root` / `cache.roots`.
 * **`src/xmatch/ray_union.py`**: `build_union_plan` (+ `last_plan()`) and
   the chunk/rest Ray pipeline; per-chunk parquets under `<out>/chunks/` act
   as resume points; reruns with identical parameters skip finished chunks
-  (stale parameters wipe the stale chunks first).
-* **Tests**: 10 `tests/test_mirror_sync.py` tests (incremental TAP sync,
+  (stale parameters wipe the stale chunks first). Mixed HATS depths
+  (`Norder`) are searched per-catalogue with the cone radius sized by the
+  largest partition diagonal across all inputs (every in-radius pair is
+  guaranteed), and RING-ordered copies (`hats_ordering=RING`) are converted
+  to NESTED when the plan builds.
+* **`scripts/canfar-cluster.sh`**: one `sbatch` starts a Ray cluster sized
+  to the Slurm allocation (head on rank 0, workers join, all ranks stop
+  their raylets on exit) and runs `--command` with `RAY_ADDRESS` exported;
+  `--dry-run` prints the plan without submitting. `engine='ray'` and
+  `engine='ray-union'` join the cluster in `RAY_ADDRESS` when set.
+* **Tests**: 13 `tests/test_mirror_sync.py` tests (incremental TAP sync,
   force re-fetch, window-shrink/append continuation, HATS-over-HTTP mirror,
-  HATS-over-`vos:` mirror),
-  9 `tests/test_ray_union.py` tests (3-catalogue-vs-oracle,
+  HATS-over-`vos:` mirror, endpoint failover, column-gate refusal,
+  multi-root locate probing),
+  12 `tests/test_ray_union.py` tests (3-catalogue-vs-oracle,
   brute-force-oracle comparison, resume skip, far-partner singles,
   cone-covering regression, rest-partition dedup, block-combination
-  gating, max-tuples cap) — plus 3 CLI sync tests
-  (`test_cli_sync.py`) and 10 `tests/test_storage.py` tests.
+  gating, max-tuples cap, mixed-order oracle, ring-to-nested conversion) —
+  plus 3 CLI sync tests (`test_cli_sync.py`), 11 `tests/test_storage.py`
+  tests (`all_cache_roots` precedence), a `RAY_ADDRESS` join test in
+  `test_matchers.py`, and 2 `tests/test_canfar_script.py` script tests.
 
 ### Changed — Catalogues
 
@@ -130,6 +151,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   TAP table (RA_ICRS/DE_ICRS columns). The ESA mirror stays available as
   `gaia_esa` (`gaiadr3.gaia_source`, lowercase columns) for users who need
   the archive's native schema or its full astrometric covariance block.
+* **`gaia_cds` default columns no longer include `Epoch`**: VizieR's
+  `I/355/gaiadr3` has no such column and rejects any query selecting it
+  (HTTP 400), which broke live gaia downloads, mirrors, and the default
+  CANFAR union command. The DR3 astrometric epoch is fixed at J2016.0
+  (`epoch: 2016.0`); PM-at-epoch is unaffected.
 
 ### Changed — Mirroring
 

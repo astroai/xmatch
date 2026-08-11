@@ -1221,7 +1221,35 @@ def test_ray_engine_find_all_parity_with_zone():
     assert np.allclose(sep_zone, sep_ray, atol=1e-6)
 
 
-def test_ray_engine_graceful_fallback_when_unavailable(monkeypatch):
+def test_ray_engine_joins_ray_address(monkeypatch):
+    """engine='ray' joins the cluster in RAY_ADDRESS (CANFAR cluster
+    script); a dead address falls back to a fresh local cluster."""
+    ray = pytest.importorskip("ray")
+    ray.shutdown()  # deterministic start: init must actually run
+
+    monkeypatch.setenv("RAY_ADDRESS", "head.example:6379")
+    calls: list = []
+    real_init = ray.init
+
+    def fake_init(**kw):
+        calls.append(kw)
+        if kw.get("address"):
+            raise ConnectionError("no cluster at head.example")
+        return real_init(**kw)
+
+    monkeypatch.setattr(ray, "init", fake_init)
+    left = pl.DataFrame({"ra": [10.0, 10.001], "dec": [5.0, 5.0]})
+    right = pl.DataFrame({"ra": [10.0005, 30.0], "dec": [5.0005, 5.0]})
+    spec = MatchSpec(radius_arcsec=15.0, find="best")
+    try:
+        out = sky_match(
+            _src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="ray"
+        ).collect()
+        assert calls[0]["address"] == "head.example:6379"
+        assert calls[1]["address"] is None  # ConnectionError -> local fallback
+        assert out.height == 2  # both left rows matched the close right row
+    finally:
+        ray.shutdown()
     """When Ray is not installed, the ray engine must fall back to zone
     (or fast) transparently and still produce correct results."""
     # Directly patch the availability check so the fallback path is

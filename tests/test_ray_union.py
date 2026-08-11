@@ -654,3 +654,221 @@ def test_driver_progress_state_and_run_log(tmp_path: Path) -> None:
 
     joined = _read_output(out)
     assert {c for c in ("ra", "dec", "m", "n", "_src_cats", "sep_arcsec")} <= set(joined.columns)
+
+
+# --------------------------------------------------------------------------- #
+# mixed HATS depths + RING ordering + RAY_ADDRESS-less init fallback
+# --------------------------------------------------------------------------- #
+def _pixeled_catalogue(path: Path, name: str, df: pl.DataFrame, order: int) -> CatalogueSource:
+    """Local HATS catalogue tiled at ``order``: one parquet per occupied
+    NESTED pixel (the mirror-layout shape the union reads)."""
+    import cdshealpix
+    from astropy.coordinates import Latitude, Longitude
+
+    path.mkdir(parents=True, exist_ok=True)
+    pix = np.asarray(
+        cdshealpix.lonlat_to_healpix(
+            Longitude(df["ra"].to_numpy(), unit="deg"),
+            Latitude(df["dec"].to_numpy(), unit="deg"),
+            np.full(len(df), order, dtype=np.uint64),
+        )
+    )
+    for p in np.unique(pix):
+        sub = df.filter(pl.Series("_p", pix) == p)
+        dirtree = (int(p) // 10000) * 10000
+        rel = path / "dataset" / f"Norder={order}" / f"Dir={dirtree}" / f"Npix={int(p)}.parquet"
+        rel.parent.mkdir(parents=True, exist_ok=True)
+        sub.write_parquet(rel)
+    (path / "properties").write_text(
+        "dataproduct_type=object\nobs_collection=xmatch-test\n"
+        "hats_col_ra=ra\nhats_col_dec=dec\nhats_ordering=NESTED\n"
+        "hats_nrows=%d\nhats_max_depth=%d\n" % (df.height, order)
+    )
+    return CatalogueSource(name=name, is_local=True, path=path, ra_column="ra", dec_column="dec")
+
+
+def _ring_catalogue(path: Path, name: str, df: pl.DataFrame, order: int) -> CatalogueSource:
+    """Local HATS catalogue with RING pixel ids on disk + ``hats_ordering=RING``
+    (a mirror that preserved the source's own ordering)."""
+    import cdshealpix
+    from astropy.coordinates import Latitude, Longitude
+
+    path.mkdir(parents=True, exist_ok=True)
+    nested = np.asarray(
+        cdshealpix.lonlat_to_healpix(
+            Longitude(df["ra"].to_numpy(), unit="deg"),
+            Latitude(df["dec"].to_numpy(), unit="deg"),
+            np.full(len(df), order, dtype=np.uint64),
+        )
+    )
+    ring = np.asarray(cdshealpix.to_ring(nested, order))
+    for p in np.unique(ring):
+        sub = df.filter(pl.Series("_p", ring) == p)
+        dirtree = (int(p) // 10000) * 10000
+        rel = path / "dataset" / f"Norder={order}" / f"Dir={dirtree}" / f"Npix={int(p)}.parquet"
+        rel.parent.mkdir(parents=True, exist_ok=True)
+        sub.write_parquet(rel)
+    (path / "properties").write_text(
+        "dataproduct_type=object\nobs_collection=xmatch-test\n"
+        "hats_col_ra=ra\nhats_col_dec=dec\nhats_ordering=RING\n"
+        "hats_nrows=%d\nhats_max_depth=%d\n" % (df.height, order)
+    )
+    return CatalogueSource(name=name, is_local=True, path=path, ra_column="ra", dec_column="dec")
+
+
+def test_union_mixed_orders_oracle(tmp_path: Path) -> None:
+    """Inputs at Norder 0 / 1 / 2: matches found across depth boundaries.
+
+    The cone radius is sized by the coarsest partition diagonal, so the
+    deeper catalogues' pixels are searched with the full radius and every
+    in-radius pair is found whatever the input tilings.
+    """
+    from xmatch.storage import open_storage
+
+    a = pl.DataFrame(
+        {
+            "ra": [5.0, -5.0, 5.0, -5.0],
+            "dec": [5.0, 5.0, -5.0, -5.0],
+            "id": ["a0", "a1", "a2", "a3"],
+        }
+    )
+    b = pl.DataFrame({"ra": [5.0005, 120.0], "dec": [5.0005, 30.0], "id": ["b0", "b1"]})
+    c = pl.DataFrame(
+        {
+            "ra": [4.9995, 120.0005, 240.0, -120.0],
+            "dec": [4.9995, 30.0005, -20.0, 60.0],
+            "id": ["c0", "c1", "c2", "c3"],
+        }
+    )
+    base = tmp_path / "cats"
+    src_a = _pixeled_catalogue(base / "cata", "cata", a, 0)
+    src_b = _pixeled_catalogue(base / "catb", "catb", b, 1)
+    src_c = _pixeled_catalogue(base / "catc", "catc", c, 2)
+
+    # the depth exercise is real: 1 / >=2 / >=4 partitions at orders 0/1/2
+    def n_parts(src: CatalogueSource) -> int:
+        return len(ray_union._list_partitions("", open_storage(str(src.path))))
+
+    assert n_parts(src_a) == 1
+    assert n_parts(src_b) >= 2
+    assert n_parts(src_c) >= 4
+
+    out = tmp_path / "out"
+    ray_union.ray_union_match(
+        [src_a, src_b, src_c],
+        sep_arcsec=60.0,
+        output_file=str(out),
+        hats_threshold=1_000_000,
+        max_tuples=100_000,
+    )
+    df = _read_output(out)
+    _assert_matches_oracle(_ray_rows3(df), _oracle_union3(a, b, c, 60.0))
+
+    # the specific cross-depth sets are present
+    srcs = sorted(df["_src_cats"].unique().to_list())
+    assert "1+2+3" in srcs  # a0-b0-c0 cluster across all three depths
+    assert "2+3" in srcs  # b1-c1 at Norder 1 x Norder 2
+    assert "3" in srcs  # c2, c3 singles
+    # plan geometry keeps each catalogue's own depth
+    plan = ray_union.last_plan()
+    assert sorted({p.order for p in plan.catalogues[0].partitions}) == [0]
+    assert sorted({p.order for p in plan.catalogues[1].partitions}) == [1]
+    assert sorted({p.order for p in plan.catalogues[2].partitions}) == [2]
+
+
+def test_union_ring_input_converted(tmp_path: Path) -> None:
+    """A RING-ordered input is converted to NESTED in the plan: the union
+    matches the oracle and the plan's pixels are the NESTED equivalents of
+    the on-disk RING ids."""
+    import cdshealpix
+    from astropy.coordinates import Latitude, Longitude
+
+    a = pl.DataFrame({"ra": [0.0, 20.0], "dec": [0.0, 30.0], "id": ["a0", "a1"]})
+    b = pl.DataFrame({"ra": [0.001, 20.0], "dec": [0.001, 30.0], "id": ["b0", "b1"]})
+    base = tmp_path / "cats"
+    src_a = _pixeled_catalogue(base / "cata", "cata", a, 1)
+    src_b = _ring_catalogue(base / "catb", "catb", b, 1)
+
+    def _pix(ra: float, dec: float, order: int) -> int:
+        return int(
+            np.asarray(
+                cdshealpix.lonlat_to_healpix(
+                    Longitude(np.array([ra]), unit="deg"),
+                    Latitude(np.array([dec]), unit="deg"),
+                    np.array([order], dtype=np.uint64),
+                )
+            )[0]
+        )
+
+    on_disk_ring = [
+        int(np.asarray(cdshealpix.to_ring(np.asarray([_pix(ra, dec, 1)], dtype=np.uint64), 1))[0])
+        for ra, dec in zip(b["ra"], b["dec"], strict=True)
+    ]
+    expected_nested = sorted(
+        _pix(float(ra), float(dec), 1) for ra, dec in zip(b["ra"], b["dec"], strict=True)
+    )
+    # sanity: the fixture really is RING-tiled (ring ids != nested ids)
+    assert on_disk_ring != expected_nested
+
+    out = tmp_path / "out"
+    ray_union.ray_union_match(
+        [src_a, src_b],
+        sep_arcsec=60.0,
+        output_file=str(out),
+        hats_threshold=1_000_000,
+        max_tuples=100_000,
+    )
+
+    df = _read_output(out)
+    oracle = _oracle_union(a, b, 60.0)
+
+    def canonical(row) -> Tuple[str, Tuple[str, ...], float]:
+        ids = tuple(v for v in (row.get("id"), row.get("id_2")) if v is not None)
+        return (row["_src_cats"], ids, float(row["sep_arcsec"]))
+
+    ray_rows = sorted(canonical(r) for r in df.to_dicts())
+    assert len(ray_rows) == len(oracle)
+    for got, want in zip(ray_rows, oracle, strict=True):
+        assert got[0] == want[0], (got, want)
+        assert got[1] == want[1], (got, want)
+
+    plan = ray_union.last_plan()
+    b_pix = sorted(p.pix for p in plan.catalogues[1].partitions)
+    assert b_pix == expected_nested, (b_pix, expected_nested)
+
+
+def test_ray_init_falls_back_local_on_connection_error(tmp_path: Path, monkeypatch) -> None:
+    """RAY_ADDRESS unset + 'auto' unreachable -> a fresh local cluster."""
+    import ray
+
+    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    calls: List[dict] = []
+    real_init = ray.init
+
+    def fake_init(**kw) -> None:
+        calls.append(kw)
+        if kw.get("address"):
+            raise ConnectionError("no running cluster")
+        return real_init(**kw)
+
+    monkeypatch.setattr(ray, "init", fake_init)
+    try:
+        a = _catalogue(
+            tmp_path / "cata", "cata", pl.DataFrame({"ra": [0.0], "dec": [0.0], "id": ["a0"]})
+        )
+        b = _catalogue(
+            tmp_path / "catb", "catb", pl.DataFrame({"ra": [0.001], "dec": [0.0], "id": ["b0"]})
+        )
+        out = tmp_path / "out"
+        ray_union.ray_union_match(
+            [a, b],
+            sep_arcsec=60.0,
+            output_file=str(out),
+            hats_threshold=1_000_000,
+            max_tuples=100_000,
+        )
+        assert calls[0]["address"] == "auto"
+        assert calls[1]["address"] is None
+        assert _read_output(out).height == 1  # the pair matched
+    finally:
+        ray.shutdown()

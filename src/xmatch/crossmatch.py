@@ -556,8 +556,34 @@ class CrossMatch:
                 src.dec_column = detected_dec
         return src
 
+    def _resolve_fallback(
+        self, value: Any, *, primary_name: str, primary_access: Optional[str]
+    ) -> Union[str, CatalogueSource]:
+        """Resolve one ``fallback:`` entry of a catalogue config.
+
+        Known catalogue/alias names resolve to their full
+        :class:`CatalogueSource`; raw ``http(s)://`` / ``vos:`` URLs are kept
+        for remote-HATS sources as direct mirror endpoints.  Resolution is
+        config-only (no TAP_SCHEMA probes), so ``describe`` / ``list`` stay
+        side-effect-free; the schema gate runs at sync time, not here.
+        """
+        text = str(value).strip()
+        if text.startswith(("http://", "https://", "vos:")):
+            if primary_access != "hats":
+                raise CrossMatchError(
+                    f"fallback '{text}' for '{primary_name}': raw URLs are only valid "
+                    "for HATS catalogues"
+                )
+            return text
+        resolved = self.resolve_name(text)
+        if resolved not in self.catalogues_config:
+            raise CrossMatchError(
+                f"fallback '{text}' for '{primary_name}' is not a known catalogue"
+            )
+        return self._remote_source(self.get_catalogue_config(resolved), {})
+
     def _remote_source(self, cfg: Dict[str, Any], overrides) -> CatalogueSource:
-        return CatalogueSource(
+        src = CatalogueSource(
             name=cfg["_catalogue_name"],
             is_local=False,
             ra_column=overrides.get("ra_column") or cfg.get("ra_column"),
@@ -583,6 +609,14 @@ class CrossMatch:
             tap_url=cfg.get("access_url") or cfg.get("tap_url"),
             default_columns=cfg.get("default_columns"),
         )
+        raw_fallbacks = cfg.get("fallback")
+        if isinstance(raw_fallbacks, str):
+            raw_fallbacks = [raw_fallbacks]
+        src.fallbacks = [
+            self._resolve_fallback(fb, primary_name=src.name, primary_access=src.access_method)
+            for fb in (raw_fallbacks or [])
+        ]
+        return src
 
     def _hats_source(self, path: Path, overrides) -> CatalogueSource:
         return CatalogueSource(
@@ -1081,15 +1115,15 @@ class CrossMatch:
 
         from . import ray_union
         from .mirror import ensure_mirrored, locate_mirrored
-        from .storage import assert_headroom, default_cache_root
+        from .storage import all_cache_roots, assert_headroom
 
         cache_cfg = self.config.get("cache", {}) if isinstance(self.config, dict) else {}
-        cache_root = (
-            params.get("cache_root")
-            or os.environ.get("XMATCH_CACHE_ROOT")
-            or cache_cfg.get("root")
-            or default_cache_root()
-        )
+        roots = all_cache_roots(cache_cfg)
+        if params.get("cache_root"):
+            # an explicit --cache-root wins the primary slot; configured
+            # replicas still ride along as fallback copies.
+            roots = [params["cache_root"], *(r for r in roots if r != params["cache_root"])]
+        cache_root = roots[0]
         synclimit = params.get("synclimit")
         rate_limit = float(
             synclimit
@@ -1163,6 +1197,7 @@ class CrossMatch:
                         ensure_mirrored(
                             src,
                             cache_root=cache_root,
+                            replica_roots=roots[1:],
                             rate_limit_rps=rate_limit,
                             workers=workers,
                             force=bool(params.get("force_sync")),
@@ -1185,7 +1220,7 @@ class CrossMatch:
                                 ("http://", "https://", "vos:")
                             )
                         ):
-                            locate_mirrored(src, cache_root=cache_root)
+                            locate_mirrored(src, cache_roots=roots)
                 _append_run("mirror_done", attempt=attempt, sources=[s.name for s in sources])
                 ray_union.ray_union_match(
                     sources,

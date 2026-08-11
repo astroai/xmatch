@@ -51,6 +51,8 @@ import itertools
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -374,10 +376,33 @@ def build_union_plan(
             raise CrossMatchError(
                 f"Catalogue '{src.name}' has no HATS partitions under {root!r}/{rel!r}."
             )
+        # RING-ordered copies (remote mirrors preserve the source's own
+        # hats_ordering property) are converted to NESTED in the plan
+        # geometry: every downstream pixel computation (_pixel_center_deg,
+        # _cone_pixels, the _lookup_partition ancestor shifts, the rest
+        # tiling) is NESTED, and the output is always NESTED hub tiling.
+        props = _read_hats_properties(storage, rel)
+        ordering = next((v for k, v in props.items() if k.lower() == "hats_ordering"), "")
+        if ordering.upper() == "RING":
+            cds = _cdshealpix()
+            for part in parts:
+                part.pix = int(
+                    cds.from_ring(np.asarray([part.pix], dtype=np.uint64), part.order)[0]
+                )
+            logger.info(
+                "catalogue '%s': hats_ordering=RING — converted %d partition pixel(s) to NESTED",
+                src.name,
+                len(parts),
+            )
         parts.sort(key=lambda p: (p.order, p.pix))
+        _diag_cache: Dict[int, float] = {}
         for part in parts:
             _est_rows(part, storage, hats_threshold)
-            max_delta = max(max_delta, _pixel_diagonal_deg(part.order))
+            diag = _diag_cache.get(part.order)
+            if diag is None:
+                diag = _pixel_diagonal_deg(part.order)
+                _diag_cache[part.order] = diag
+            max_delta = max(max_delta, diag)
         schema = _catalogue_schema(storage, parts[0].rel)
         if "file_loc" in schema:  # partition_info-style file is not data
             schema = {}
@@ -989,6 +1014,43 @@ def _rest_task_factory() -> Any:
 # --------------------------------------------------------------------------- #
 # output assembly
 # --------------------------------------------------------------------------- #
+def _read_hats_properties(storage: Storage, rel: str) -> Dict[str, str]:
+    """Parse the ``key=value`` lines of ``<rel>/properties`` (or hats.properties).
+
+    Storage-agnostic (mirror inputs are local dirs or ``vos:`` roots — HTTP
+    sources are materialised into the cache before the plan builds).  Any
+    read failure returns ``{}``: the HATS spec defaults apply.
+    """
+    props: Dict[str, str] = {}
+    for name in ("properties", "hats.properties"):
+        full = f"{rel}/{name}" if rel else name
+        try:
+            if isinstance(storage, LocalStorage):
+                p = Path(storage.root) / full
+                if not p.is_file():
+                    continue
+                text = p.read_text()
+            else:
+                tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-hatsprops-"))
+                try:
+                    local = tmpdir / "properties"
+                    storage.stage_in(full, local)
+                    if not local.exists():
+                        continue
+                    text = local.read_text()
+                finally:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+            for line in text.splitlines():
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    props[k.strip()] = v.strip()
+            if props:
+                break
+        except OSError:
+            continue
+    return props
+
+
 def _read_hub_props(plan: UnionPlan) -> Dict[str, str]:
     hub = plan.catalogues[0]
     out: Dict[str, str] = {}
@@ -1259,6 +1321,9 @@ def ray_union_match(
     try:
         ray.init(address=os.environ.get("RAY_ADDRESS") or "auto", ignore_reinit_error=True)
     except ConnectionError:
+        # ray.init honours $RAY_ADDRESS for address=None too, so a dead
+        # cluster address must be cleared before the local fallback.
+        os.environ.pop("RAY_ADDRESS", None)
         ray.init(address=None, ignore_reinit_error=True)
     try:
         plan_ref = ray.put(plan)

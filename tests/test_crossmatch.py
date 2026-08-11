@@ -418,7 +418,7 @@ def test_crossmatch_multi_remote_first_catalogue(cm, tmp_path):
 
     # --- 3-way: gaia_esa × local2 × local3 ----------------------------------
     out = cm.crossmatch_multi(
-        ["gaia", str(local2_path), str(local3_path)],
+        ["gaia_esa", str(local2_path), str(local3_path)],
         ra=ra_vega,
         dec=dec_vega,
         radius_deg=cone_deg,

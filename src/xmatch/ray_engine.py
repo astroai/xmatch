@@ -20,6 +20,7 @@ object store with ``ray.put()`` so workers can read it zero-copy.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Tuple
 
 import numpy as np
@@ -248,8 +249,22 @@ def ray_zone_match(
     import ray
 
     if not ray.is_initialized():
+        # Join the cluster in $RAY_ADDRESS when one is running (CANFAR:
+        # `sbatch scripts/canfar-cluster.sh …`); with the env unset this
+        # starts a fresh local cluster exactly as before.  A dead address
+        # (ConnectionError) falls back to local — same pattern as
+        # ray_union.ray_union_match.
         try:
-            ray.init(ignore_reinit_error=True, logging_level=logging.WARNING)
+            ray.init(
+                address=os.environ.get("RAY_ADDRESS") or None,
+                ignore_reinit_error=True,
+                logging_level=logging.WARNING,
+            )
+        except ConnectionError:
+            # ray.init honours $RAY_ADDRESS for address=None too, so a dead
+            # cluster address must be cleared before the local fallback.
+            os.environ.pop("RAY_ADDRESS", None)
+            ray.init(address=None, ignore_reinit_error=True, logging_level=logging.WARNING)
         except Exception as exc:
             if spec.fallback_policy == "error":
                 raise CrossMatchError(

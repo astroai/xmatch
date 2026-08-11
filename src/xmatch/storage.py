@@ -413,6 +413,26 @@ def default_cache_root() -> str:
     return os.environ.get("XMATCH_CACHE_ROOT") or str(Path.home() / ".cache" / "xmatch")
 
 
+def all_cache_roots(cache_cfg: Optional[dict] = None) -> List[str]:
+    """Ordered, deduplicated cache roots: primary first, then replicas.
+
+    Primary = ``$XMATCH_CACHE_ROOT`` → ``cache_cfg["root"]`` →
+    :func:`default_cache_root`.  Every entry of ``cache_cfg["roots"]`` is
+    appended after it (blank entries dropped; the primary is never duplicated
+    as a replica).  Never returns ``[]``.  Replicas may be ``vos:`` URIs —
+    :func:`open_storage` routes those — or shared POSIX dirs; they are the
+    mirror-fallback copies the union reads when the primary copy is gone.
+    """
+    cache_cfg = cache_cfg or {}
+    primary = os.environ.get("XMATCH_CACHE_ROOT") or cache_cfg.get("root") or default_cache_root()
+    roots = [primary]
+    for entry in cache_cfg.get("roots") or []:
+        text = str(entry).strip()
+        if text and text not in roots:
+            roots.append(text)
+    return roots
+
+
 def assert_headroom(path: Union[str, Path], min_free_gb: float, label: str) -> None:
     """Fail fast when ``path``'s filesystem has less than ``min_free_gb`` GiB free.
 

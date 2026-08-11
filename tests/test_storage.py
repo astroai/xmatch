@@ -12,7 +12,13 @@ import polars as pl
 import pytest
 
 from xmatch.exceptions import ConfigError
-from xmatch.storage import LocalStorage, VOSpaceStorage, default_cache_root, open_storage
+from xmatch.storage import (
+    LocalStorage,
+    VOSpaceStorage,
+    all_cache_roots,
+    default_cache_root,
+    open_storage,
+)
 
 
 def test_local_roundtrip(tmp_path: Path) -> None:
@@ -207,6 +213,31 @@ def test_default_cache_root(monkeypatch) -> None:
     assert default_cache_root() == str(Path.home() / ".cache" / "xmatch")
     monkeypatch.setenv(key, "/tmp/xc-root")
     assert default_cache_root() == "/tmp/xc-root"
+
+
+def test_all_cache_roots_precedence_and_dedup(monkeypatch) -> None:
+    """Primary = $XMATCH_CACHE_ROOT > cache.root > default; replicas follow."""
+    key = "XMATCH_CACHE_ROOT"
+    default = str(Path.home() / ".cache" / "xmatch")
+    monkeypatch.delenv(key, raising=False)
+
+    # unset everything -> the default root alone (never [])
+    assert all_cache_roots() == [default]
+
+    # config root primary, replicas appended, blanks dropped
+    cfg = {"root": "/cfg/root", "roots": ["vos:rep-a", "", "vos:rep-a", "vos:rep-b"]}
+    assert all_cache_roots(cfg) == ["/cfg/root", "vos:rep-a", "vos:rep-b"]
+
+    # env wins the primary slot; configured replicas still ride along
+    monkeypatch.setenv(key, "/env/root")
+    assert all_cache_roots(cfg) == ["/env/root", "vos:rep-a", "vos:rep-b"]
+    assert all_cache_roots() == ["/env/root"]
+
+    # env identical to a replica does not duplicate it
+    assert all_cache_roots({"roots": ["/env/root", "vos:rep-a"]}) == [
+        "/env/root",
+        "vos:rep-a",
+    ]
 
 
 def test_vospace_requires_backend(monkeypatch) -> None:

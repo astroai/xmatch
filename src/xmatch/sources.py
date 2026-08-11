@@ -10,7 +10,7 @@ are materialised by the relevant backend (TAP/CDS/HATS) during execution.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import polars as pl
 
@@ -68,6 +68,12 @@ class CatalogueSource:
 
     # Mirror location inside the xmatch cache root (set by ensure_mirrored).
     hats_cache_rel: Optional[str] = None
+
+    # Alternate endpoints for the same data (mirror archives / mirrored
+    # copies other data centres keep).  Entries are resolved CatalogueSource
+    # objects (same-schema copies in xmatch.yaml) or raw http(s)/vos: HATS
+    # URLs for remote-HATS sources.  Used by the sync failover walk.
+    fallbacks: List[Union[str, "CatalogueSource"]] = field(default_factory=list)
 
     # Local payload (exactly one is set for local sources).
     path: Optional[Path] = None

@@ -449,6 +449,73 @@ restarting. Live progress reports `done/total tasks (%, rate, ETA)` at 1 Hz,
 progress, chunk completion, done/failed) lands in `<out>/run.jsonl` — an
 append-only audit trail that survives the console.
 
+### CANFAR / Slurm
+
+On CANFAR (or any Slurm cluster with the pixi env installed), one `sbatch`
+starts a Ray cluster sized to your allocation and runs a full-sky union
+inside it:
+
+```bash
+sbatch scripts/canfar-cluster.sh --nodes 4 --time 12:00:00 \
+    --command "pixi run xmatch match gaia desils --union -o full.hats --retries 2"
+squeue            # find the job
+cat full.hats/resume.state   # inside the allocation, once it starts
+```
+
+The script submits itself (`scripts/canfar-cluster.sh --nodes 4 --command
+"…"` from a login node does the same), starts `ray start --head` on rank 0,
+joins the other ranks, waits until every node reports, and exports
+`RAY_ADDRESS=<head>:6379` for the command. Both `engine='ray'` and
+`engine='ray-union'` join the cluster in `RAY_ADDRESS`; unset, they start a
+local cluster exactly as before. The **union cache must live on storage
+shared by all compute nodes** — point `XMATCH_CACHE_ROOT` / `--cache-root`
+at a shared path, or use a `vos:` root with `cache.roots` replicas; a
+node-local `/scratch` breaks remote workers' reads. `--retries`/resume work
+unchanged inside the allocation (mirror gaps refill, finished chunks are
+skipped). CANFAR has no KubeRay, so the cluster scales to the `--nodes`
+allocation rather than elastically; all union tasks are submitted up front,
+which is what lets Ray spread them across the nodes automatically.
+
+### Replicas & data-centre fallbacks
+
+The cache root supports replicas: after a complete sync, the mirrored tree
+is copied onto every `cache.roots` entry, and the union's `--no-sync`
+reader probes primary-then-replicas in order, using the first surviving
+copy — so a node loss or an evicted `/scratch` never blocks the run:
+
+```yaml
+cache:
+  root: /scratch/xmatch-cache        # primary (or $XMATCH_CACHE_ROOT)
+  roots: [vos:xmatch-cache]          # replicas, best-effort after each sync
+```
+
+Catalogue endpoints fail over too. When the primary TAP/HATS endpoint dies
+mid-sync, xmatch retries the `fallback:` entries in order; the column gate
+refuses a fallback whose `default_columns` differ from the primary's
+(same-schema copies only — the bundled gaia archives are deliberately not
+wired, their schemas differ):
+
+```yaml
+catalogues:
+  allwise:
+    access_method: tap
+    access_url: https://primary.example/tap
+    table_name: allwise
+    default_columns: [designation, ra, dec, w1mpro]
+    fallback: [allwise_canfar]       # another catalogue entry, same columns
+```
+
+### Mixing depth, orderings, and surveys
+
+Any mixture of HATS resolutions works: each catalogue is searched at its
+own depth (`Norder`), deeper pixels resolve to shallower ancestors, and the
+cone radius is sized by the largest partition diagonal across all inputs —
+so every pair within the radius is guaranteed to be found, whatever the
+input tilings. RING-ordered copies (mirrors that preserve the source's
+`hats_ordering=RING` property) are converted to NESTED automatically when
+the plan builds; missing properties default to NESTED, and the union
+output is always NESTED hub tiling.
+
 ## HATS output
 
 When the output path ends with `.hats`, xmatch writes the result as a

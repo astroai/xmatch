@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import functools
 import threading
+import urllib.error
 from collections.abc import Iterator
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,6 +25,7 @@ import polars as pl
 import pytest
 
 from xmatch import hats_native, mirror
+from xmatch.exceptions import CrossMatchError
 from xmatch.sources import CatalogueSource
 
 from .tap_fake import FakeTAPServer, make_rows
@@ -334,3 +336,75 @@ def test_headroom_gate_blocks_sync_when_disk_full(tmp_path: Path, tap_server, mo
     )
     with pytest.raises(mirror.CrossMatchError, match=r"min-free-gb"):
         _sync(src, cache, min_free_gb=10)
+
+
+def test_sync_falls_back_to_alternate_endpoint(tmp_path: Path, monkeypatch) -> None:
+    """A dead primary TAP endpoint fails over to a same-schema fallback.
+
+    Every query targeting the primary raises an endpoint error; the sync
+    must come back served entirely by the fallback (distinct RA offsets
+    prove the rows are B's), land in the primary's cache identity, and
+    never reach the primary's HTTP layer.
+    """
+    srv_a = FakeTAPServer(make_rows(200))
+    srv_b = FakeTAPServer(make_rows(200, ra0=30.0))
+    try:
+        src = _tap_source(srv_a)
+        src.fallbacks = [_tap_source(srv_b, name="probe-b")]
+
+        real_tap_run = mirror._tap_run
+
+        def flaky(fetch, service, query, **kw):
+            if fetch.tap_url == srv_a.url:
+                raise urllib.error.URLError("primary endpoint down")
+            return real_tap_run(fetch, service, query, **kw)
+
+        monkeypatch.setattr(mirror, "_tap_run", flaky)
+        cache = str(tmp_path / "cache")
+        stats = _sync(src, cache)
+        assert stats.pages == 2
+        assert stats.failed == 0
+
+        rows = mirror_rows(cache, src)
+        assert rows.height == 200
+        assert rows["ra"].min() >= 30.0  # rows came from B
+        assert srv_a.queries == []  # primary never served anything
+    finally:
+        srv_a.shutdown()
+        srv_b.shutdown()
+
+
+def test_sync_fallback_column_mismatch_refuses(tmp_path: Path, tap_server) -> None:
+    """A fallback with different default_columns is refused before any fetch."""
+    srv_b = FakeTAPServer(make_rows(50))
+    try:
+        src = _tap_source(tap_server)
+        fb = _tap_source(srv_b, name="probe-b")
+        fb.default_columns = ["id", "ra"]  # differs from the primary's
+        src.fallbacks = [fb]
+
+        with pytest.raises(CrossMatchError, match="different columns"):
+            _sync(src, str(tmp_path / "cache"))
+        # the gate fires before any candidate runs: neither server is hit
+        assert srv_b.queries == []
+        assert len(tap_server.queries) == 0
+    finally:
+        srv_b.shutdown()
+
+
+def test_locate_mirrored_probes_roots_in_order(tmp_path: Path, tap_server) -> None:
+    """locate_mirrored(cache_roots=[...]) returns the first surviving copy."""
+    r1 = str(tmp_path / "root1")
+    r2 = str(tmp_path / "root2")
+    src = _tap_source(tap_server)
+    _sync(src, r2)  # mirrored into root2 only
+
+    root, rel = mirror.locate_mirrored(src, cache_roots=[r1, r2])
+    assert root == r2
+    assert rel == f"probe/{mirror._version_dir(src)}"
+
+    with pytest.raises(CrossMatchError) as ei:
+        mirror.locate_mirrored(src, cache_roots=[r1, str(tmp_path / "root3")])
+    msg = str(ei.value)
+    assert "not mirrored yet" in msg
+    assert r1 in msg and str(tmp_path / "root3") in msg  # lists every probed root

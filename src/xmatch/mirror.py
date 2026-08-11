@@ -45,14 +45,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import polars as pl
 
 from . import io_utils
-from .exceptions import CrossMatchError
+from .exceptions import CrossMatchError, TapError
 from .remote_tap import _quote_id, _select_columns, _table_ref
 from .sources import CatalogueSource
 from .storage import LocalStorage, Storage, open_storage
@@ -512,11 +512,18 @@ def _mirror_remote_hats(
     workers: int,
     progress_cb: Optional[Callable[[str], None]],
     stats: SyncStats,
+    endpoint: Optional[CatalogueSource] = None,
 ) -> None:
-    """Mirror every remote HATS partition file into ``cache/<name>/<version>``."""
+    """Mirror every remote HATS partition file into ``cache/<name>/<version>``.
+
+    ``endpoint`` (fallback copy) swaps the fetching URL while ``src`` keeps
+    the cache identity (name + version dir), so a mirror served by a
+    different copy still lands where ``locate_mirrored(src)`` looks.
+    """
+    fetch = endpoint or src
     version = _version_dir(src)
     prefix = f"{_safe_name(src.name)}/{version}"
-    remote = _remote_hats_listing(src, bucket=bucket)
+    remote = _remote_hats_listing(fetch, bucket=bucket)
     manifest_rel = f"{prefix}/{_MANIFEST_NAME}"
     manifest = _read_json(cache, manifest_rel)
 
@@ -525,12 +532,12 @@ def _mirror_remote_hats(
         tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-"))
         local_tmp = tmpdir / Path(rel).name
         try:
-            if _remote_via_storage(src):
+            if _remote_via_storage(fetch):
                 # vos: nodes have no HTTP endpoint; transfer node → temp → cache.
-                storage = open_storage((src.access_identifier or "").rstrip("/"))
+                storage = open_storage((fetch.access_identifier or "").rstrip("/"))
                 storage.stage_in(rel, local_tmp)
             else:
-                body, _ = _http_request(_remote_url(src, rel), bucket)
+                body, _ = _http_request(_remote_url(fetch, rel), bucket)
                 if body is None:
                     raise CrossMatchError(f"empty body for {rel}")
                 local_tmp.write_bytes(body)
@@ -661,9 +668,9 @@ def _tap_key_query(src: CatalogueSource, *, max_key: bool = False) -> str:
     return f"SELECT t.{_quote_id(key)} FROM {table_q} AS t ORDER BY t.{_quote_id(key)} {direction} LIMIT 1"
 
 
-def _tap_count_query(src: CatalogueSource, window: Optional[Tuple[Any, Any]] = None) -> str:
-    key = src.id_column or src.ra_column
-    table_q = _table_ref(src.access_identifier or "", tap_url=src.tap_url or "")
+def _tap_count_query(fetch: CatalogueSource, window: Optional[Tuple[Any, Any]] = None) -> str:
+    key = fetch.id_column or fetch.ra_column
+    table_q = _table_ref(fetch.access_identifier or "", tap_url=fetch.tap_url or "")
     if window is not None and key:
         lo, hi = window
         where = f" WHERE t.{_quote_id(key)} >= {_tap_literal(lo)} AND t.{_quote_id(key)} <= {_tap_literal(hi)}"
@@ -698,8 +705,14 @@ def _mirror_tap(
     auth_session: Any,
     progress_cb: Optional[Callable[[str], None]],
     stats: SyncStats,
+    endpoint: Optional[CatalogueSource] = None,
 ) -> None:
     """Incrementally mirror a TAP table into ``cache/<name>/tap-<version>``.
+
+    ``endpoint`` (fallback copy) swaps the service/table identity for the
+    queries while ``src`` keeps the cache identity (name + version dir), so
+    a mirror served by a different archive still lands where
+    ``locate_mirrored(src)`` looks.
 
     Cold sync fetches sequential OFFSET pages; re-sync probes each stored
     page's key window with ``COUNT(*)`` and refetches only moved windows
@@ -708,6 +721,7 @@ def _mirror_tap(
     HATS catalogue under ``<cache>/<name>/<version>/`` is rebuilt whenever a
     page changed.
     """
+    fetch = endpoint or src
     name = _safe_name(src.name)
     version = _version_dir(src)
     prefix = f"{name}/{version}"
@@ -716,11 +730,11 @@ def _mirror_tap(
     manifest = _read_json(cache, manifest_rel)
     key = src.id_column or src.ra_column
     ceiling = int(_TAP_CEILING_FACTOR * estimated_size)
-    service = _tap_service(src, auth_session)
+    service = _tap_service(fetch, auth_session)
 
     def fetch_page(query: str, idx: int) -> pl.DataFrame:
         bucket.acquire()
-        df = _tap_run(src, service, query, maxrec=page_size)
+        df = _tap_run(fetch, service, query, maxrec=page_size)
         if df.height:
             page_rel = f"{raw}/pages/page_{idx:04d}.parquet"
             cache.write_parquet(df, page_rel)
@@ -753,7 +767,7 @@ def _mirror_tap(
         offset = 0
         while True:
             df = fetch_page(
-                _tap_page_query(src, offset=offset, limit=page_size), offset // page_size
+                _tap_page_query(fetch, offset=offset, limit=page_size), offset // page_size
             )
             if df.is_empty():
                 break
@@ -774,7 +788,7 @@ def _mirror_tap(
         pages = pages_manifest
         if key:
             # tail probe: did the highest key move (append-only sources)?
-            tail_df = _tap_run(src, service, _tap_key_query(src, max_key=True), maxrec=1)
+            tail_df = _tap_run(fetch, service, _tap_key_query(fetch, max_key=True), maxrec=1)
             new_last = tail_df[key][0] if tail_df.height else None
             last_idx = str(max(int(i) for i in pages))
             last_key = pages[last_idx].get("last_key")
@@ -785,13 +799,13 @@ def _mirror_tap(
                 window = (entry.get("first_key"), entry.get("last_key"))
                 if window[0] is None or window[1] is None:
                     continue
-                probe = _tap_run(src, service, _tap_count_query(src, window=window), maxrec=1)
+                probe = _tap_run(fetch, service, _tap_count_query(fetch, window=window), maxrec=1)
                 n = probe["n"][0] if probe.height else 0
                 if int(n) != int(entry["rows"]):
                     if progress_cb:
                         progress_cb(f"sync {src.name}: page {idx_str} changed")
                     df = fetch_page(
-                        _tap_page_query(src, window=window, key=key, limit=page_size),
+                        _tap_page_query(fetch, window=window, key=key, limit=page_size),
                         int(idx_str),
                     )
                     if df.height:
@@ -808,7 +822,7 @@ def _mirror_tap(
                 lo = last_key
                 while True:
                     df = fetch_page(
-                        _tap_page_query(src, after_key=lo, key=key, limit=page_size),
+                        _tap_page_query(fetch, after_key=lo, key=key, limit=page_size),
                         cont_idx,
                     )
                     if df.is_empty():
@@ -824,7 +838,7 @@ def _mirror_tap(
             if not changed and progress_cb:
                 progress_cb(f"sync {src.name}: table unchanged, nothing to fetch")
         else:
-            probe = _tap_run(src, service, _tap_count_query(src), maxrec=1)
+            probe = _tap_run(fetch, service, _tap_count_query(fetch), maxrec=1)
             n = probe["n"][0] if probe.height else 0
             if int(n) != int(manifest.get("total_rows", 0)):
                 raise CrossMatchError(
@@ -1006,12 +1020,165 @@ def _rebuild_tap_hats(
 
 
 # --------------------------------------------------------------------------- #
+# endpoint failover + replica roots
+# --------------------------------------------------------------------------- #
+_ENDPOINT_ERRORS = (urllib.error.URLError, OSError, TimeoutError, TapError)
+
+
+def _gate_fallback(primary: CatalogueSource, fb: CatalogueSource, label: str) -> None:
+    """Refuse a named fallback whose schema differs from the primary's.
+
+    The gate only fires when BOTH sides declare ``default_columns``; raw-URL
+    fallbacks have no column metadata and pass through.  A same-schema copy
+    is the contract for failover: mixing column layouts mid-sync would
+    produce a manifest whose pages do not match the mirror.
+    """
+    if (
+        primary.default_columns
+        and fb.default_columns
+        and (list(primary.default_columns) != list(fb.default_columns))
+    ):
+        raise CrossMatchError(
+            f"fallback '{label}' for '{primary.name}' has different columns "
+            f"than the primary ({fb.default_columns} vs {primary.default_columns}); "
+            "configure a same-schema copy as the fallback"
+        )
+
+
+def _fallback_candidates(src: CatalogueSource) -> List[CatalogueSource]:
+    """``[src, *endpoint-replaced fallback copies]`` for the failover walk.
+
+    Every candidate keeps the primary's identity (name, columns, cache
+    version dir); only the endpoint fields swap, so the mirror always lands
+    where ``locate_mirrored(src)`` looks no matter which copy served it.
+    """
+    out = [src]
+    for i, fb in enumerate(src.fallbacks):
+        label = f"{src.name}.fallback[{i}]"
+        if isinstance(fb, CatalogueSource):
+            _gate_fallback(src, fb, fb.name or label)
+            out.append(replace(src, tap_url=fb.tap_url, access_identifier=fb.access_identifier))
+        else:
+            out.append(replace(src, access_identifier=str(fb)))
+    return out
+
+
+def _sync_with_failover(
+    src: CatalogueSource,
+    cache: Storage,
+    *,
+    bucket: TokenBucket,
+    force: bool,
+    workers: int,
+    page_size: int,
+    hats_threshold: int,
+    estimated_size: int,
+    auth_session: Any,
+    progress_cb: Optional[Callable[[str], None]],
+    stats: SyncStats,
+) -> None:
+    """Mirror ``src``, retrying endpoint-class failures across its fallbacks.
+
+    Endpoint-class failures only (connection refused/dropped, TAP job
+    failure): ``CrossMatchError``-family failures (ceiling, row-count
+    mismatch, column gate) always propagate — a mirror that *ran* against a
+    different schema is worse than no mirror.  For remote HATS the only
+    observable endpoint failure is a totally empty transfer (listing or
+    every fetch failed), so a candidate that moved zero files is retried
+    against the next fallback.
+    """
+    candidates = _fallback_candidates(src)
+    for i, cand in enumerate(candidates):
+        if i:
+            logger.warning(
+                "sync %s: primary endpoint failed; trying fallback %s",
+                src.name,
+                cand.access_identifier or cand.tap_url or "?",
+            )
+        try:
+            if src.access_method == "hats":
+                _mirror_remote_hats(
+                    src,
+                    cache,
+                    bucket=bucket,
+                    force=force,
+                    workers=workers,
+                    progress_cb=progress_cb,
+                    stats=stats,
+                    endpoint=cand,
+                )
+                if stats.files_downloaded == 0 and stats.files_skipped == 0:
+                    raise urllib.error.URLError(
+                        f"no files transferred from {cand.access_identifier}"
+                    )
+            else:
+                _mirror_tap(
+                    src,
+                    cache,
+                    bucket=bucket,
+                    force=force,
+                    page_size=page_size,
+                    hats_threshold=hats_threshold,
+                    estimated_size=estimated_size,
+                    auth_session=auth_session,
+                    progress_cb=progress_cb,
+                    stats=stats,
+                    endpoint=cand,
+                )
+            return
+        except _ENDPOINT_ERRORS:
+            if i == len(candidates) - 1:
+                raise
+            continue
+
+
+def _replicate_tree(src_storage: Storage, dst_storage: Storage, rel: str) -> None:
+    """Copy the mirrored tree at ``rel`` (files only) onto ``dst_storage``."""
+    rels: List[str] = []
+    _walk_storage(src_storage, rel, rels)
+    tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-repl-"))
+    try:
+        for r in rels:
+            if r.endswith("/"):
+                continue
+            local = tmpdir / Path(r).name
+            src_storage.stage_in(r, local)
+            dst_storage.stage_out(local, r)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _replicate_to_roots(cache: Storage, src: CatalogueSource, replica_roots: List[str]) -> None:
+    """Best-effort copy of a synced mirror tree onto each replica root.
+
+    Replicas give the union reader a surviving copy when the primary root's
+    file is gone (node loss, evicted /scratch).  Only complete mirrors are
+    replicated (``stats.failed == 0`` is the caller's gate) and failures here
+    never fail the run.
+    """
+    if not replica_roots:
+        return
+    prefix = f"{_safe_name(src.name)}/{_version_dir(src)}"
+    if not cache.exists(f"{prefix}/properties") and not cache.exists(
+        f"{prefix}/dataset/partition_info.parquet"
+    ):
+        return  # nothing durable was mirrored (fresh gate / no-op)
+    for root in replica_roots:
+        try:
+            _replicate_tree(cache, open_storage(root), prefix)
+            logger.info("replicated '%s' mirror to replica root %s", src.name, root)
+        except Exception as exc:  # noqa: BLE001 - best-effort by contract
+            logger.warning("replica root %s copy failed for '%s': %s", root, src.name, exc)
+
+
+# --------------------------------------------------------------------------- #
 # public API
 # --------------------------------------------------------------------------- #
 def sync_catalogue(
     src: CatalogueSource,
     *,
     cache_root: Optional[str] = None,
+    replica_roots: Optional[List[str]] = None,
     rate_limit_rps: float = 1.0,
     workers: int = 8,
     force: bool = False,
@@ -1025,13 +1192,16 @@ def sync_catalogue(
 ) -> SyncStats:
     """Mirror ``src`` into the cache, incrementally. Returns :class:`SyncStats`.
 
-    ``fresh_after`` (days): when the stored mirror completed a full sync less
-    than this many days ago (and the HATS catalogue exists), skip the
-    change-probe network round-trips entirely and trust the copy — the
-    day-scale re-union pattern ("synced Monday, union Tuesday…") never re-pays
-    the probe hours.  ``min_free_gb`` floors the free space on ``root`` before
-    any fetch begins (default 10 GiB; env ``XMATCH_MIN_FREE_GB`` or config
-    ``cache.min_free_gb`` override).
+    ``replica_roots``: after a complete sync, best-effort copies of the
+    mirrored HATS tree are written onto each replica root (the union's
+    ``--no-sync`` reader probes every root in order and uses the first
+    surviving copy).  ``fresh_after`` (days): when the stored mirror
+    completed a full sync less than this many days ago (and the HATS
+    catalogue exists), skip the change-probe network round-trips entirely
+    and trust the copy — the day-scale re-union pattern ("synced Monday,
+    union Tuesday…") never re-pays the probe hours.  ``min_free_gb`` floors
+    the free space on ``root`` before any fetch begins (default 10 GiB; env
+    ``XMATCH_MIN_FREE_GB`` or config ``cache.min_free_gb`` override).
     """
     from .storage import assert_headroom, default_cache_root
 
@@ -1075,41 +1245,42 @@ def sync_catalogue(
                 )
                 return stats
     bucket = TokenBucket(rate_limit_rps) if rate_limit_rps else TokenBucket(0.0)
-    if src.access_method == "hats":
-        _mirror_remote_hats(
-            src,
-            cache,
-            bucket=bucket,
-            force=force,
-            workers=workers,
-            progress_cb=progress_cb,
-            stats=stats,
-        )
-    else:
-        _mirror_tap(
-            src,
-            cache,
-            bucket=bucket,
-            force=force,
-            page_size=page_size,
-            hats_threshold=hats_threshold,
-            estimated_size=estimated_size or DEFAULT_ESTIMATED_SIZE,
-            auth_session=auth_session,
-            progress_cb=progress_cb,
-            stats=stats,
-        )
+    _sync_with_failover(
+        src,
+        cache,
+        bucket=bucket,
+        force=force,
+        workers=workers,
+        page_size=page_size,
+        hats_threshold=hats_threshold,
+        estimated_size=estimated_size or DEFAULT_ESTIMATED_SIZE,
+        auth_session=auth_session,
+        progress_cb=progress_cb,
+        stats=stats,
+    )
+    if stats.failed == 0:
+        _replicate_to_roots(cache, src, list(replica_roots or []))
     return stats
 
 
-def locate_mirrored(src: CatalogueSource, cache_root: Optional[str] = None) -> Tuple[str, str]:
+def locate_mirrored(
+    src: CatalogueSource,
+    cache_root: Optional[str] = None,
+    cache_roots: Optional[List[str]] = None,
+) -> Tuple[str, str]:
     """Return ``(storage_root, rel)`` of the mirrored HATS copy of ``src``.
 
-    Raises :class:`CrossMatchError` when no mirror exists (run ``xmatch sync``
-    or drop ``--no-sync``).
+    ``cache_roots`` (primary first) probes each root in order and returns the
+    first one holding the copy — the union reader's fallback across
+    replicated cache roots.  ``cache_root`` still wins when both are given
+    (single-root callers are unchanged).  Raises :class:`CrossMatchError`
+    when no mirror exists on any probed root (run ``xmatch sync`` or drop
+    ``--no-sync``).
     """
     from .storage import default_cache_root
 
-    root = cache_root or default_cache_root()
+    if cache_roots is None:
+        cache_roots = [cache_root or default_cache_root()]
     if src.access_method == "hats" and not _is_remote_hats(src):
         path = src.path
         if path is None and src.access_identifier:
@@ -1124,21 +1295,23 @@ def locate_mirrored(src: CatalogueSource, cache_root: Optional[str] = None) -> T
         )
     version = _version_dir(src)
     rel = f"{_safe_name(src.name)}/{version}"
-    cache = open_storage(root)
-    if not cache.exists(f"{rel}/properties") and not cache.exists(
-        f"{rel}/dataset/partition_info.parquet"
-    ):
-        raise CrossMatchError(
-            f"Catalogue '{src.name}' is not mirrored yet; run 'xmatch sync {src.name}' "
-            "or drop --no-sync."
-        )
-    return root, rel
+    for root in cache_roots:
+        cache = open_storage(root)
+        if cache.exists(f"{rel}/properties") or cache.exists(
+            f"{rel}/dataset/partition_info.parquet"
+        ):
+            return root, rel
+    raise CrossMatchError(
+        f"Catalogue '{src.name}' is not mirrored yet (probed: {', '.join(cache_roots)}); "
+        f"run 'xmatch sync {src.name}' or drop --no-sync."
+    )
 
 
 def ensure_mirrored(
     src: CatalogueSource,
     *,
     cache_root: Optional[str] = None,
+    replica_roots: Optional[List[str]] = None,
     rate_limit_rps: float = 1.0,
     workers: int = 8,
     force: bool = False,
@@ -1153,6 +1326,8 @@ def ensure_mirrored(
 
     Local HATS catalogues are returned unchanged; other local inputs (plain
     parquet/csv/fits) are converted once into the cache as HATS.
+    ``replica_roots`` forwards to :func:`sync_catalogue` (best-effort
+    replicated copies for the multi-root union reader).
     """
     from .storage import assert_headroom, default_cache_root
 
@@ -1193,6 +1368,7 @@ def ensure_mirrored(
     stats = sync_catalogue(
         src,
         cache_root=root,
+        replica_roots=replica_roots,
         rate_limit_rps=rate_limit_rps,
         workers=workers,
         force=force,
