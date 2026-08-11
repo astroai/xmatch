@@ -37,7 +37,13 @@
 #   --cpus N             entrypoint CPUs for the job (default 4)
 #   --memory GiB         entrypoint memory reservation (optional)
 #   --env KEY=VALUE      environment for the job (repeatable)
-#   --cwd DIR            job working directory (default: manager home)
+#   --cwd DIR            job working directory; default: the current
+#                        directory when it holds a pixi.toml (the repo on
+#                        the manager).  Ray uploads --cwd to the head
+#                        (tracked files only — .gitignore is respected,
+#                        including nested files, so .pixi/ is skipped);
+#                        from a laptop, self-locate instead:
+#                        --command "bash -lc 'cd /arc/... && pixi run ...'"
 #   --create-manager IMG create the ray-manager session first
 #   --manager-name NAME  manager session name (default xmatch-ray)
 #   --manager URL        manager connect URL (cluster ensure --address)
@@ -49,7 +55,7 @@ set -eu
 WORKERS=4
 CORES=1
 RAM=4
-CPUS=4
+CPUS=2
 MEMORY=""
 CMD='pixi run xmatch match gaia desils --union -o full.hats --retries 2'
 ENVS=""
@@ -115,6 +121,17 @@ while [ "$#" -gt 0 ]; do
             echo "unknown option: $1" >&2; usage; exit 2 ;;
     esac
 done
+
+# Job working directory: default to the current directory when it looks
+# like the project (pixi.toml present) — Ray uploads it to the head,
+# respecting .gitignore (nested too, so .pixi/ is never packaged).
+if [ -z "$CWD" ] && [ -f pixi.toml ]; then
+    CWD="$(pwd)"
+elif [ -z "$CWD" ]; then
+    echo "note: no pixi.toml in $(pwd); the job runs in the head's default" >&2
+    echo "  working directory.  Run this from the repo on the manager, pass" >&2
+    echo "  --cwd, or self-locate with: --command \"bash -lc 'cd /abs && pixi run ...'\"" >&2
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "== CANFAR ray-job dry run =="
