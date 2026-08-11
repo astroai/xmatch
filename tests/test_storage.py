@@ -17,6 +17,7 @@ from xmatch.storage import (
     VOSpaceStorage,
     all_cache_roots,
     default_cache_root,
+    default_output_root,
     open_storage,
 )
 
@@ -220,6 +221,8 @@ def test_all_cache_roots_precedence_and_dedup(monkeypatch) -> None:
     key = "XMATCH_CACHE_ROOT"
     default = str(Path.home() / ".cache" / "xmatch")
     monkeypatch.delenv(key, raising=False)
+    # off-platform probe: tests must not depend on where they run
+    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: None)
 
     # unset everything -> the default root alone (never [])
     assert all_cache_roots() == [default]
@@ -238,6 +241,44 @@ def test_all_cache_roots_precedence_and_dedup(monkeypatch) -> None:
         "/env/root",
         "vos:rep-a",
     ]
+
+
+def test_default_cache_root_prefers_platform_arc(monkeypatch) -> None:
+    """On AstroAI/CANFAR sessions the cache defaults to /arc/projects/hats —
+    never a home directory — and XMATCH_CACHE_ROOT still wins."""
+    key = "XMATCH_CACHE_ROOT"
+    monkeypatch.delenv(key, raising=False)
+    home_default = str(Path.home() / ".cache" / "xmatch")
+
+    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: "/arc")
+    assert default_cache_root() == "/arc/projects/hats"
+
+    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: None)
+    assert default_cache_root() == home_default
+
+    # env override beats the platform default
+    monkeypatch.setenv(key, "vos:hats")
+    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: "/arc")
+    assert default_cache_root() == "vos:hats"
+
+
+def test_default_output_root_platform_and_env(monkeypatch) -> None:
+    """Outputs default to /arc/projects/hats/xmatch on the platform, stay
+    cwd-relative off it, and XMATCH_OUTPUT_ROOT (incl. empty=off) wins."""
+    key = "XMATCH_OUTPUT_ROOT"
+    monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: None)
+    assert default_output_root() is None
+
+    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: "/arc")
+    assert default_output_root() == "/arc/projects/hats/xmatch"
+
+    monkeypatch.setenv(key, "vos:hats/xmatch")
+    assert default_output_root() == "vos:hats/xmatch"
+
+    monkeypatch.setenv(key, "   ")
+    assert default_output_root() is None
 
 
 def test_vospace_requires_backend(monkeypatch) -> None:

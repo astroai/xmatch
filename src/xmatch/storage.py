@@ -408,9 +408,46 @@ def open_storage(root: Union[str, Path]) -> Storage:
     return LocalStorage(root)
 
 
+def platform_arc_root() -> Optional[str]:
+    """``/arc`` when running on an AstroAI/CANFAR session, else ``None``.
+
+    Every platform pod mounts the shared ``/arc`` volume; laptops never
+    have it.  This is the on-platform probe for the storage defaults.
+    """
+    return "/arc" if os.path.isdir("/arc") else None
+
+
 def default_cache_root() -> str:
-    """Effective default cache root: ``XMATCH_CACHE_ROOT`` else ``~/.cache/xmatch``."""
-    return os.environ.get("XMATCH_CACHE_ROOT") or str(Path.home() / ".cache" / "xmatch")
+    """Effective default cache root.
+
+    ``XMATCH_CACHE_ROOT`` wins; on AstroAI/CANFAR sessions (shared ``/arc``
+    volume) the default is ``/arc/projects/hats`` — never a home directory,
+    which is pod-local and lost; off the platform it falls back to
+    ``~/.cache/xmatch``.
+    """
+    env = os.environ.get("XMATCH_CACHE_ROOT")
+    if env:
+        return env
+    if platform_arc_root():
+        return "/arc/projects/hats"
+    return str(Path.home() / ".cache" / "xmatch")
+
+
+def default_output_root() -> Optional[str]:
+    """Root for crossmatch outputs.
+
+    ``XMATCH_OUTPUT_ROOT`` wins (empty string disables); on
+    AstroAI/CANFAR sessions the default is ``/arc/projects/hats/xmatch``;
+    off the platform there is no default and relative outputs stay
+    cwd-relative.  The CLI resolves bare relative output names under this
+    root; explicit paths are always respected verbatim.
+    """
+    env = os.environ.get("XMATCH_OUTPUT_ROOT")
+    if env is not None:
+        return env.strip() or None
+    if platform_arc_root():
+        return "/arc/projects/hats/xmatch"
+    return None
 
 
 def all_cache_roots(cache_cfg: Optional[dict] = None) -> List[str]:

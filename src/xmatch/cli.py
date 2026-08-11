@@ -52,6 +52,7 @@ from .discovery import (
     get_table_schema,
 )
 from .exceptions import ConfigError, CrossMatchError
+from .storage import default_output_root
 from .user_config import append_catalogue_to_user_config, format_catalogue_yaml, user_config_path
 
 logger = logging.getLogger(__name__)
@@ -827,7 +828,7 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         "--cache-root",
         dest="cache_root",
         help="Durable cache root for mirrored HATS catalogues (default: $XMATCH_CACHE_ROOT "
-        "or ~/.cache/xmatch).",
+        "or, on AstroAI/CANFAR sessions, /arc/projects/hats; else ~/.cache/xmatch).",
     )
     g_ray.add_argument(
         "--task-rows",
@@ -1186,7 +1187,7 @@ def _build_match_subparser() -> argparse.ArgumentParser:
         "--cache-root",
         dest="cache_root",
         help="Durable cache root for mirrored HATS catalogues (default: $XMATCH_CACHE_ROOT "
-        "or ~/.cache/xmatch).",
+        "or, on AstroAI/CANFAR sessions, /arc/projects/hats; else ~/.cache/xmatch).",
     )
     g_ray.add_argument(
         "--task-rows",
@@ -1377,7 +1378,7 @@ def _build_sync_subparser() -> argparse.ArgumentParser:
         "--cache-root",
         dest="cache_root",
         help="Durable cache root for mirrored HATS catalogues (default: $XMATCH_CACHE_ROOT "
-        "or ~/.cache/xmatch).",
+        "or, on AstroAI/CANFAR sessions, /arc/projects/hats; else ~/.cache/xmatch).",
     )
     parser.add_argument(
         "--threads",
@@ -2232,8 +2233,28 @@ def handle_adopt(
 # ────────────────────────────────────────────────────────────────────────────
 
 
+def _resolve_output_path(output_file: Optional[str]) -> Optional[str]:
+    """Resolve a bare relative output name against the platform output root.
+
+    On AstroAI/CANFAR sessions (shared ``/arc``) bare names like
+    ``full.hats`` land under ``/arc/projects/hats/xmatch/`` — never a
+    pod-local home or cwd.  Explicit paths (absolute or containing a
+    directory) are respected verbatim; ``XMATCH_OUTPUT_ROOT`` overrides the
+    platform default (empty disables it).  Off the platform this is a
+    no-op.
+    """
+    if not output_file:
+        return output_file
+    out_root = default_output_root()
+    if not out_root or os.path.isabs(output_file) or "/" in output_file:
+        return output_file
+    return os.path.join(out_root, output_file)
+
+
 def _execute_match(args, cm: CrossMatch, console: Console) -> int:
     """Drive the crossmatch orchestration common to legacy and subcommand modes."""
+    if args.output_file:
+        args.output_file = _resolve_output_path(args.output_file)
     if len(args.catalogues) < 2:
         console.error("Error: at least two catalogues are required for a crossmatch.")
         console.hint("Try 'xmatch --help' for usage, 'xmatch list' for catalogues,")

@@ -143,11 +143,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   brute-force-oracle comparison, resume skip, far-partner singles,
   cone-covering regression, rest-partition dedup, block-combination
   gating, max-tuples cap, mixed-order oracle, ring-to-nested conversion) —
-  plus 3 CLI sync tests (`test_cli_sync.py`), 11 `tests/test_storage.py`
-  tests (`all_cache_roots` precedence), a `RAY_ADDRESS` join test in
-  `test_matchers.py`, 3 driver-level ray-union tests in
-  `test_crossmatch.py` (2 driver-retry + 1 replica-read), and 3
+  plus 4 CLI sync tests (`test_cli_sync.py`, incl. the platform output-root
+  resolution), 13 `tests/test_storage.py` tests (`all_cache_roots`
+  precedence, platform `/arc` defaults for cache and output roots), a
+  `RAY_ADDRESS` join test in `test_matchers.py`, 3 driver-level ray-union
+  tests in `test_crossmatch.py` (2 driver-retry + 1 replica-read), and 3
   `tests/test_canfar_ray_job.py` script tests.
+* **Platform storage defaults**: on AstroAI/CANFAR sessions (probed by the
+  shared `/arc` mount) the mirrored-HATS cache defaults to
+  `/arc/projects/hats` and bare relative outputs land under
+  `/arc/projects/hats/xmatch` — never a pod-local home directory.
+  `XMATCH_CACHE_ROOT` and `XMATCH_OUTPUT_ROOT` (empty disables) override;
+  explicit output paths are respected verbatim; `vos:` roots (e.g.
+  `vos:hats`) work everywhere VOSpace is reachable.
 
 ### Changed — Catalogues
 

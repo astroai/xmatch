@@ -188,3 +188,20 @@ def test_cli_match_ray_union_from_local_hats(tmp_path) -> None:
     )
     assert sorted(df["_src_cats"].unique().to_list()) == ["1", "1+2"]
     assert (df["_src_cats"] == "1").sum() == 8
+
+
+def test_cli_resolves_bare_output_under_platform_root(monkeypatch) -> None:
+    """On the platform a bare -o name lands under the output root; explicit
+    paths and off-platform runs are untouched (XMATCH_OUTPUT_ROOT override
+    rides through default_output_root)."""
+    from xmatch.cli import _resolve_output_path
+
+    monkeypatch.setattr("xmatch.cli.default_output_root", lambda: "/arc/projects/hats/xmatch")
+    assert _resolve_output_path("full.hats") == "/arc/projects/hats/xmatch/full.hats"
+    assert _resolve_output_path("out.parquet") == "/arc/projects/hats/xmatch/out.parquet"
+    assert _resolve_output_path("/abs/full.hats") == "/abs/full.hats"
+    assert _resolve_output_path("sub/full.hats") == "sub/full.hats"
+    assert _resolve_output_path(None) is None
+
+    monkeypatch.setattr("xmatch.cli.default_output_root", lambda: None)
+    assert _resolve_output_path("full.hats") == "full.hats"

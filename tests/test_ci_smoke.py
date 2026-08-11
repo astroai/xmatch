@@ -311,8 +311,8 @@ def test_changelog_smoke_mirror_union_test_count() -> None:
 
     The v0.5 ``[Unreleased]`` "Added — HATS Mirroring + Distributed
     Union" section claims 14 mirror tests (``tests/test_mirror_sync.py``),
-    12 ray-union tests (``tests/test_ray_union.py``), 3 CLI sync tests
-    (``tests/test_cli_sync.py``) and 11 storage tests
+    12 ray-union tests (``tests/test_ray_union.py``), 4 CLI sync tests
+    (``tests/test_cli_sync.py``) and 13 storage tests
     (``tests/test_storage.py``).  This guard pins all four counts.
 
     !!! IMPORTANT NAMING CONSTRAINT !!!
@@ -323,9 +323,9 @@ def test_changelog_smoke_mirror_union_test_count() -> None:
     The ``mirror_sync`` keyword matches only ``tests/test_mirror_sync.py``
     node ids; ``ray_union`` matches the 12 ``tests/test_ray_union.py``
     tests plus the one ray-union CLI test and 3 driver-level
-    ``tests/test_crossmatch.py`` tests; ``cli_sync`` matches the 3
+    ``tests/test_crossmatch.py`` tests; ``cli_sync`` matches the 4
     ``tests/test_cli_sync.py`` tests; ``test_storage.py`` matches the
-    11 storage tests.
+    13 storage tests.
     """
     mirror = _collect_test_names("mirror_sync")
     ray = _collect_test_names("ray_union")
@@ -348,15 +348,15 @@ def test_changelog_smoke_mirror_union_test_count() -> None:
         f"'Added — HATS Mirroring + Distributed Union' together.\n\n"
         f"Collected {len(ray)} test(s):\n  " + "\n  ".join(ray)
     )
-    assert len(cli) == 3, (
-        f"Expected 3 CLI sync tests in tests/test_cli_sync.py, "
+    assert len(cli) == 4, (
+        f"Expected 4 CLI sync tests in tests/test_cli_sync.py, "
         f"but pytest collected {len(cli)}.\n"
         f"Update the test file and the CHANGELOG.md bullet "
         f"'Added — HATS Mirroring + Distributed Union' together.\n\n"
         f"Collected {len(cli)} test(s):\n  " + "\n  ".join(cli)
     )
-    assert len(storage) == 11, (
-        f"Expected 11 storage tests in tests/test_storage.py, "
+    assert len(storage) == 13, (
+        f"Expected 13 storage tests in tests/test_storage.py, "
         f"but pytest collected {len(storage)}.\n"
         f"Update the test file and the CHANGELOG.md bullet "
         f"'Added — HATS Mirroring + Distributed Union' together.\n\n"

@@ -2,9 +2,10 @@
 
 Backs the ``engine=ray-union`` pipeline: every remote input (a TAP table, or a
 HATS catalogue served over HTTP / ``vos:``) is mirrored into a per-catalogue
-cache dir under the cache root (``XMATCH_CACHE_ROOT``, else ``~/.cache/xmatch``),
-stored through :class:`xmatch.storage.Storage` (POSIX dir or VOSpace ``vos:``
-URI).  Re-syncs are incremental:
+cache dir under the cache root (``XMATCH_CACHE_ROOT``; on AstroAI/CANFAR
+sessions ``/arc/projects/hats``, else ``~/.cache/xmatch``), stored through
+:class:`xmatch.storage.Storage` (POSIX dir or VOSpace ``vos:`` URI).  Re-syncs
+are incremental:
 
 * **Remote HATS** — the manifest stores ``{rel: {size}}``; a file whose
   server-reported size matches is skipped (``--force`` / changed size

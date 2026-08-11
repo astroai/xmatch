@@ -24,10 +24,13 @@
 #   scripts/canfar-ray-job.sh \
 #       --command "pixi run xmatch match gaia desils --union -o full.hats --retries 2"
 #
-# IMPORTANT — the union cache must be visible to every worker pod: point
-# XMATCH_CACHE_ROOT / --cache-root at VOSpace (`vos:...`) or a shared
-# /arc path (pass `--env XMATCH_CACHE_ROOT=vos:xmatch-cache`); CANFAR
-# `/scratch` is per-pod and breaks remote workers' reads.
+# IMPORTANT — the union cache must be visible to every worker pod.  On the
+# platform the defaults are already shared: the mirrored-HATS cache root is
+# /arc/projects/hats (inputs) and bare relative outputs land in
+# /arc/projects/hats/xmatch — never a pod-local home.  Override with
+# `--env XMATCH_CACHE_ROOT=vos:hats` (VOSpace root) or
+# XMATCH_OUTPUT_ROOT=...; CANFAR `/scratch` is per-pod and breaks remote
+# workers' reads.
 #
 # Options:
 #   --command CMD        command to run as the Ray Job (shell string)

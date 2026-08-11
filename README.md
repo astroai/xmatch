@@ -400,9 +400,11 @@ xmatch sync gaia --force
 
 * Cache layout: `cache/<name>/<version>/` holds the HATS catalogue,
   `cache/<name>/raw/` the incremental TAP page store with a resumable
-  manifest. The root honours `$XMATCH_CACHE_ROOT` (`~/.cache/xmatch`
-  when unset). Local parquet inputs are converted into the same cache on
-  first use, so every input to a match can be a HATS catalogue.
+  manifest. The root honours `$XMATCH_CACHE_ROOT` (on AstroAI/CANFAR
+  sessions — probed by the shared `/arc` mount — the default is
+  `/arc/projects/hats`, never a pod-local home; off the platform
+  `~/.cache/xmatch`). Local parquet inputs are converted into the same
+  cache on first use, so every input to a match can be a HATS catalogue.
 * TAP re-syncs probe stored key windows with `COUNT(*)` and refetch only
   moved pages (plus appended tails); `--rate-limit`, `--threads`,
   `--hats-threshold`, and `--no-sync`/`--synclimit` tune the data plane.
@@ -483,11 +485,14 @@ Jobs CLI: [astroai-workload](https://github.com/astroai/astroai-workload)).
    Both `engine='ray'` and `engine='ray-union'` join the cluster in
    `RAY_ADDRESS`; unset, they start a local cluster exactly as before (on
    the manager pod, `ray.init(address="auto")` also works).
-3. The **union cache must be visible to every worker pod** — pass
-   `--env XMATCH_CACHE_ROOT=vos:xmatch-cache` (or a shared `/arc/...`
-   path); CANFAR `/scratch` is per-pod and breaks remote workers' reads.
-   `cache.roots` replicas work unchanged. `--retries`/resume work the same
-   in a job (mirror gaps refill, finished chunks are skipped).
+3. Storage defaults are already shared: on the platform the cache root is
+   `/arc/projects/hats` (inputs) and bare relative outputs land in
+   `/arc/projects/hats/xmatch` — no env needed. Override with
+   `--env XMATCH_CACHE_ROOT=...` / `XMATCH_OUTPUT_ROOT=...` (e.g. a
+   `vos:hats` VOSpace root); CANFAR `/scratch` is per-pod and breaks
+   remote workers' reads. `cache.roots` replicas work unchanged.
+   `--retries`/resume work the same in a job (mirror gaps refill, finished
+   chunks are skipped).
 4. Tear down: `astroai-workload cluster stop` destroys the workers; delete
    the manager session from the portal (`canfar delete xmatch-ray`).
 
