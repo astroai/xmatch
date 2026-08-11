@@ -310,14 +310,20 @@ def ray_zone_match(
         return _scipy_match(left, right, left_src, right_src, spec)
 
     # Group left by pixel.
-    l_by_pix: dict[int, list] = {}
-    for i, pix in enumerate(l_pix):
-        l_by_pix.setdefault(int(pix), []).append(i)
+    l_sort_idx = np.argsort(l_pix, kind="stable")
+    l_sorted_pix = l_pix[l_sort_idx]
+    l_unique_pix, l_unique_indices = np.unique(l_sorted_pix, return_index=True)
+    l_splits = np.split(l_sort_idx, l_unique_indices[1:])
+    l_by_pix: dict[int, list] = {
+        int(k): v.tolist() for k, v in zip(l_unique_pix, l_splits, strict=False)
+    }
 
     # Group right by pixel.
-    _, r_inv = np.unique(r_pix, return_inverse=True)
-    unique_pix = np.unique(r_pix)
-    r_groups = {int(pix): np.where(r_pix == pix)[0] for pix in unique_pix}
+    r_sort_idx = np.argsort(r_pix, kind="stable")
+    r_sorted_pix = r_pix[r_sort_idx]
+    unique_pix, r_unique_indices = np.unique(r_sorted_pix, return_index=True)
+    r_splits = np.split(r_sort_idx, r_unique_indices[1:])
+    r_groups = {int(k): v for k, v in zip(unique_pix, r_splits, strict=False)}
     r_xyz_by_pix = {int(pix): _radec_to_xyz(r_ra[idx], r_dec[idx]) for pix, idx in r_groups.items()}
 
     # Place right-side pixel data in Ray's object store (zero-copy for workers).
