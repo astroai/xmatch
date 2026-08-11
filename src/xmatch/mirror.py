@@ -1163,6 +1163,50 @@ def _replicate_tree(src_storage: Storage, dst_storage: Storage, rel: str) -> Non
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _walk_all_files(storage: Storage, rel: str, acc: List[str], depth: int = 0) -> None:
+    """Collect every FILE under ``rel`` (no filename filter).
+
+    :func:`_walk_storage` keeps only parquet/properties files, which is
+    right for mirrored catalogues — but union outputs also carry
+    ``resume.state`` and ``run.jsonl``, and a vos: staging must round-trip
+    those too or resume silently restarts from scratch.
+    """
+    if depth > 12:
+        return
+    try:
+        children = storage.list(rel)
+    except ValueError:  # traversal-shaped rel from a hostile listing
+        return
+    if not children:
+        return
+    if depth and children == [rel.rsplit("/", 1)[-1]]:
+        return  # vls on a leaf file echoes the file's own basename
+    for name in children:
+        child = f"{rel}/{name}".strip("/")
+        if name.endswith("/"):
+            _walk_all_files(storage, child, acc, depth + 1)
+            continue
+        if isinstance(storage, LocalStorage) and (Path(storage.root) / child).is_dir():
+            _walk_all_files(storage, child, acc, depth + 1)
+            continue
+        acc.append(child)
+
+
+def _copy_tree_files(src_storage: Storage, dst_storage: Storage, rel: str) -> None:
+    """Copy every file under ``rel`` onto ``dst_storage`` (unfiltered walk;
+    see :func:`_walk_all_files`)."""
+    rels: List[str] = []
+    _walk_all_files(src_storage, rel, rels)
+    tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-tree-"))
+    try:
+        for r in rels:
+            local = tmpdir / Path(r).name
+            src_storage.stage_in(r, local)
+            dst_storage.stage_out(local, r)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def _replicate_to_roots(cache: Storage, src: CatalogueSource, replica_roots: List[str]) -> None:
     """Best-effort copy of a synced mirror tree onto each replica root.
 

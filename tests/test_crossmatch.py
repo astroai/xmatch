@@ -914,3 +914,73 @@ def test_ray_union_no_sync_reads_surviving_replica(tmp_path):
     )
     n = sum(pl.read_parquet(p).height for p in (out / "dataset").rglob("Npix=*.parquet"))
     assert n == 2  # gaia mirror row + local b row, each its own island
+
+
+def test_union_vos_output_stages_local_and_uploads(monkeypatch, tmp_path):
+    """-o vos:... output: the engine writes a local staging dir (an existing
+    remote tree is pulled back first, so resume continues) and the completed
+    tree is uploaded on success."""
+    import xmatch.ray_union as ru
+    from xmatch.storage import LocalStorage
+
+    seen: dict = {}
+
+    def fake_union(*args, **kwargs):
+        out = Path(kwargs["output_file"])
+        seen["engine_output"] = str(out)
+        seen["staged_files"] = sorted(
+            p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()
+        )
+        (out / "dataset" / "Norder=0" / "Dir=0").mkdir(parents=True)
+        pl.DataFrame({"ra": [0.0], "dec": [0.0], "_src_cats": ["1+2"]}).write_parquet(
+            out / "dataset" / "Norder=0" / "Dir=0" / "Npix=0.parquet"
+        )
+        (out / "properties").write_text("dataproduct_type=object\nhats_nrows=1\n")
+        (out / "resume.state").write_text("ok\n")
+        ru._LAST_PLAN = None
+
+    monkeypatch.setattr(ru, "ray_union_match", fake_union)
+    vos_root = tmp_path / "vosroot"
+    (vos_root / "full.hats").mkdir(parents=True)
+    (vos_root / "full.hats" / "old_marker").write_text("pre-existing\n")
+    monkeypatch.setattr("xmatch.storage.open_storage", lambda root: LocalStorage(vos_root))
+
+    cm = CrossMatch()
+    cm.union_match(
+        [str(_tiny_hats(tmp_path, "a", 0.0, 0.0)), str(_tiny_hats(tmp_path, "b", 0.01, 0.01))],
+        output_file="vos:hats/xmatch/full.hats",
+        engine="ray-union",
+        no_sync=True,
+        radius_arcsec=1.5,
+    )
+    # the engine worked on a local staging dir, with the old tree pulled back
+    assert seen["engine_output"] != "vos:hats/xmatch/full.hats"
+    assert seen["engine_output"].endswith("full.hats")
+    assert "old_marker" in seen["staged_files"]
+    # and the completed tree was uploaded to the vos: root
+    assert (vos_root / "full.hats" / "properties").is_file()
+    assert (vos_root / "full.hats" / "resume.state").is_file()
+
+
+def test_io_vos_output_staged_upload(monkeypatch, tmp_path):
+    """write_frame with a vos: output stages locally and uploads through the
+    storage layer (VOSpace has no POSIX path)."""
+    from xmatch import io_utils
+    from xmatch.storage import LocalStorage
+
+    fake = LocalStorage(tmp_path / "vosroot")
+    monkeypatch.setattr("xmatch.storage.open_storage", lambda root: fake)
+
+    io_utils.write_frame(
+        pl.DataFrame({"ra": [1.0], "dec": [2.0], "m": [3.0]}),
+        "vos:hats/xmatch/out.parquet",
+    )
+    assert fake.exists("out.parquet")
+    assert pl.read_parquet(tmp_path / "vosroot" / "out.parquet").height == 1
+
+    io_utils.write_frame(
+        pl.DataFrame({"ra": [1.0], "dec": [2.0]}),
+        "vos:hats/xmatch/out.csv",
+    )
+    assert fake.exists("out.csv")
+    assert "ra,dec" in (tmp_path / "vosroot" / "out.csv").read_text()

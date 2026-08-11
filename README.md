@@ -488,11 +488,16 @@ Jobs CLI: [astroai-workload](https://github.com/astroai/astroai-workload)).
 3. Storage defaults are already shared: on the platform the cache root is
    `/arc/projects/hats` (inputs) and bare relative outputs land in
    `/arc/projects/hats/xmatch` — no env needed. Override with
-   `--env XMATCH_CACHE_ROOT=...` / `XMATCH_OUTPUT_ROOT=...` (e.g. a
-   `vos:hats` VOSpace root); CANFAR `/scratch` is per-pod and breaks
-   remote workers' reads. `cache.roots` replicas work unchanged.
+   `--env XMATCH_CACHE_ROOT=...` / `XMATCH_OUTPUT_ROOT=...`; VOSpace roots
+   work for both (`XMATCH_CACHE_ROOT=vos:hats`,
+   `-o vos:hats/xmatch/full.hats` — outputs are staged locally and
+   uploaded; a union rerun pulls the existing remote tree back first, so
+   resume continues). CANFAR `/scratch` is per-pod and breaks remote
+   workers' reads. `cache.roots` replicas work unchanged.
    `--retries`/resume work the same in a job (mirror gaps refill, finished
-   chunks are skipped).
+   chunks are skipped). Bare output names share the platform root: give
+   each run a distinct name (or a subdirectory) — a rerun with different
+   parameters wipes the previous run's stale chunks by design.
 4. Tear down: `astroai-workload cluster stop` destroys the workers; delete
    the manager session from the portal (`canfar delete xmatch-ray`).
 

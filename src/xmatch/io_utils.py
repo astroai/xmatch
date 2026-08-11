@@ -264,6 +264,65 @@ def write_hats(
     )
 
 
+def _write_frame_vospace(
+    frame: FrameLike,
+    output_file: str,
+    *,
+    ra_column: str,
+    dec_column: str,
+    hats_threshold: int,
+) -> None:
+    """Write a frame to a ``vos:`` node: VOSpace has no POSIX path, so the
+    frame is written to a local staging area and uploaded through the storage
+    layer (single files via ``stage_out``; HATS trees file-by-file via
+    :func:`xmatch.mirror._replicate_tree`).
+    """
+    import shutil
+    import tempfile
+
+    from .storage import LocalStorage, open_storage
+
+    root, _, rel = str(output_file).rpartition("/")
+    if not root or not rel:
+        raise InputError(f"Invalid vos: output '{output_file}' (need a container and a name).")
+    storage = open_storage(root)
+    suffix = Path(rel).suffix.lower()
+    if suffix == ".hats":
+        staging = Path(tempfile.mkdtemp(prefix="xmatch-hats-vos-"))
+        try:
+            write_hats(
+                frame,
+                staging / Path(rel).name,
+                ra_column=ra_column,
+                dec_column=dec_column,
+                threshold=hats_threshold,
+            )
+            from .mirror import _replicate_tree
+
+            _replicate_tree(LocalStorage(str(staging)), storage, "")
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        logger.info("Wrote HATS catalogue to %s", output_file)
+        return
+
+    staging = Path(tempfile.mkdtemp(prefix="xmatch-out-vos-"))
+    try:
+        local = staging / Path(rel).name
+        lf = to_lazy(frame)
+        if suffix == ".parquet":
+            lf.sink_parquet(local, engine="streaming")
+        elif suffix == ".csv":
+            lf.sink_csv(local, engine="streaming")
+        elif suffix in (".fits", ".fit"):
+            polars_to_astropy(lf).write(local, overwrite=True)
+        else:
+            raise InputError(f"Unsupported output format '{suffix}'.")
+        storage.stage_out(local, rel)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    logger.info("Wrote results to %s", output_file)
+
+
 def write_frame(
     frame: FrameLike,
     output_file: Union[str, Path],
@@ -281,7 +340,19 @@ def write_frame(
     directory (requires ``lsdb``).  ``ra_column`` and ``dec_column`` identify
     the spatial columns for partitioning; ``hats_threshold`` controls the
     maximum rows per HEALPix pixel.
+
+    A ``vos:`` output (e.g. ``vos:hats/xmatch/full.hats``) is staged locally
+    and uploaded through the storage layer.
     """
+    if isinstance(output_file, str) and output_file.startswith("vos:"):
+        _write_frame_vospace(
+            frame,
+            output_file,
+            ra_column=ra_column,
+            dec_column=dec_column,
+            hats_threshold=hats_threshold,
+        )
+        return
     out = Path(output_file)
     out.parent.mkdir(parents=True, exist_ok=True)
     suffix = out.suffix.lower()

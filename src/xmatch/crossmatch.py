@@ -20,6 +20,7 @@ import difflib
 import logging
 import multiprocessing
 import os
+import tempfile
 import time
 from dataclasses import replace
 from itertools import product as cartesian_product
@@ -1093,7 +1094,9 @@ class CrossMatch:
         Every input is mirrored into the cache first (:func:`.mirror.ensure_mirrored`),
         then the HATS-sharded Ray pipeline runs.  Writes the joined HATS catalogue
         at ``output_file`` and returns ``None`` (like every other output-file path
-        in this module).
+        in this module).  A ``vos:`` output is staged in a local directory (an
+        existing remote tree is pulled back first, so resume/reruns continue) and
+        uploaded on success.
         """
         if output_file is None:
             raise CrossMatchError("engine='ray-union' requires an output file (-o/--output .hats).")
@@ -1142,8 +1145,36 @@ class CrossMatch:
         )
         # Fail-fast headroom: a multi-day run must not die at 95% into a full disk.
         assert_headroom(cache_root, min_free, f"cache root '{cache_root}'")
-        out_dir = Path(str(output_file))
-        out_dir.mkdir(parents=True, exist_ok=True)
+        # A vos: output has no POSIX path: the engine writes a local staging
+        # dir (any existing remote tree is pulled back first, so resume and
+        # reruns continue where they left off) and the tree is uploaded on
+        # success.
+        out_text = str(output_file)
+        vos_out = out_text.startswith("vos:")
+        if vos_out:
+            from .mirror import _copy_tree_files
+            from .storage import LocalStorage, open_storage
+
+            vos_root, _, _name = out_text.rpartition("/")
+            if not vos_root or not _name:
+                raise CrossMatchError(
+                    f"Invalid vos: output '{output_file}' (need a container and a name)."
+                )
+            vos_storage = open_storage(vos_root)
+            staging = Path(tempfile.mkdtemp(prefix="xmatch-union-vos-"))
+            out_dir = staging / _name
+            if vos_storage.list(""):
+                try:
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    _copy_tree_files(vos_storage, LocalStorage(str(staging)), "")
+                    logger.info("staged existing vos: output from %s to %s", vos_root, out_dir)
+                except Exception as exc:  # noqa: BLE001 - best-effort pre-stage
+                    logger.warning("could not pre-stage existing vos: output: %s", exc)
+            engine_output = str(out_dir)
+        else:
+            out_dir = Path(out_text)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            engine_output = out_text
         assert_headroom(str(out_dir.parent), min_free, f"output directory '{out_dir.parent}'")
 
         # Append-only audit trail for day-scale runs: <out>/run.jsonl gains one
@@ -1234,7 +1265,7 @@ class CrossMatch:
                 ray_union.ray_union_match(
                     sources,
                     sep_arcsec=float(params.get("radius_arcsec", DEFAULT_RADIUS_ARCSEC)),
-                    output_file=str(output_file),
+                    output_file=engine_output,
                     hats_threshold=int(params.get("hats_threshold", DEFAULT_HATS_THRESHOLD)),
                     task_rows=params.get("task_rows"),
                     chunk_memory_gb=params.get("chunk_memory_gb"),
@@ -1243,6 +1274,10 @@ class CrossMatch:
                     progress_cb=progress,
                 )
                 self.last_ray_union_plan = ray_union.last_plan()  # for tests / doctor
+                if vos_out:
+                    _copy_tree_files(LocalStorage(str(staging)), vos_storage, "")
+                    logger.info("uploaded union output to %s", out_text)
+                    _append_run("vos_uploaded", output=out_text)
                 _append_run("done", attempt=attempt)
                 return None
             except Exception as exc:  # noqa: BLE001

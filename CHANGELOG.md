@@ -154,8 +154,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `/arc/projects/hats` and bare relative outputs land under
   `/arc/projects/hats/xmatch` — never a pod-local home directory.
   `XMATCH_CACHE_ROOT` and `XMATCH_OUTPUT_ROOT` (empty disables) override;
-  explicit output paths are respected verbatim; `vos:` roots (e.g.
-  `vos:hats`) work everywhere VOSpace is reachable.
+  explicit output paths are respected verbatim.  `vos:` roots (e.g.
+  `vos:hats`) work everywhere VOSpace is reachable — for the cache and now
+  also for outputs (`-o vos:hats/xmatch/full.hats`): the frame is staged
+  locally and uploaded, and a union run pulls an existing remote tree back
+  first so resume/reruns continue (every file, including `resume.state`).
+  Because bare output names share the platform root, runs should use
+  distinct names (or subdirectories): a rerun with different parameters
+  wipes the previous run's stale chunks by design.
 
 ### Changed — Catalogues
 

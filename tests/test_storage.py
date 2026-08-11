@@ -211,6 +211,7 @@ def test_open_storage_routing(tmp_path: Path) -> None:
 def test_default_cache_root(monkeypatch) -> None:
     key = "XMATCH_CACHE_ROOT"
     monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: None)
     assert default_cache_root() == str(Path.home() / ".cache" / "xmatch")
     monkeypatch.setenv(key, "/tmp/xc-root")
     assert default_cache_root() == "/tmp/xc-root"

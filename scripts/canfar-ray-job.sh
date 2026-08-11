@@ -28,9 +28,12 @@
 # platform the defaults are already shared: the mirrored-HATS cache root is
 # /arc/projects/hats (inputs) and bare relative outputs land in
 # /arc/projects/hats/xmatch — never a pod-local home.  Override with
-# `--env XMATCH_CACHE_ROOT=vos:hats` (VOSpace root) or
-# XMATCH_OUTPUT_ROOT=...; CANFAR `/scratch` is per-pod and breaks remote
-# workers' reads.
+# `--env XMATCH_CACHE_ROOT=vos:hats` (VOSpace root) or XMATCH_OUTPUT_ROOT=...
+# and `-o vos:hats/xmatch/name.hats` works too (staged locally, uploaded;
+# resume pulls the remote tree back first).  Bare output names share the
+# root: use a distinct name per run — a rerun with different parameters
+# wipes the previous run's stale chunks.  CANFAR `/scratch` is per-pod and
+# breaks remote workers' reads.
 #
 # Options:
 #   --command CMD        command to run as the Ray Job (shell string)

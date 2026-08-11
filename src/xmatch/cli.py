@@ -2246,7 +2246,12 @@ def _resolve_output_path(output_file: Optional[str]) -> Optional[str]:
     if not output_file:
         return output_file
     out_root = default_output_root()
-    if not out_root or os.path.isabs(output_file) or "/" in output_file:
+    if (
+        not out_root
+        or os.path.isabs(output_file)
+        or "/" in output_file
+        or output_file.startswith("~")
+    ):
         return output_file
     return os.path.join(out_root, output_file)
 
