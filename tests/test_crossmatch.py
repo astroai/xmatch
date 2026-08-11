@@ -876,3 +876,41 @@ def test_ray_union_driver_retries_exhausted_reraise(monkeypatch, tmp_path):
             retries=1,
             radius_arcsec=1.5,
         )
+
+
+def test_ray_union_no_sync_reads_surviving_replica(tmp_path):
+    """--no-sync + remote catalogue: the union reads the first surviving
+    copy across cache roots (primary -> replicas), not just the primary.
+
+    The gaia mirror exists ONLY under a replica root; pre-fix the union
+    resolved it against the primary root and crashed in build_union_plan
+    ("no HATS partitions") even though a copy was present.
+    """
+    pytest.importorskip("ray")
+    from xmatch.mirror import _safe_name, _version_dir
+
+    cm = CrossMatch()
+    primary = tmp_path / "primary"
+    replica = tmp_path / "replica"
+    src = cm.resolve_source("gaia_cds", {})
+    rel = f"{_safe_name(src.name)}/{_version_dir(src)}"
+    part = replica / rel / "dataset" / "Norder=0" / "Dir=2" / "Npix=0"
+    part.mkdir(parents=True)
+    pl.DataFrame({"RA_ICRS": [10.0], "DE_ICRS": [5.0], "Source": [1]}).write_parquet(
+        part / "Npix=0.parquet"
+    )
+    (replica / rel / "properties").write_text(
+        "hats_col_ra=RA_ICRS\nhats_col_dec=DE_ICRS\nhats_ordering=NESTED\n"
+    )
+    cm.config["cache"] = {"roots": [str(replica)]}
+    out = tmp_path / "union.hats"
+    cm.union_match(
+        ["gaia_cds", str(_tiny_hats(tmp_path, "b", 10.001, 5.001))],
+        output_file=out,
+        engine="ray-union",
+        no_sync=True,
+        cache_root=str(primary),
+        radius_arcsec=2.0,  # 5.1" apart: no match, both islands must survive
+    )
+    n = sum(pl.read_parquet(p).height for p in (out / "dataset").rglob("Npix=*.parquet"))
+    assert n == 2  # gaia mirror row + local b row, each its own island

@@ -69,6 +69,10 @@ class CatalogueSource:
     # Mirror location inside the xmatch cache root (set by ensure_mirrored).
     hats_cache_rel: Optional[str] = None
 
+    # Cache root that actually holds the mirrored copy at ``hats_cache_rel``
+    # (a replica root when the primary copy is gone; set by _mirrored_source).
+    hats_cache_root: Optional[str] = None
+
     # Alternate endpoints for the same data (mirror archives / mirrored
     # copies other data centres keep).  Entries are resolved CatalogueSource
     # objects (same-schema copies in xmatch.yaml) or raw http(s)/vos: HATS

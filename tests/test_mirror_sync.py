@@ -374,6 +374,42 @@ def test_sync_falls_back_to_alternate_endpoint(tmp_path: Path, monkeypatch) -> N
         srv_b.shutdown()
 
 
+def test_sync_hats_partial_transfer_fails_over(tmp_path: Path, monkeypatch) -> None:
+    """A HATS endpoint that died mid-transfer is retried on the fallback.
+
+    Per-file fetch errors are swallowed into ``stats.failed`` (incremental
+    mirroring), so the zero-transfer check alone would keep the broken
+    partial mirror; the candidate must be judged by its failure delta.
+    """
+    calls: list = []
+
+    def flaky(src, cache, *, bucket, force, workers, progress_cb, stats, endpoint):
+        calls.append(endpoint.access_identifier)
+        if len(calls) == 1:
+            stats.files_downloaded += 3
+            stats.failed += 2  # primary died partway through the transfer
+        else:
+            stats.files_skipped += 5  # fallback completes the mirror
+
+    src = CatalogueSource(
+        name="probe-hats",
+        is_local=False,
+        access_method="hats",
+        access_identifier="https://a.example.org/cat",
+        default_columns=["id", "ra", "dec"],
+        fallbacks=["https://b.example.org/cat"],
+    )
+    monkeypatch.setattr(mirror, "_mirror_remote_hats", flaky)
+    stats = _sync(src, str(tmp_path / "cache"))
+    assert calls == [
+        "https://a.example.org/cat",
+        "https://b.example.org/cat",
+    ]
+    assert stats.files_downloaded == 3
+    assert stats.files_skipped == 5
+    assert stats.failed == 2  # partial-failure facts preserved for the caller
+
+
 def test_sync_fallback_column_mismatch_refuses(tmp_path: Path, tap_server) -> None:
     """A fallback with different default_columns is refused before any fetch."""
     srv_b = FakeTAPServer(make_rows(50))

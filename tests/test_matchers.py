@@ -1250,6 +1250,9 @@ def test_ray_engine_joins_ray_address(monkeypatch):
         assert out.height == 2  # both left rows matched the close right row
     finally:
         ray.shutdown()
+
+
+def test_ray_engine_graceful_fallback_when_unavailable(monkeypatch):
     """When Ray is not installed, the ray engine must fall back to zone
     (or fast) transparently and still produce correct results."""
     # Directly patch the availability check so the fallback path is

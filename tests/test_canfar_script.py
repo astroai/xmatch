@@ -38,6 +38,10 @@ def test_canfar_script_dry_run_output() -> None:
     assert "--num-cpus=" in out
     assert "RAY_ADDRESS=" in out
     assert "ray stop" in out
+    # the batch script fans itself out one instance per node (sbatch runs
+    # the script once; srun is what puts a task on every node)
+    assert "srun --nodes=4 --ntasks=4 --ntasks-per-node=1" in out
+    assert "--srun-child" in out
     assert "Submitted batch job" not in out
 
 

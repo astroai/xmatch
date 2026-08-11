@@ -128,21 +128,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   guaranteed), and RING-ordered copies (`hats_ordering=RING`) are converted
   to NESTED when the plan builds.
 * **`scripts/canfar-cluster.sh`**: one `sbatch` starts a Ray cluster sized
-  to the Slurm allocation (head on rank 0, workers join, all ranks stop
+  to the Slurm allocation (the batch script fans itself out one instance
+  per node via `srun`; rank 0 is the head, workers join, all ranks stop
   their raylets on exit) and runs `--command` with `RAY_ADDRESS` exported;
   `--dry-run` prints the plan without submitting. `engine='ray'` and
   `engine='ray-union'` join the cluster in `RAY_ADDRESS` when set.
-* **Tests**: 13 `tests/test_mirror_sync.py` tests (incremental TAP sync,
+* **Tests**: 14 `tests/test_mirror_sync.py` tests (incremental TAP sync,
   force re-fetch, window-shrink/append continuation, HATS-over-HTTP mirror,
-  HATS-over-`vos:` mirror, endpoint failover, column-gate refusal,
-  multi-root locate probing),
+  HATS-over-`vos:` mirror, endpoint failover, partial-transfer failover,
+  column-gate refusal, multi-root locate probing),
   12 `tests/test_ray_union.py` tests (3-catalogue-vs-oracle,
   brute-force-oracle comparison, resume skip, far-partner singles,
   cone-covering regression, rest-partition dedup, block-combination
   gating, max-tuples cap, mixed-order oracle, ring-to-nested conversion) —
   plus 3 CLI sync tests (`test_cli_sync.py`), 11 `tests/test_storage.py`
   tests (`all_cache_roots` precedence), a `RAY_ADDRESS` join test in
-  `test_matchers.py`, and 2 `tests/test_canfar_script.py` script tests.
+  `test_matchers.py`, 3 driver-level ray-union tests in
+  `test_crossmatch.py` (2 driver-retry + 1 replica-read), and 3
+  `tests/test_canfar_script.py` script tests.
 
 ### Changed — Catalogues
 

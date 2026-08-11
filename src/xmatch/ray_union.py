@@ -226,13 +226,18 @@ def _footer_row_count(storage: Storage, rel: str) -> Optional[int]:
 def _catalogue_root(src: CatalogueSource, cache_root: Optional[str]) -> Tuple[str, str]:
     """(storage root URI, HATS rel) for a local HATS catalogue.
 
-    Mirrored sources (``hats_cache_rel`` set) live under the cache root;
-    plain local HATS dirs are opened with the catalogue dir as root.
+    Mirrored sources (``hats_cache_rel`` set) live under a cache root —
+    their own ``hats_cache_root`` when it is known (a replica copy found
+    by the no-sync walk), else the cache root argument; plain local HATS
+    dirs are opened with the catalogue dir as root.
     """
     if src.hats_cache_rel:
         from .storage import default_cache_root
 
-        return cache_root or default_cache_root(), src.hats_cache_rel
+        return (
+            src.hats_cache_root or cache_root or default_cache_root(),
+            src.hats_cache_rel,
+        )
     return str(src.path or src.access_identifier or ""), ""
 
 

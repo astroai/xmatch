@@ -1214,15 +1214,22 @@ class CrossMatch:
                     ]
                 else:
                     # --no-sync: require cached HATS copies up front, with the actionable
-                    # "run xmatch sync" error instead of a path-shaped crash downstream.
-                    for src in sources:
+                    # "run xmatch sync" error instead of a path-shaped crash downstream,
+                    # and repoint each remote source at the first surviving copy
+                    # (primary root, then replicas) so the union reads a replica when
+                    # the primary is gone instead of failing on an empty directory.
+                    from .mirror import _mirrored_source
+                    from .storage import open_storage
+
+                    for i, src in enumerate(sources):
                         if src.access_method == "tap" or (
                             src.access_method == "hats"
                             and (src.access_identifier or "").startswith(
                                 ("http://", "https://", "vos:")
                             )
                         ):
-                            locate_mirrored(src, cache_roots=roots)
+                            root, rel = locate_mirrored(src, cache_roots=roots)
+                            sources[i] = _mirrored_source(src, open_storage(root), rel, root)
                 _append_run("mirror_done", attempt=attempt, sources=[s.name for s in sources])
                 ray_union.ray_union_match(
                     sources,

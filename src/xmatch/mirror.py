@@ -1082,10 +1082,12 @@ def _sync_with_failover(
     Endpoint-class failures only (connection refused/dropped, TAP job
     failure): ``CrossMatchError``-family failures (ceiling, row-count
     mismatch, column gate) always propagate — a mirror that *ran* against a
-    different schema is worse than no mirror.  For remote HATS the only
-    observable endpoint failure is a totally empty transfer (listing or
-    every fetch failed), so a candidate that moved zero files is retried
-    against the next fallback.
+    different schema is worse than no mirror.  For remote HATS, per-file
+    fetch errors are swallowed into ``stats.failed`` (the catalogue is
+    mirrored incrementally, so a dead endpoint is only visible as failed
+    transfers), so a candidate that failed any file — or moved zero files
+    at all (listing or every fetch failed) — is retried against the next
+    fallback.
     """
     candidates = _fallback_candidates(src)
     for i, cand in enumerate(candidates):
@@ -1097,6 +1099,13 @@ def _sync_with_failover(
             )
         try:
             if src.access_method == "hats":
+                # stats accumulate across candidates; judge this candidate
+                # by the delta it produced.
+                dl0, sk0, fa0 = (
+                    stats.files_downloaded,
+                    stats.files_skipped,
+                    stats.failed,
+                )
                 _mirror_remote_hats(
                     src,
                     cache,
@@ -1107,7 +1116,12 @@ def _sync_with_failover(
                     stats=stats,
                     endpoint=cand,
                 )
-                if stats.files_downloaded == 0 and stats.files_skipped == 0:
+                d_fail = stats.failed - fa0
+                if d_fail > 0:
+                    raise urllib.error.URLError(
+                        f"{d_fail} file(s) failed to download from {cand.access_identifier}"
+                    )
+                if stats.files_downloaded - dl0 == 0 and stats.files_skipped - sk0 == 0:
                     raise urllib.error.URLError(
                         f"no files transferred from {cand.access_identifier}"
                     )
@@ -1398,6 +1412,7 @@ def _mirrored_source(src: CatalogueSource, cache: Storage, rel: str, root: str) 
         access_identifier=str(path) if path is not None else f"{root.rstrip('/')}/{rel}",
         path=path,
         hats_cache_rel=rel,
+        hats_cache_root=root,
         ra_column=src.ra_column,
         dec_column=src.dec_column,
         id_column=src.id_column,

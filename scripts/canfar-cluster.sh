@@ -16,11 +16,13 @@
 #   sbatch scripts/canfar-cluster.sh --nodes 4 --time 12:00:00 --account def-x \
 #       --command "pixi run xmatch match gaia desils --union -o full.hats --retries 2"
 #
-# Inside the allocation: rank 0 runs `ray start --head`, the other ranks
+# Inside the allocation: the batch script runs exactly once (on the first
+# node), so it fans itself out with `srun` — one instance per compute
+# node.  Rank 0 (SLURM_PROCID=0) runs `ray start --head`, the other ranks
 # join with `ray start --address=$HEAD:6379`, rank 0 waits until every
-# node reports in (120 s cap), exports RAY_ADDRESS=$HEAD:6379 and
-# runs CMD with that environment, and every rank stops its Ray runtime on
-# exit (trap), so the job never leaves stray raylets on the nodes.
+# node reports in (120 s cap), exports RAY_ADDRESS=$HEAD:6379 and runs
+# CMD with that environment, and every rank stops its Ray runtime on exit
+# (trap), so the job never leaves stray raylets on the nodes.
 #
 # IMPORTANT — the union cache must live on storage shared by all compute
 # nodes: point XMATCH_CACHE_ROOT / --cache-root at a shared path (e.g.
@@ -41,9 +43,10 @@ ACCOUNT=""
 TIME="06:00:00"
 CMD='pixi run xmatch match gaia desils --union -o full.hats --retries 2'
 DRY_RUN=0
+SRUN_CHILD=0
 
 usage() {
-    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -62,6 +65,8 @@ while [ "$#" -gt 0 ]; do
             CMD="$2"; shift 2 ;;
         --dry-run)
             DRY_RUN=1; shift ;;
+        --srun-child)
+            SRUN_CHILD=1; shift ;;
         -h|--help)
             usage; exit 0 ;;
         *)
@@ -84,7 +89,11 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
         echo "  sbatch --nodes=$NODES --ntasks=$NODES --time=$TIME$acct_disp"
         echo "         --parsable $0 --command $(shq "$CMD")"
         echo
-        echo "Inside the allocation (rank 0) it would run:"
+        echo "Inside the allocation the batch script (one run, first node) fans out:"
+        echo "  srun --nodes=$NODES --ntasks=$NODES --ntasks-per-node=1"
+        echo "       $0 --command $(shq "$CMD") --srun-child"
+        echo
+        echo "Rank 0 would run:"
         echo "  pixi run ray start --head --port=6379 --dashboard-host=127.0.0.1 --num-cpus=\$(nproc)"
         echo "  (head hostname scraped from 'ray start' output -> \$HEAD)"
         echo "  export RAY_ADDRESS=\$HEAD:6379"
@@ -106,11 +115,19 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
 fi
 
 # ---------------------------------------------------------------- allocation
-# One instance per compute node (sbatch --ntasks=N).  The head-file in the
-# (shared) working directory is the only coordination: rank 0 writes its
-# hostname, workers join it, rank 0 removes it on exit and workers stop.
+# sbatch runs the batch script ONCE (on the first node; --ntasks only
+# reserves tasks).  To get one instance per compute node we re-launch
+# ourselves through srun: each srun task gets a distinct SLURM_PROCID and
+# lands on its own node.  `--srun-child` marks the re-launched instances
+# so they don't fan out again.
 HEAD_FILE="${SLURM_JOB_ID}.ray-head"
 EXPECTED_NODES="${SLURM_NNODES:-$NODES}"
+
+if [ "$SRUN_CHILD" -eq 0 ]; then
+    srun --nodes="$EXPECTED_NODES" --ntasks="$EXPECTED_NODES" \
+        --ntasks-per-node=1 "$0" --command "$CMD" --srun-child
+    exit $?
+fi
 
 cleanup() {
     pixi run ray stop --force >/dev/null 2>&1 || true
@@ -118,7 +135,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ "${SLURM_NODEID:-0}" -eq 0 ]; then
+# Wall-time budget for the worker-side wait: allocation time plus margin.
+_h=${TIME%%:*}; _rest=${TIME#*:}; _m=${_rest%%:*}; _s=${_rest##*:}
+WALL_SEC=$((_h * 3600 + _m * 60 + _s + 600))
+
+if [ "${SLURM_PROCID:-0}" -eq 0 ]; then
     # ---- head: start the cluster, wait for every node, run CMD
     start_out=$(pixi run ray start --head --port=6379 --dashboard-host=127.0.0.1 \
         --num-cpus="$(nproc)" 2>&1)
@@ -129,10 +150,12 @@ if [ "${SLURM_NODEID:-0}" -eq 0 ]; then
     fi
     printf '%s\n' "$HEAD" > "$HEAD_FILE"
 
+    # ray status lists healthy nodes as `N node_<hex>` lines (no "raylet"
+    # text in Ray 2.x); count those until every node is in.
     i=0
     n=0
     while [ "$i" -lt 120 ]; do
-        n=$(pixi run ray status 2>/dev/null | grep -c raylet || true)
+        n=$(pixi run ray status 2>/dev/null | grep -c 'node_' || true)
         [ "$n" -ge "$EXPECTED_NODES" ] && break
         i=$((i + 1))
         sleep 1
@@ -161,7 +184,13 @@ while [ ! -s "$HEAD_FILE" ]; do
 done
 HEAD=$(cat "$HEAD_FILE")
 pixi run ray start --address="$HEAD:6379" --num-cpus="$(nproc)"
+i=0
 while [ -f "$HEAD_FILE" ]; do
+    i=$((i + 5))
+    if [ "$i" -ge "$WALL_SEC" ]; then
+        echo "worker $(hostname): head did not finish within the wall budget; exiting" >&2
+        exit 1
+    fi
     sleep 5
 done
 exit 0

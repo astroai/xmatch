@@ -310,7 +310,7 @@ def test_changelog_smoke_mirror_union_test_count() -> None:
     """Pin the mirroring/union test inventories documented in CHANGELOG.md.
 
     The v0.5 ``[Unreleased]`` "Added — HATS Mirroring + Distributed
-    Union" section claims 13 mirror tests (``tests/test_mirror_sync.py``),
+    Union" section claims 14 mirror tests (``tests/test_mirror_sync.py``),
     12 ray-union tests (``tests/test_ray_union.py``), 3 CLI sync tests
     (``tests/test_cli_sync.py``) and 11 storage tests
     (``tests/test_storage.py``).  This guard pins all four counts.
@@ -322,7 +322,8 @@ def test_changelog_smoke_mirror_union_test_count() -> None:
 
     The ``mirror_sync`` keyword matches only ``tests/test_mirror_sync.py``
     node ids; ``ray_union`` matches the 12 ``tests/test_ray_union.py``
-    tests plus the one ray-union CLI test; ``cli_sync`` matches the 3
+    tests plus the one ray-union CLI test and 3 driver-level
+    ``tests/test_crossmatch.py`` tests; ``cli_sync`` matches the 3
     ``tests/test_cli_sync.py`` tests; ``test_storage.py`` matches the
     11 storage tests.
     """
@@ -331,16 +332,17 @@ def test_changelog_smoke_mirror_union_test_count() -> None:
     cli = _collect_test_names("cli_sync")
     storage = _collect_test_names("test_storage.py")
 
-    assert len(mirror) == 13, (
-        f"Expected 13 mirror tests in tests/test_mirror_sync.py, "
+    assert len(mirror) == 14, (
+        f"Expected 14 mirror tests in tests/test_mirror_sync.py, "
         f"but pytest collected {len(mirror)}.\n"
         f"Update the test file and the CHANGELOG.md bullet "
         f"'Added — HATS Mirroring + Distributed Union' together.\n\n"
         f"Collected {len(mirror)} test(s):\n  " + "\n  ".join(mirror)
     )
-    assert len(ray) == 15, (
-        f"Expected 15 ray-union tests (12 tests/test_ray_union.py + 1 CLI + "
-        f"2 driver-retry tests in tests/test_crossmatch.py), "
+    assert len(ray) == 16, (
+        f"Expected 16 ray-union tests (12 tests/test_ray_union.py + 1 CLI + "
+        f"3 driver-level tests in tests/test_crossmatch.py: 2 driver-retry "
+        f"+ 1 replica-read), "
         f"but pytest collected {len(ray)}.\n"
         f"Update the test files and the CHANGELOG.md bullet "
         f"'Added — HATS Mirroring + Distributed Union' together.\n\n"
