@@ -16,7 +16,14 @@ from typing import Optional
 
 
 class CrossMatchError(Exception):
-    """Base class for every public xmatch exception."""
+    """Base class for every public xmatch exception.
+
+    Subclasses may attach an optional ``source`` attribute — the
+    user-supplied identifier that triggered the failure — so the CLI's
+    error handler can offer "did you mean?" suggestions.
+    """
+
+    source: Optional[str] = None
 
 
 class ConfigError(CrossMatchError):
