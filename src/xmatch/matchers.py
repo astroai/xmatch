@@ -618,17 +618,17 @@ def _apply_proper_motion(
             return df
 
         if src.epoch_column and src.epoch_column in df.columns:
-            epoch_arr = df[src.epoch_column].to_numpy().astype(float)
+            epoch_arr = df[src.epoch_column].to_numpy().astype(float, copy=False)
         elif src.epoch is not None:
             epoch_arr = np.full(df.height, float(src.epoch), dtype=float)
         else:
             logger.debug("No epoch info on %s side; skipping.", label)
             return df
 
-        ra_arr = df[src.ra_column].to_numpy().astype(float)
-        dec_arr = df[src.dec_column].to_numpy().astype(float)
-        pmra = df[src.pm_ra_column].to_numpy().astype(float)
-        pmde = df[src.pm_dec_column].to_numpy().astype(float)
+        ra_arr = df[src.ra_column].to_numpy().astype(float, copy=False)
+        dec_arr = df[src.dec_column].to_numpy().astype(float, copy=False)
+        pmra = df[src.pm_ra_column].to_numpy().astype(float, copy=False)
+        pmde = df[src.pm_dec_column].to_numpy().astype(float, copy=False)
 
         complete = np.zeros(df.height, dtype=bool)
         parallax = radial_velocity = None
@@ -639,8 +639,8 @@ def _apply_proper_motion(
             and src.radial_velocity_column in df.columns
         )
         if has_6d_columns:
-            parallax = df[src.parallax_column].to_numpy().astype(float)
-            radial_velocity = df[src.radial_velocity_column].to_numpy().astype(float)
+            parallax = df[src.parallax_column].to_numpy().astype(float, copy=False)
+            radial_velocity = df[src.radial_velocity_column].to_numpy().astype(float, copy=False)
             complete = (
                 np.isfinite(ra_arr)
                 & np.isfinite(dec_arr)
@@ -665,8 +665,10 @@ def _apply_proper_motion(
                 )
             complete &= admissible
 
-        new_ra = ra_arr.copy()
-        new_dec = dec_arr.copy()
+        # Ensure we own a writeable copy to avoid mutating the original dataframe.
+        # .astype(..., copy=False) returns a read-only view if the column is already float64.
+        new_ra = ra_arr if ra_arr.flags.writeable else ra_arr.copy()
+        new_dec = dec_arr if dec_arr.flags.writeable else dec_arr.copy()
         covariance_done = np.zeros(df.height, dtype=bool)
         propagated_covariance = None
         covariance_data = _astrometric_covariance_mas(df, src) if propagate_covariance else None
@@ -794,11 +796,15 @@ def _apply_proper_motion(
                 int(complete.sum()),
                 df.height,
             )
+
+        # Use read-only original array directly from dataframe to avoid copies when computing delta
+        orig_ra = df[src.ra_column].to_numpy()
+        orig_dec = df[src.dec_column].to_numpy()
         logger.info(
             "PM propagation %s: max ΔRA=%.4f arcsec, max ΔDec=%.4f arcsec",
             label,
-            float(np.nanmax(np.abs((new_ra - ra_arr + 180.0) % 360.0 - 180.0))) * 3600.0,
-            float(np.nanmax(np.abs(new_dec - dec_arr))) * 3600.0,
+            float(np.nanmax(np.abs((new_ra - orig_ra + 180.0) % 360.0 - 180.0))) * 3600.0,
+            float(np.nanmax(np.abs(new_dec - orig_dec))) * 3600.0,
         )
         columns = [
             pl.Series(src.ra_column, new_ra),
@@ -868,7 +874,7 @@ def _apply_pm_drift_prior(
 
         # Need epoch info to compute time baseline.
         if src.epoch_column and src.epoch_column in df.columns:
-            epoch_arr = df[src.epoch_column].to_numpy().astype(float)
+            epoch_arr = df[src.epoch_column].to_numpy().astype(float, copy=False)
         elif src.epoch is not None:
             epoch_arr = np.full(df.height, float(src.epoch), dtype=float)
         else:

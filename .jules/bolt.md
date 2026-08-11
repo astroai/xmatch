@@ -56,3 +56,7 @@
 ## 2023-10-27 - Fast first-occurrence indices in NumPy
 **Learning:** `np.unique(..., return_index=True)` incurs massive overhead (up to 6-7x slower) even when the input array is already guaranteed to be sorted (e.g. immediately after `np.lexsort`). This is because it lacks a fast-path for pre-sorted inputs in standard numpy and performs a redundant sort internally.
 **Action:** When filtering to the best matching pairs using a sorted array (e.g. `order = np.lexsort((scores, group_ids))`, `sorted_groups = group_ids[order]`), replace `np.unique(sorted_groups, return_index=True)` with a manual diff mask: `split_points = np.nonzero(sorted_groups[1:] != sorted_groups[:-1])[0] + 1` prepended with `[0]`. This correctly identifies the first index of each group boundary ~6x faster on large astronomical data arrays.
+
+## 2026-08-10 - Avoid redundant deep copies after astype conversion
+**Learning:** When pulling data out of a Polars DataFrame as a NumPy array (e.g. `df["col"].to_numpy().astype(float)`), `.astype()` natively returns a new writeable array if the data isn't natively float. Chaining `.copy()` or doing `new_arr = arr.copy()` immediately afterwards causes a redundant deep copy of the arrays, consuming twice the required memory and significant CPU cycles over large catalogs.
+**Action:** Do not chain `.copy()` on the output of `.astype()`. Rely on the writeable reference it returns, and use raw `.to_numpy()` zero-copy reads from the DataFrame when referencing the pre-mutation state of an array to calculate deltas.
