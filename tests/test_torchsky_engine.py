@@ -135,3 +135,109 @@ def test_torchsky_engine_matches_fast_all_candidates() -> None:
         rtol=0.0,
         atol=1e-6,
     )
+
+
+def test_torchsky_engine_skyerr_matches_fast() -> None:
+    left = pl.DataFrame(
+        {
+            "left_id": [0, 1],
+            "ra": [10.0, 20.0],
+            "dec": [0.0, 0.0],
+            "ra_err": [0.2, 0.2],
+            "dec_err": [0.2, 0.2],
+        }
+    )
+    right = pl.DataFrame(
+        {
+            "right_id": [0, 1],
+            "ra": [10.0001, 80.0],
+            "dec": [0.0, 0.0],
+            "ra_err": [0.2, 0.2],
+            "dec_err": [0.2, 0.2],
+        }
+    )
+    spec = MatchSpec(matcher="skyerr", max_error=3.0, fallback_policy="error")
+    left_src = CatalogueSource(
+        name="left",
+        is_local=True,
+        id_column="left_id",
+        ra_column="ra",
+        dec_column="dec",
+        ra_err_column="ra_err",
+        dec_err_column="dec_err",
+    )
+    right_src = CatalogueSource(
+        name="right",
+        is_local=True,
+        id_column="right_id",
+        ra_column="ra",
+        dec_column="dec",
+        ra_err_column="ra_err",
+        dec_err_column="dec_err",
+    )
+    outputs = {
+        engine: sky_match(
+            left_src,
+            right_src,
+            left.lazy(),
+            right.lazy(),
+            spec,
+            engine=engine,
+        )
+        .collect()
+        .sort("left_id")
+        for engine in ("fast", "torchsky")
+    }
+    assert outputs["torchsky"]["left_id"].to_list() == outputs["fast"]["left_id"].to_list()
+    assert outputs["torchsky"]["right_id"].to_list() == outputs["fast"]["right_id"].to_list()
+    np.testing.assert_allclose(
+        outputs["torchsky"]["sep_arcsec"].to_numpy(),
+        outputs["fast"]["sep_arcsec"].to_numpy(),
+        rtol=0.0,
+        atol=1e-6,
+    )
+
+
+def test_torchsky_skyerr_nan_sigma_does_not_match() -> None:
+    """Unknown positional error is not an infinite acceptance radius."""
+    left = pl.DataFrame(
+        {
+            "left_id": [0],
+            "ra": [10.0],
+            "dec": [0.0],
+            "ra_err": [float("nan")],
+            "dec_err": [float("nan")],
+        }
+    )
+    right = pl.DataFrame(
+        {
+            "right_id": [0],
+            "ra": [10.0],
+            "dec": [0.0],
+            "ra_err": [0.2],
+            "dec_err": [0.2],
+        }
+    )
+    spec = MatchSpec(matcher="skyerr", max_error=3.0, fallback_policy="error")
+    left_src = CatalogueSource(
+        name="left",
+        is_local=True,
+        id_column="left_id",
+        ra_column="ra",
+        dec_column="dec",
+        ra_err_column="ra_err",
+        dec_err_column="dec_err",
+    )
+    right_src = CatalogueSource(
+        name="right",
+        is_local=True,
+        id_column="right_id",
+        ra_column="ra",
+        dec_column="dec",
+        ra_err_column="ra_err",
+        dec_err_column="dec_err",
+    )
+    out = sky_match(
+        left_src, right_src, left.lazy(), right.lazy(), spec, engine="torchsky"
+    ).collect()
+    assert out.height == 0

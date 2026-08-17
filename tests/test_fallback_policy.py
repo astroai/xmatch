@@ -106,11 +106,35 @@ def test_torchsky_engine_adapts_nearest_match_result(
     assert captured["inputs"][-2:] == (1.5, "best")
 
 
+def test_torchsky_skyerr_nan_sigma_is_not_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_crossmatch(left_ra, left_dec, right_ra, right_dec, *, radius_arcsec, find):
+        return SimpleNamespace(
+            left_index=np.array([0], dtype=np.int64),
+            right_index=np.array([0], dtype=np.int64),
+            separation_arcsec=np.array([0.0]),
+        )
+
+    monkeypatch.setattr("xmatch.matchers._load_torchsky_crossmatch", lambda: fake_crossmatch)
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [np.nan], "dee": [np.nan]})
+    right = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [0.1], "dee": [0.1]})
+    left_idx, right_idx, _seps = _torchsky_match(
+        left,
+        right,
+        _source("left", ra_err_column="rae", dec_err_column="dee"),
+        _source("right", ra_err_column="rae", dec_err_column="dee"),
+        MatchSpec(matcher="skyerr", max_error=3.0),
+    )
+    assert left_idx.size == 0
+    assert right_idx.size == 0
+
+
 @pytest.mark.parametrize(
     "spec",
     [
-        MatchSpec(matcher="skyerr", fallback_policy="error"),
         MatchSpec(extra_distance_cols={"mag": 1.0}, fallback_policy="error"),
+        MatchSpec(matcher="skyellipse", fallback_policy="error"),
     ],
 )
 def test_torchsky_strict_policy_rejects_unsupported_semantics(spec: MatchSpec) -> None:

@@ -58,6 +58,7 @@ class CatalogueSource:
     pm_dec_column: Optional[str] = None
     parallax_column: Optional[str] = None
     radial_velocity_column: Optional[str] = None
+    frame: str = "icrs"
 
     # Remote access metadata.
     access_method: Optional[str] = None  # None | "tap" | "cds_xmatch" | "hats"

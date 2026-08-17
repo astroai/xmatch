@@ -7,8 +7,9 @@ Sky-match engines (drop-in alternatives):
 * ``astropy`` – ``match_to_catalog_sky`` / ``search_around_sky`` from astropy.
 * ``fast``   – Tier 1: ``scipy.spatial.cKDTree`` on 3D Cartesian unit-sphere
   embeddings. Drop-in replacement for ``astropy`` in-memory; ~3-5x faster.
-* ``torchsky`` – tensor-native nearest-neighbour matching with a coarse
-  nested-HEALPix candidate index.
+* ``torchsky`` – optional tensor-native nearest-neighbour matching. Geometry
+  only: ``matcher='sky'`` and ``matcher='skyerr'`` (per-row radii). Association
+  policy (Bayes / LR / AUF / FoF) stays in this module.
 * ``zone``   – Tier 2: HEALPix-sharded cone match. Uses ``cdshealpix`` when
   importable (sub-pixel zonning + per-pixel ``cKDTree`` queries) and falls
   back to a single ``cKDTree`` query when ``cdshealpix`` is not available
@@ -2434,6 +2435,27 @@ def _load_torchsky_crossmatch():
     return crossmatch_sky
 
 
+def _torchsky_lonlat(df: pl.DataFrame, src: CatalogueSource):
+    """RA/Dec degrees, converted to ICRS when ``CatalogueSource.frame`` is set."""
+    ra = df[src.ra_column].to_numpy()
+    dec = df[src.dec_column].to_numpy()
+    frame = str(getattr(src, "frame", None) or "icrs").strip().lower()
+    if frame in {"icrs", "j2000", "j2000.0"}:
+        return ra, dec
+    try:
+        from torchsky.wcs import convert_celestial
+    except ImportError as exc:
+        raise CrossMatchError("engine='torchsky' requires the optional torchsky package") from exc
+    ra_t, dec_t = convert_celestial(ra, dec, from_frame=src.frame, to_frame="icrs")
+
+    def _np(value):
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().numpy()
+        return np.asarray(value)
+
+    return _np(ra_t), _np(dec_t)
+
+
 def _torchsky_match(
     left: pl.DataFrame,
     right: pl.DataFrame,
@@ -2441,27 +2463,49 @@ def _torchsky_match(
     right_src: CatalogueSource,
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Run Torchsky's deterministic nearest-neighbour catalog matcher."""
-    if spec.matcher != "sky" or spec.extra_distance_cols:
+    """Run Torchsky's catalog matcher for ``sky`` and ``skyerr``."""
+    empty = (
+        np.array([], dtype=np.int64),
+        np.array([], dtype=np.int64),
+        np.array([], dtype=float),
+    )
+    if spec.extra_distance_cols or spec.matcher not in {"sky", "skyerr"}:
         raise CrossMatchError(
-            "engine='torchsky' currently supports only matcher='sky' and no extra_distance_cols"
+            "engine='torchsky' currently supports only matcher='sky' or 'skyerr' "
+            "and no extra_distance_cols"
         )
     if left.height == 0 or right.height == 0:
-        return (
-            np.array([], dtype=np.int64),
-            np.array([], dtype=np.int64),
-            np.array([], dtype=float),
-        )
+        return empty
 
     crossmatch_sky = _load_torchsky_crossmatch()
-    # Pass read-only numpy arrays directly to avoid expensive deep copies
+    left_ra, left_dec = _torchsky_lonlat(left, left_src)
+    right_ra, right_dec = _torchsky_lonlat(right, right_src)
+
+    lsig = rsig = None
+    if spec.matcher == "skyerr":
+        lsig = _pos_sigma_arcsec(left, left_src)
+        rsig = _pos_sigma_arcsec(right, right_src)
+        if lsig is None or rsig is None:
+            raise CrossMatchError(
+                "engine='torchsky' matcher='skyerr' requires positional errors on both sides"
+            )
+        radius = np.maximum(
+            spec.max_error
+            * (np.nan_to_num(lsig, nan=1e-12) + float(np.nanmax(np.nan_to_num(rsig, nan=0.0)))),
+            1e-12,
+        )
+        find = "all"
+    else:
+        radius = spec.radius_arcsec
+        find = spec.find
+
     result = crossmatch_sky(
-        left[left_src.ra_column].to_numpy(),
-        left[left_src.dec_column].to_numpy(),
-        right[right_src.ra_column].to_numpy(),
-        right[right_src.dec_column].to_numpy(),
-        radius_arcsec=spec.radius_arcsec,
-        find=spec.find,
+        left_ra,
+        left_dec,
+        right_ra,
+        right_dec,
+        radius_arcsec=radius,
+        find=find,
     )
 
     def as_numpy(value, dtype):
@@ -2469,11 +2513,21 @@ def _torchsky_match(
             value = value.detach().cpu().numpy()
         return np.asarray(value, dtype=dtype)
 
-    return (
-        as_numpy(result.left_index, np.int64),
-        as_numpy(result.right_index, np.int64),
-        as_numpy(result.separation_arcsec, float),
-    )
+    left_idx = as_numpy(result.left_index, np.int64)
+    right_idx = as_numpy(result.right_index, np.int64)
+    seps = as_numpy(result.separation_arcsec, float)
+    if spec.matcher == "skyerr" and left_idx.size:
+        pair_sigma = lsig[left_idx] + rsig[right_idx]
+        keep = np.isfinite(pair_sigma) & (seps <= spec.max_error * pair_sigma)
+        left_idx, right_idx, seps = left_idx[keep], right_idx[keep], seps[keep]
+        if spec.find == "best" and left_idx.size:
+            order = np.lexsort((right_idx, seps, left_idx))
+            left_idx = left_idx[order]
+            right_idx = right_idx[order]
+            seps = seps[order]
+            first = _first_occurrence_indices(left_idx)
+            left_idx, right_idx, seps = left_idx[first], right_idx[first], seps[first]
+    return left_idx, right_idx, seps
 
 
 # --------------------------------------------------------------------------- #
