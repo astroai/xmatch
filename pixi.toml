@@ -12,7 +12,7 @@ test = "pytest"
 
 [dependencies]
 # <3.14: hats / cdshealpix / ray do not all ship cp314 wheels yet.
-python = ">=3.11,<3.14"
+python = "3.13.*"
 # hats → numba needs numpy<2.5; conda solve alone picks 2.5.x.
 numpy = ">=1.26,<2.5"
 pandas = ">=1.3"
