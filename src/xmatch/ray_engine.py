@@ -27,6 +27,7 @@ import numpy as np
 from astropy.coordinates import Latitude, Longitude
 
 from .exceptions import CrossMatchError
+from .matchers import _first_occurrence_indices
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +313,8 @@ def ray_zone_match(
     # Group left by pixel.
     l_sort_idx = np.argsort(l_pix, kind="stable")
     l_sorted_pix = l_pix[l_sort_idx]
-    l_unique_pix, l_unique_indices = np.unique(l_sorted_pix, return_index=True)
+    l_unique_indices = _first_occurrence_indices(l_sorted_pix)
+    l_unique_pix = l_sorted_pix[l_unique_indices]
     l_splits = np.split(l_sort_idx, l_unique_indices[1:])
     l_by_pix: dict[int, list] = {
         int(k): v.tolist() for k, v in zip(l_unique_pix, l_splits, strict=False)
@@ -321,7 +323,8 @@ def ray_zone_match(
     # Group right by pixel.
     r_sort_idx = np.argsort(r_pix, kind="stable")
     r_sorted_pix = r_pix[r_sort_idx]
-    unique_pix, r_unique_indices = np.unique(r_sorted_pix, return_index=True)
+    r_unique_indices = _first_occurrence_indices(r_sorted_pix)
+    unique_pix = r_sorted_pix[r_unique_indices]
     r_splits = np.split(r_sort_idx, r_unique_indices[1:])
     r_groups = {int(k): v for k, v in zip(unique_pix, r_splits, strict=False)}
     r_xyz_by_pix = {int(pix): _radec_to_xyz(r_ra[idx], r_dec[idx]) for pix, idx in r_groups.items()}
