@@ -73,7 +73,7 @@ def test_torchsky_engine_adapts_nearest_match_result(
 ) -> None:
     captured = {}
 
-    def fake_crossmatch(left_ra, left_dec, right_ra, right_dec, *, radius_arcsec, find):
+    def fake_crossmatch(left_ra, left_dec, right_ra, right_dec, *, radius_arcsec, find, **_kwargs):
         captured["inputs"] = (
             left_ra,
             left_dec,
@@ -109,7 +109,7 @@ def test_torchsky_engine_adapts_nearest_match_result(
 def test_torchsky_skyerr_nan_sigma_is_not_accepted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_crossmatch(left_ra, left_dec, right_ra, right_dec, *, radius_arcsec, find):
+    def fake_crossmatch(left_ra, left_dec, right_ra, right_dec, *, radius_arcsec, find, **_kwargs):
         return SimpleNamespace(
             left_index=np.array([0], dtype=np.int64),
             right_index=np.array([0], dtype=np.int64),

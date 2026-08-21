@@ -2464,11 +2464,15 @@ def _torchsky_match(
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run Torchsky's catalog matcher for ``sky`` and ``skyerr``."""
+    import numpy as np
+    import torch
+
     empty = (
         np.array([], dtype=np.int64),
         np.array([], dtype=np.int64),
         np.array([], dtype=float),
     )
+
     if spec.extra_distance_cols or spec.matcher not in {"sky", "skyerr"}:
         raise CrossMatchError(
             "engine='torchsky' currently supports only matcher='sky' or 'skyerr' "
@@ -2481,6 +2485,17 @@ def _torchsky_match(
     left_ra, left_dec = _torchsky_lonlat(left, left_src)
     right_ra, right_dec = _torchsky_lonlat(right, right_src)
 
+    def _tensor(values):
+        arr = np.asarray(values, dtype=np.float64)
+        if not arr.flags.writeable or not arr.flags.c_contiguous:
+            arr = np.array(arr, dtype=np.float64, copy=True, order="C")
+        return torch.from_numpy(arr)
+
+    left_ra_t = _tensor(left_ra)
+    left_dec_t = _tensor(left_dec)
+    right_ra_t = _tensor(right_ra)
+    right_dec_t = _tensor(right_dec)
+
     lsig = rsig = None
     if spec.matcher == "skyerr":
         lsig = _pos_sigma_arcsec(left, left_src)
@@ -2489,22 +2504,22 @@ def _torchsky_match(
             raise CrossMatchError(
                 "engine='torchsky' matcher='skyerr' requires positional errors on both sides"
             )
-        radius = np.maximum(
-            spec.max_error
-            * (np.nan_to_num(lsig, nan=1e-12) + float(np.nanmax(np.nan_to_num(rsig, nan=0.0)))),
-            1e-12,
+        radius = spec.max_error * (
+            np.nan_to_num(lsig, nan=1e-12) + float(np.nanmax(np.nan_to_num(rsig, nan=0.0)))
         )
+        radius = np.maximum(radius, 1e-12)
         find = "all"
+        radius_arg = _tensor(radius)
     else:
-        radius = spec.radius_arcsec
+        radius_arg = float(spec.radius_arcsec)
         find = spec.find
 
     result = crossmatch_sky(
-        left_ra,
-        left_dec,
-        right_ra,
-        right_dec,
-        radius_arcsec=radius,
+        left_ra_t,
+        left_dec_t,
+        right_ra_t,
+        right_dec_t,
+        radius_arcsec=radius_arg,
         find=find,
     )
 
