@@ -2465,21 +2465,23 @@ def _torchsky_match(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run Torchsky's catalog matcher for ``sky`` and ``skyerr``."""
     import numpy as np
-    import torch
-
-    empty = (
-        np.array([], dtype=np.int64),
-        np.array([], dtype=np.int64),
-        np.array([], dtype=float),
-    )
 
     if spec.extra_distance_cols or spec.matcher not in {"sky", "skyerr"}:
         raise CrossMatchError(
             "engine='torchsky' currently supports only matcher='sky' or 'skyerr' "
             "and no extra_distance_cols"
         )
+    empty = (
+        np.array([], dtype=np.int64),
+        np.array([], dtype=np.int64),
+        np.array([], dtype=float),
+    )
     if left.height == 0 or right.height == 0:
         return empty
+    try:
+        import torch
+    except ImportError as exc:
+        raise CrossMatchError("engine='torchsky' requires the optional torchsky package") from exc
 
     crossmatch_sky = _load_torchsky_crossmatch()
     left_ra, left_dec = _torchsky_lonlat(left, left_src)
@@ -3223,15 +3225,8 @@ def sky_match(
     elif chosen == "torchsky":
         left = left_lf.collect()
         right = right_lf.collect()
-        try:
-            l_idx, r_idx, seps = _torchsky_match(left, right, left_src, right_src, spec)
-            logger.info("torchsky sky match: %d matched pairs.", len(l_idx))
-        except CrossMatchError as exc:
-            if spec.fallback_policy == "error":
-                raise
-            logger.warning("%s; falling back to fast engine.", exc)
-            l_idx, r_idx, seps = _scipy_match(left, right, left_src, right_src, spec)
-            logger.info("fast (cKDTree) sky match: %d matched pairs.", len(l_idx))
+        l_idx, r_idx, seps = _torchsky_match(left, right, left_src, right_src, spec)
+        logger.info("torchsky sky match: %d matched pairs.", len(l_idx))
     elif chosen == "zone":
         left = left_lf.collect()
         right = right_lf.collect()

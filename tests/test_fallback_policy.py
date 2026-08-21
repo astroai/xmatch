@@ -71,6 +71,7 @@ def test_zone_strict_policy_fails_when_healpix_is_unavailable(
 def test_torchsky_engine_adapts_nearest_match_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pytest.importorskip("torch")
     captured = {}
 
     def fake_crossmatch(left_ra, left_dec, right_ra, right_dec, *, radius_arcsec, find, **_kwargs):
@@ -109,6 +110,8 @@ def test_torchsky_engine_adapts_nearest_match_result(
 def test_torchsky_skyerr_nan_sigma_is_not_accepted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pytest.importorskip("torch")
+
     def fake_crossmatch(left_ra, left_dec, right_ra, right_dec, *, radius_arcsec, find, **_kwargs):
         return SimpleNamespace(
             left_index=np.array([0], dtype=np.int64),
@@ -152,9 +155,8 @@ def test_torchsky_strict_policy_rejects_unsupported_semantics(spec: MatchSpec) -
         ).collect()
 
 
-def test_torchsky_warn_policy_falls_back_to_fast(
+def test_torchsky_missing_package_fails_loud(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     def missing_torchsky():
         raise CrossMatchError("engine='torchsky' requires the optional torchsky package")
@@ -163,14 +165,12 @@ def test_torchsky_warn_policy_falls_back_to_fast(
     left = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005]})
 
-    out = sky_match(
-        _source("left"),
-        _source("right"),
-        left.lazy(),
-        right.lazy(),
-        MatchSpec(),
-        engine="torchsky",
-    ).collect()
-
-    assert out.height == 1
-    assert "falling back to fast engine" in caplog.text
+    with pytest.raises(CrossMatchError, match="requires the optional torchsky"):
+        sky_match(
+            _source("left"),
+            _source("right"),
+            left.lazy(),
+            right.lazy(),
+            MatchSpec(),
+            engine="torchsky",
+        ).collect()
