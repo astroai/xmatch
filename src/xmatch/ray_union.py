@@ -1150,23 +1150,33 @@ def _assemble(plan: UnionPlan) -> Dict[str, Any]:
         hub_parts = plan.catalogues[0].partitions
         max_hub_order = max(p.order for p in hub_parts)
         hub_idx, outside_pix = _rest_hub_keys(frame, cat, hub_parts, max_hub_order)
-        for h in np.unique(hub_idx[hub_idx >= 0]):
-            sub = frame.filter(pl.Series("_k", hub_idx == h, dtype=pl.Boolean))
+
+        hub_parts_dict = frame.with_columns(pl.Series("_k", hub_idx)).partition_by(
+            "_k", as_dict=True
+        )
+        for (h,), sub_df in hub_parts_dict.items():
+            if h < 0:
+                continue
             tmp = out / "chunks" / f".rest-{rest.cat}-{rest.part_idx:05d}-h{int(h):05d}.tmp"
             try:
-                sub.write_parquet(tmp)
+                sub_df.drop("_k").write_parquet(tmp)
                 add_partition(plan.catalogues[0].partitions[int(h)], tmp, keep=False)
             finally:
                 tmp.unlink(missing_ok=True)
-        for px in np.unique(outside_pix[outside_pix >= 0]):
-            sub = frame.filter(pl.Series("_o", outside_pix == px, dtype=pl.Boolean))
+
+        outside_parts_dict = frame.with_columns(pl.Series("_o", outside_pix)).partition_by(
+            "_o", as_dict=True
+        )
+        for (px,), sub_df in outside_parts_dict.items():
+            if px < 0:
+                continue
             tmp = (
                 out
                 / "chunks"
                 / f".rest-{rest.cat}-{rest.part_idx:05d}-o{max_hub_order:02d}_{int(px)}.tmp"
             )
             try:
-                sub.write_parquet(tmp)
+                sub_df.drop("_o").write_parquet(tmp)
                 add_partition(
                     PartitionPlan(order=max_hub_order, pix=int(px), rel=""), tmp, keep=False
                 )

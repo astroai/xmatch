@@ -64,3 +64,7 @@
 ## 2026-08-08 - O(N log N) vectorized grouping instead of native loop
 **Learning:** When grouping large arrays (like HEALPix indices) into dictionaries by unique values, using a native Python loop with `setdefault` or iterating over unique values with `np.where(arr == k)` results in extremely slow O(N) or O(N*K) performance due to Python overhead or repeated full-array boolean scans.
 **Action:** Replace slow grouping loops with O(N log N) vectorized sorting and splitting: `sort_idx = np.argsort(arr)`, then `unique, start_idx = np.unique(arr[sort_idx], return_index=True)`, followed by `splits = np.split(sort_idx, start_idx[1:])` and a quick dictionary comprehension `dict(zip(unique, splits))`.
+
+## 2026-08-15 - Polars partition_by over looping .filter
+**Learning:** When splitting a massive DataFrame by unique values (like HEALPix indices), looping over `np.unique(child)` in Python and applying a boolean mask sequentially `df.filter(pl.Series("_mask", child == cpix))` causes $O(N \times K)$ execution time, severely bottlenecking data orchestration routines in `mirror.py` and `ray_union.py`.
+**Action:** Instead of boolean filtering in a loop, temporarily append the assignment array and use Polars' native engine via `df.with_columns(pl.Series("_k", child)).partition_by("_k", as_dict=True)`. This performs a highly optimized $O(N)$ pass in Rust/C++, dramatically increasing grouping performance.
