@@ -21,3 +21,7 @@
 ## 2023-10-26 - Helpful Error Messages
 **Learning:** If a user miss-spells a catalogue or endpoint name in the CLI, showing a plain 'not found' error isn't helpful enough. Attaching a `source` to the exception allows the error handler to suggest a "Did you mean: ...?" option using `difflib.get_close_matches`, making the error message immediately actionable.
 **Action:** When throwing errors for missing user-provided configuration keys, explicitly attach the invalid key as a `source` to the exception so the global error handler can render "Did you mean?" suggestions.
+
+## 2026-09-08 - Missing loading states in remote discovery CLI commands
+**Learning:** CLI commands that make remote network requests (like querying TAP_SCHEMA in `discover`, `search`, and `adopt`) can take several seconds and appear hung to the user if no loading state is present.
+**Action:** Wrap synchronous network calls in `cli.py` (like `get_table_schema` and `discover_tables`) with the existing `Progress` context manager to provide immediate visual feedback.
