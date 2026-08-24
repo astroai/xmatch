@@ -1058,6 +1058,8 @@ def _scipy_match(
     right_src: CatalogueSource,
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    import itertools
+
     from scipy.spatial import cKDTree
 
     empty = (np.array([], int), np.array([], int), np.array([], float))
@@ -1123,17 +1125,15 @@ def _scipy_match(
     # function can compute reliabilities across the full candidate set.
     if spec.matcher in ("lr", "ml", "xgb", "auf", "macauff"):
         idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
-        l_parts, r_parts = [], []
-        for i, neighbors in enumerate(idx_lists):
-            if not neighbors:
-                continue
-            nb = np.asarray(neighbors, dtype=np.int64)
-            l_parts.append(np.full(nb.shape, i, dtype=np.int64))
-            r_parts.append(nb)
-        if not r_parts:
+        # ⚡ Bolt Optimization: Replace O(N) python loop over cKDTree lists with O(N) vectorized C-level operations
+        # Itertools chain flattens the list of lists significantly faster than native Python concatenation
+        lens = np.fromiter((len(x) for x in idx_lists), dtype=int, count=len(idx_lists))
+        total_matches = lens.sum()
+        if total_matches == 0:
             return empty
-        left_idx = np.concatenate(l_parts)
-        right_idx = np.concatenate(r_parts)
+
+        right_idx = np.fromiter(itertools.chain.from_iterable(idx_lists), dtype=np.int64, count=total_matches)
+        left_idx = np.repeat(np.arange(len(idx_lists), dtype=np.int64), lens)
         sep = _chord_to_arcsec(np.linalg.norm(l_xyz[left_idx] - r_xyz[right_idx], axis=-1))
         return left_idx, right_idx, sep
     if spec.find == "best":
@@ -1206,17 +1206,15 @@ def _scipy_match(
 
     # find == "all": per-left list of matched right indices.
     idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
-    l_parts, r_parts = [], []
-    for i, neighbors in enumerate(idx_lists):
-        if not neighbors:
-            continue
-        nb = np.asarray(neighbors, dtype=np.int64)
-        l_parts.append(np.full(nb.shape, i, dtype=np.int64))
-        r_parts.append(nb)
-    if not r_parts:
+    # ⚡ Bolt Optimization: Replace O(N) python loop over cKDTree lists with O(N) vectorized C-level operations
+    # Itertools chain flattens the list of lists significantly faster than native Python concatenation
+    lens = np.fromiter((len(x) for x in idx_lists), dtype=int, count=len(idx_lists))
+    total_matches = lens.sum()
+    if total_matches == 0:
         return empty
-    left_idx = np.concatenate(l_parts)
-    right_idx = np.concatenate(r_parts)
+
+    right_idx = np.fromiter(itertools.chain.from_iterable(idx_lists), dtype=np.int64, count=total_matches)
+    left_idx = np.repeat(np.arange(len(idx_lists), dtype=np.int64), lens)
     sep = _chord_to_arcsec(np.linalg.norm(l_xyz[left_idx] - r_xyz[right_idx], axis=-1))
 
     # --- skyellipse Mahalanobis post-filter (find="all") -------------------
@@ -2613,6 +2611,8 @@ def _zone_match_healpix(
     right_src: CatalogueSource,
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    import itertools
+
     import cdshealpix as hp
     from scipy.spatial import cKDTree
 
@@ -2769,18 +2769,25 @@ def _zone_match_healpix(
                     r=chord_max,
                     workers=-1,
                 )
-                for neighbor_index, neighbors in enumerate(idx_lists):
-                    if not neighbors:
-                        continue
-                    k_idx = left_indices[neighbor_index]
-                    nb = np.asarray(neighbors, dtype=np.int64)
-                    global_r_indices = margin_global[nb].astype(np.int64)
+
+                # ⚡ Bolt Optimization: Replace O(N) python loop over cKDTree lists with O(N) vectorized C-level operations
+                # Itertools chain flattens the list of lists significantly faster than native Python concatenation
+                lens = np.fromiter((len(x) for x in idx_lists), dtype=int, count=len(idx_lists))
+                total_matches = lens.sum()
+                if total_matches > 0:
+                    local_r_indices = np.fromiter(itertools.chain.from_iterable(idx_lists), dtype=np.int64, count=total_matches)
+                    local_l_indices = np.repeat(np.arange(len(idx_lists), dtype=np.int64), lens)
+
+                    k_indices = np.asarray(left_indices, dtype=np.int64)[local_l_indices]
+                    global_r_indices = margin_global[local_r_indices].astype(np.int64)
+
                     chords = np.linalg.norm(
-                        margin_xyz[nb] - batch_xyz[neighbor_index],
+                        margin_xyz[local_r_indices] - batch_xyz[local_l_indices],
                         axis=-1,
                     )
                     seps = _chord_to_arcsec(chords)
-                    batch_l.append(np.full(len(neighbors), k_idx, dtype=np.int64))
+
+                    batch_l.append(k_indices)
                     batch_r.append(global_r_indices)
                     batch_s.append(np.asarray(seps, dtype=float))
 
