@@ -21,3 +21,6 @@
 ## 2023-10-26 - Helpful Error Messages
 **Learning:** If a user miss-spells a catalogue or endpoint name in the CLI, showing a plain 'not found' error isn't helpful enough. Attaching a `source` to the exception allows the error handler to suggest a "Did you mean: ...?" option using `difflib.get_close_matches`, making the error message immediately actionable.
 **Action:** When throwing errors for missing user-provided configuration keys, explicitly attach the invalid key as a `source` to the exception so the global error handler can render "Did you mean?" suggestions.
+## 2023-10-25 - Progress Wrappers for Long Network Calls
+**Learning:** In a CLI that interacts with external network APIs (like TAP services via `pyvo`), functions that perform synchronous network requests (like fetching schemas or discovering tables) can make the CLI appear hung if there's no visual feedback. The existing codebase includes a lightweight, dependency-free `Progress` context manager that cleanly renders a Braille spinner to stderr.
+**Action:** When adding or modifying synchronous network I/O in the CLI, always wrap it in the `Progress("message", enabled=console.enabled)` context manager to provide immediate visual feedback. This is non-intrusive and automatically disables itself in non-TTY environments.
