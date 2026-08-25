@@ -72,3 +72,7 @@
 ## 2024-08-25 - Replace np.unique + loop + boolean mask with Polars partition_by
 **Learning:** When grouping large NumPy arrays (e.g., HEALPix indices) into dictionaries by unique values and extracting subsets of a DataFrame, using native Python loops with `np.unique` combined with sequential boolean masks (`sub.filter(pl.Series("_mask", child == cpix))`) causes massive O(N*K) performance overhead. In a Polars context, this is extremely inefficient.
 **Action:** Use Polars' native O(N) vectorized approach: `df.with_columns(pl.Series('_k', arr)).partition_by('_k', as_dict=True)` to retrieve group subsets as a dictionary. This single optimization reduced execution time from ~1.37s to ~0.09s for large (1M+) arrays.
+
+## 2026-08-15 - Fast unpacking of list of lists via itertools and np.fromiter
+**Learning:** When retrieving matched neighbor indices from spatial queries (e.g. `scipy.spatial.cKDTree.query_ball_point`), unpacking a list of lists using a Python `for` loop with repeated `np.full` and `np.concatenate` allocations introduces significant overhead.
+**Action:** Replace the Python loop with a vectorized C-level approach using `lens = np.fromiter((len(x) for x in idx_lists), dtype=int)`, `right_idx = np.fromiter(itertools.chain.from_iterable(idx_lists), dtype=np.int64, count=lens.sum())`, and `left_idx = np.repeat(np.arange(len(idx_lists)), lens)`. This provides ~5x speedup for large query results by avoiding repeated NumPy allocations and pushing the iteration into C.
