@@ -1973,10 +1973,11 @@ def handle_search(cm: CrossMatch, pattern: str, console: Console) -> int:
     for name, info in sorted(endpoints.items()):
         console.header(f"── {console.bold(name)}  {console.dim(info['description'])} ──")
         try:
-            tables = discover_tables(
-                info["url"],
-                name_filter=effective_pattern if effective_pattern != "%" else None,
-            )
+            with Progress(f"Discovering tables on {name} …", enabled=console.enabled):
+                tables = discover_tables(
+                    info["url"],
+                    name_filter=effective_pattern if effective_pattern != "%" else None,
+                )
         except Exception as exc:
             console.error(f"  [{console.dim('unreachable')}: {exc}]")
             continue
@@ -1997,10 +1998,11 @@ def handle_search(cm: CrossMatch, pattern: str, console: Console) -> int:
                 continue
             url = svc["access_url"]
             try:
-                tables = discover_tables(
-                    url,
-                    name_filter=effective_pattern if effective_pattern != "%" else None,
-                )
+                with Progress(f"Discovering tables on {archive_key}/{svc_key} …", enabled=console.enabled):
+                    tables = discover_tables(
+                        url,
+                        name_filter=effective_pattern if effective_pattern != "%" else None,
+                    )
             except Exception:
                 continue
             if tables.height:
@@ -2046,7 +2048,8 @@ def handle_discover(
 
     if schema_table:
         try:
-            schema = get_table_schema(url, schema_table)
+            with Progress(f"Fetching schema for '{schema_table}' …", enabled=console.enabled):
+                schema = get_table_schema(url, schema_table)
         except Exception as exc:
             console.error(f"Failed to query schema for '{schema_table}': {exc}")
             return 1
@@ -2108,7 +2111,8 @@ def handle_discover(
         )
     else:
         try:
-            tables = discover_tables(url)
+            with Progress(f"Discovering tables on {endpoint} …", enabled=console.enabled):
+                tables = discover_tables(url)
         except Exception as exc:
             console.error(f"Failed to discover tables: {exc}")
             return 1
@@ -2159,7 +2163,8 @@ def handle_adopt(
 
     console.info(f"Probing {console.cyan(table)} on {console.cyan(tap_url)} …")
     try:
-        schema = get_table_schema(tap_url, table)
+        with Progress(f"Fetching schema for '{table}' …", enabled=console.enabled):
+            schema = get_table_schema(tap_url, table)
     except Exception as exc:
         console.error(f"Failed to query schema for '{table}': {exc}")
         return 1

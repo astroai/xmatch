@@ -21,3 +21,6 @@
 ## 2023-10-26 - Helpful Error Messages
 **Learning:** If a user miss-spells a catalogue or endpoint name in the CLI, showing a plain 'not found' error isn't helpful enough. Attaching a `source` to the exception allows the error handler to suggest a "Did you mean: ...?" option using `difflib.get_close_matches`, making the error message immediately actionable.
 **Action:** When throwing errors for missing user-provided configuration keys, explicitly attach the invalid key as a `source` to the exception so the global error handler can render "Did you mean?" suggestions.
+## 2024-05-30 - Prevent CLI from hanging on long-running network requests
+**Learning:** To prevent the CLI from appearing hung during long-running synchronous network requests (e.g., `discover_tables`, `get_table_schema`), the existing `Progress` context manager (`with Progress('message', enabled=console.enabled):`) is extremely useful to provide immediate visual loading feedback.
+**Action:** When adding new long-running network requests in `cli.py`, always wrap them in the `Progress` context manager.
