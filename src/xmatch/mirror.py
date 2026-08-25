@@ -921,9 +921,7 @@ def _write_hats_native(
             parts = sub.with_columns(pl.Series("_mask", child)).partition_by("_mask", as_dict=True)
             for k, psub in parts.items():
                 cpix = k[0]
-                stack.append(
-                    (order + 1, int(cpix), psub.drop("_mask"))
-                )
+                stack.append((order + 1, int(cpix), psub.drop("_mask")))
 
     info: List[Dict[str, Any]] = []
     for order, pix, sub in segments:

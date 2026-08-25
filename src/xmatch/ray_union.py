@@ -1151,7 +1151,11 @@ def _assemble(plan: UnionPlan) -> Dict[str, Any]:
         max_hub_order = max(p.order for p in hub_parts)
         hub_idx, outside_pix = _rest_hub_keys(frame, cat, hub_parts, max_hub_order)
         # Bolt: Replaced O(N*K) np.unique/filter with O(N) vectorized partition_by
-        hub_parts_dict = frame.with_columns(pl.Series("_k", hub_idx)).filter(pl.col("_k") >= 0).partition_by("_k", as_dict=True)
+        hub_parts_dict = (
+            frame.with_columns(pl.Series("_k", hub_idx))
+            .filter(pl.col("_k") >= 0)
+            .partition_by("_k", as_dict=True)
+        )
         for k, sub in hub_parts_dict.items():
             h = int(k[0])
             sub = sub.drop("_k")
@@ -1162,7 +1166,11 @@ def _assemble(plan: UnionPlan) -> Dict[str, Any]:
             finally:
                 tmp.unlink(missing_ok=True)
 
-        outside_parts_dict = frame.with_columns(pl.Series("_o", outside_pix)).filter(pl.col("_o") >= 0).partition_by("_o", as_dict=True)
+        outside_parts_dict = (
+            frame.with_columns(pl.Series("_o", outside_pix))
+            .filter(pl.col("_o") >= 0)
+            .partition_by("_o", as_dict=True)
+        )
         for k, sub in outside_parts_dict.items():
             px = int(k[0])
             sub = sub.drop("_o")
@@ -1173,9 +1181,7 @@ def _assemble(plan: UnionPlan) -> Dict[str, Any]:
             )
             try:
                 sub.write_parquet(tmp)
-                add_partition(
-                    PartitionPlan(order=max_hub_order, pix=px, rel=""), tmp, keep=False
-                )
+                add_partition(PartitionPlan(order=max_hub_order, pix=px, rel=""), tmp, keep=False)
             finally:
                 tmp.unlink(missing_ok=True)
 

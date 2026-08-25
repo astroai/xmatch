@@ -1998,7 +1998,9 @@ def handle_search(cm: CrossMatch, pattern: str, console: Console) -> int:
                 continue
             url = svc["access_url"]
             try:
-                with Progress(f"Discovering tables on {archive_key}/{svc_key} …", enabled=console.enabled):
+                with Progress(
+                    f"Discovering tables on {archive_key}/{svc_key} …", enabled=console.enabled
+                ):
                     tables = discover_tables(
                         url,
                         name_filter=effective_pattern if effective_pattern != "%" else None,
