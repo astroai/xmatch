@@ -75,6 +75,45 @@ def test_hats_native_inner_match(tmp_path: Path):
     assert "sep_arcsec" in out.columns
 
 
+def test_hats_native_torchsky_engine(tmp_path: Path):
+    pytest.importorskip("torch")
+    pytest.importorskip("torchsky")
+    left = _write_hats(
+        tmp_path / "left",
+        [{"ra": 10.0, "dec": 5.0, "name": "a"}],
+        pix=0,
+    )
+    right = _write_hats(
+        tmp_path / "right",
+        [{"ra": 10.0001, "dec": 5.00005, "name": "b"}],
+        pix=0,
+    )
+    src1 = CatalogueSource(
+        name="L",
+        is_local=False,
+        access_method="hats",
+        access_identifier=str(left),
+        ra_column="ra",
+        dec_column="dec",
+    )
+    src2 = CatalogueSource(
+        name="R",
+        is_local=False,
+        access_method="hats",
+        access_identifier=str(right),
+        ra_column="ra",
+        dec_column="dec",
+    )
+    out = hats_native.hats_native_crossmatch(
+        src1,
+        src2,
+        MatchSpec(radius_arcsec=2.0, join_type="1and2", fallback_policy="error"),
+        engine="torchsky",
+    )
+    assert out.height >= 1
+    assert "sep_arcsec" in out.columns
+
+
 def test_hats_native_outer_join(tmp_path: Path):
     left = _write_hats(
         tmp_path / "left",

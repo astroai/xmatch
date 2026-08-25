@@ -11,6 +11,7 @@ LSDB remains optional for the legacy HATS path in :mod:`hats_source`.
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -125,11 +126,24 @@ def load_hats_all(src: CatalogueSource) -> pl.DataFrame:
     return pl.concat(frames, how="diagonal_relaxed")
 
 
-def _healpix_neighbors(order: int, center_pix: int) -> List[int]:
-    """Return ``center_pix`` plus its nested HEALPix ring neighbours."""
+def _healpix_neighbors(order: int, center_pix: int, *, radius_arcsec: float = 0.0) -> List[int]:
+    """Return nested HEALPix pixels covering a cap around ``center_pix``."""
     pix = int(center_pix)
-    out = {pix}
     nside = 2 ** int(order)
+    try:
+        import torch
+        from torchsky.catalogs import cap_covering_pixels
+        from torchsky.sphere import healpix as ts_healpix
+    except ImportError:
+        pass
+    else:
+        center = torch.tensor([pix], dtype=torch.int64)
+        lon, lat = ts_healpix.pix2ang(nside, center, nest=True, lonlat=True)
+        pixrad = ts_healpix.max_pixrad(nside, degrees=False)
+        radius_rad = math.radians(max(float(radius_arcsec), 0.0) / 3600.0) + (2.0 * pixrad)
+        covered = cap_covering_pixels(nside, lon, lat, radius_rad, nest=True)
+        return sorted({int(p) for p in covered.tolist()})
+    out = {pix}
     try:
         import healpy as hp
 
@@ -174,17 +188,18 @@ def margin_pixels(
     radius_arcsec: float,
     right_pixels: Sequence[int],
 ) -> List[int]:
-    """Right pixels for a left pixel match: self + HEALPix neighbours.
+    """Right pixels for a left pixel match: covering of the match cap.
 
-    Match radii are much smaller than the pixel scale at typical HATS orders,
-    so neighbour selection ignores ``radius_arcsec`` (kept for API stability).
-    Intersection with ``right_pixels`` is O(neighbours), not O(N_right).
+    Intersection with ``right_pixels`` is O(cover size), not O(N_right).
     """
-    _ = radius_arcsec
     right_set = {int(p) for p in right_pixels}
     if not right_set:
         return []
-    return [p for p in _healpix_neighbors(order, int(center_pix)) if p in right_set]
+    return [
+        p
+        for p in _healpix_neighbors(order, int(center_pix), radius_arcsec=float(radius_arcsec))
+        if p in right_set
+    ]
 
 
 def _frame_source(base: CatalogueSource, df: pl.DataFrame, name: str) -> CatalogueSource:
@@ -257,6 +272,7 @@ def _pixel_task_payload(
     src2: CatalogueSource,
     spec: MatchSpec,
     right_suffix: str,
+    engine: str = "fast",
 ) -> Optional[pl.DataFrame]:
     left_df = _load_pixel_path(Path(left_path))
     if left_df.is_empty():
@@ -268,7 +284,7 @@ def _pixel_task_payload(
         right_df = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
     else:
         right_df = right_payload
-    part = _match_frames(src1, src2, left_df, right_df, spec, "fast", right_suffix)
+    part = _match_frames(src1, src2, left_df, right_df, spec, engine, right_suffix)
     return part if part is not None and part.height > 0 else None
 
 
@@ -340,6 +356,7 @@ def hats_native_crossmatch(
                     src2,
                     spec,
                     right_suffix,
+                    eng,
                 )
                 for order, pix, path in left_pixels
             ]
@@ -364,6 +381,7 @@ def hats_native_crossmatch(
             src2,
             spec,
             right_suffix,
+            eng,
         )
         if part is not None:
             results.append(part)
