@@ -917,10 +917,12 @@ def _write_hats_native(
             child = cdshealpix.nested.lonlat_to_healpix(
                 lon, lat, np.full(sub.height, order + 1, dtype=np.uint64)
             )
-            for cpix in np.unique(child):
-                mask = child == cpix
+            # Bolt: Replaced O(N*K) np.unique/filter with O(N) vectorized partition_by
+            parts = sub.with_columns(pl.Series("_mask", child)).partition_by("_mask", as_dict=True)
+            for k, psub in parts.items():
+                cpix = k[0]
                 stack.append(
-                    (order + 1, int(cpix), sub.filter(pl.Series("_mask", mask, dtype=pl.Boolean)))
+                    (order + 1, int(cpix), psub.drop("_mask"))
                 )
 
     info: List[Dict[str, Any]] = []
