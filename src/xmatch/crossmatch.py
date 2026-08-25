@@ -330,10 +330,14 @@ class CrossMatch:
         if not archive or not service_id:
             raise CrossMatchError(f"Catalogue '{name}' is missing 'archive' or 'service_id'.")
         if archive not in self.archives_config:
-            raise CrossMatchError(f"Archive '{archive}' (for '{name}') not found.")
+            exc = CrossMatchError(f"Archive '{archive}' (for '{name}') not found.")
+            exc.source = archive
+            raise exc
         service = self.archives_config[archive].get(service_id)
         if not isinstance(service, dict):
-            raise CrossMatchError(f"Service '{service_id}' (for '{name}') not found.")
+            exc = CrossMatchError(f"Service '{service_id}' (for '{name}') not found.")
+            exc.source = service_id
+            raise exc
         resolved = dict(service)
         resolved.update(cat)
         resolved["_catalogue_name"] = name

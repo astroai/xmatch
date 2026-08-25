@@ -24,3 +24,7 @@
 ## 2024-05-30 - Prevent CLI from hanging on long-running network requests
 **Learning:** To prevent the CLI from appearing hung during long-running synchronous network requests (e.g., `discover_tables`, `get_table_schema`), the existing `Progress` context manager (`with Progress('message', enabled=console.enabled):`) is extremely useful to provide immediate visual loading feedback.
 **Action:** When adding new long-running network requests in `cli.py`, always wrap them in the `Progress` context manager.
+
+## 2026-08-15 - Missing catalogue entries should offer actionable suggestions
+**Learning:** If a user miss-spells a catalogue config or requests a catalogue without properly setting up its archive/service_id, showing a plain 'not found' error isn't helpful. Attaching `source` to the exception (in `get_catalogue_config`) allows the global error handler to suggest a "Did you mean: ...?" option using `difflib.get_close_matches`, making the error message immediately actionable.
+**Action:** When throwing errors for missing user-provided configuration keys in `get_catalogue_config`, attach the invalid key as a `source` to the exception so the global error handler can render "Did you mean?" suggestions.
