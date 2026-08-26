@@ -1157,45 +1157,57 @@ def _scipy_match(
             sra2_l, sde2_l, rho_l = cov_l
             sra2_r, sde2_r, rho_r = cov_r
 
-            l_idx_parts, r_idx_parts, sep_parts = [], [], []
-            for i in range(l_xyz.shape[0]):
-                valid_k = np.isfinite(dist_sp[i]) & (idx_sp[i] < r_xyz.shape[0])
-                if not np.any(valid_k):
-                    continue
-                candidates = idx_sp[i][valid_k].astype(np.int64)
-                # Compute d² for each candidate.
-                mean_dec = 0.5 * (l_dec[i] + r_dec[candidates])
-                cos_dec = np.cos(np.radians(mean_dec))
-                delta_ra = (l_ra[i] - r_ra[candidates]) * 3600.0 * cos_dec
-                delta_dec = (l_dec[i] - r_dec[candidates]) * 3600.0
-                d2 = _mahalanobis_pairwise(
-                    delta_ra,
-                    delta_dec,
-                    np.full(candidates.size, sra2_l[i]),
-                    np.full(candidates.size, sde2_l[i]),
-                    np.full(candidates.size, rho_l[i]),
-                    sra2_r[candidates],
-                    sde2_r[candidates],
-                    rho_r[candidates],
-                )
-                # Pick best by smallest d².
-                best_j = int(np.argmin(d2))
-                if d2[best_j] <= spec.max_error**2:
-                    best_r = candidates[best_j]
-                    l_idx_parts.append(np.array([i], dtype=np.int64))
-                    r_idx_parts.append(np.array([best_r], dtype=np.int64))
-                    sep_parts.append(
-                        _chord_to_arcsec(
-                            np.array([float(dist_sp[i][valid_k][best_j])], dtype=float)
-                        )
-                    )
+            valid_mask = np.isfinite(dist_sp) & (idx_sp < r_xyz.shape[0])
+            valid_i, valid_k = np.nonzero(valid_mask)
 
-            if not l_idx_parts:
+            if len(valid_i) == 0:
                 return empty
+
+            candidates = idx_sp[valid_i, valid_k].astype(np.int64)
+
+            # Compute d² for each candidate.
+            mean_dec = 0.5 * (l_dec[valid_i] + r_dec[candidates])
+            cos_dec = np.cos(np.radians(mean_dec))
+            delta_ra = (l_ra[valid_i] - r_ra[candidates]) * 3600.0 * cos_dec
+            delta_dec = (l_dec[valid_i] - r_dec[candidates]) * 3600.0
+
+            d2 = _mahalanobis_pairwise(
+                delta_ra,
+                delta_dec,
+                sra2_l[valid_i],
+                sde2_l[valid_i],
+                rho_l[valid_i],
+                sra2_r[candidates],
+                sde2_r[candidates],
+                rho_r[candidates],
+            )
+
+            keep = d2 <= spec.max_error**2
+            if not np.any(keep):
+                return empty
+
+            valid_i = valid_i[keep]
+            candidates = candidates[keep]
+            d2 = d2[keep]
+            valid_k_kept = valid_k[keep]
+
+            seps = _chord_to_arcsec(dist_sp[valid_i, valid_k_kept])
+
+            # Pick best by smallest d². Vectorized O(N log N) replacement for loop argmin
+            order = np.lexsort((d2, valid_i))
+            best_indices = _first_occurrence_indices(valid_i[order])
+            best_positions = order[best_indices]
+
+            final_l_idx = valid_i[best_positions]
+            final_r_idx = candidates[best_positions]
+            final_sep = seps[best_positions]
+
+            # Maintain original insertion order stability
+            sort_order = np.argsort(final_l_idx)
             return (
-                np.concatenate(l_idx_parts),
-                np.concatenate(r_idx_parts),
-                np.concatenate(sep_parts),
+                final_l_idx[sort_order],
+                final_r_idx[sort_order],
+                final_sep[sort_order],
             )
 
         # --- plain sky / skyerr: spatial-nearest match ---------------------
