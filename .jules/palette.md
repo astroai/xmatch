@@ -28,3 +28,6 @@
 ## 2026-08-15 - Missing catalogue entries should offer actionable suggestions
 **Learning:** If a user miss-spells a catalogue config or requests a catalogue without properly setting up its archive/service_id, showing a plain 'not found' error isn't helpful. Attaching `source` to the exception (in `get_catalogue_config`) allows the global error handler to suggest a "Did you mean: ...?" option using `difflib.get_close_matches`, making the error message immediately actionable.
 **Action:** When throwing errors for missing user-provided configuration keys in `get_catalogue_config`, attach the invalid key as a `source` to the exception so the global error handler can render "Did you mean?" suggestions.
+## 2026-08-27 - Use Progress context manager for long-running sync tasks
+**Learning:** Long-running synchronous network or cache replication requests should be wrapped in a `Progress` context manager to provide immediate visual loading feedback. This prevents the CLI from appearing hung, especially on slow network connections.
+**Action:** Replaced plain `console.info` with a `Progress` block and provided a `progress_cb` to `sync_catalogue`.
