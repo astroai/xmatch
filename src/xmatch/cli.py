@@ -2435,18 +2435,20 @@ def _run_sync_subcommand(argv: Sequence[str]) -> int:
             one_limit = rate_limit
             if args.rate_limit_rps is None:
                 one_limit = float((cat_cfg.get("sync") or {}).get("rate_limit_rps", rate_limit))
-            console.info(f"Syncing {name} (cache: {cache_root}) …")
-            stats = sync_catalogue(
-                src,
-                cache_root=cache_root,
-                replica_roots=roots[1:],
-                rate_limit_rps=one_limit,
-                workers=int(args.workers),
-                force=bool(args.force_sync),
-                hats_threshold=int(args.hats_threshold),
-                fresh_after=args.fresh_after,
-                min_free_gb=args.min_free_gb,
-            )
+            progress = Progress(f"Syncing {name} (cache: {cache_root})", enabled=console.enabled)
+            with progress:
+                stats = sync_catalogue(
+                    src,
+                    cache_root=cache_root,
+                    replica_roots=roots[1:],
+                    rate_limit_rps=one_limit,
+                    workers=int(args.workers),
+                    force=bool(args.force_sync),
+                    progress_cb=progress.update,
+                    hats_threshold=int(args.hats_threshold),
+                    fresh_after=args.fresh_after,
+                    min_free_gb=args.min_free_gb,
+                )
             total.merge(stats)
             console.info(
                 f"  {name}: {stats.bytes_downloaded} bytes, {stats.files_downloaded} file(s), "
