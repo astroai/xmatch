@@ -872,3 +872,117 @@ def test_ray_init_falls_back_local_on_connection_error(tmp_path: Path, monkeypat
         assert _read_output(out).height == 1  # the pair matched
     finally:
         ray.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# HATS Dir= convention (regression: Dir was `pix // 10000`, so any output
+# pixel >= 10000 landed in a directory no HATS-conforming reader looks in)
+# --------------------------------------------------------------------------- #
+def test_hats_dir_follows_hats_convention() -> None:
+    """`Dir=` must be ``(pix // 10000) * 10000`` — the value ``hats`` derives."""
+    assert ray_union._hats_dir(0) == 0
+    assert ray_union._hats_dir(9_999) == 0
+    assert ray_union._hats_dir(10_000) == 10_000
+    assert ray_union._hats_dir(12_345) == 10_000
+    assert ray_union._hats_dir(1_234_567) == 1_230_000
+
+    pytest.importorskip("hats")
+    from hats.pixel_math import HealpixPixel
+
+    for pix in (0, 9_999, 10_000, 12_345, 1_234_567):
+        assert ray_union._hats_dir(pix) == HealpixPixel(0, pix).dir, pix
+
+
+def _deep_pixel_catalogue(root: Path, name: str, df: pl.DataFrame, order: int) -> CatalogueSource:
+    """HATS catalogue tiled at a chosen order (mirrors `_pixeled_catalogue`)."""
+    import cdshealpix
+    from astropy.coordinates import Latitude, Longitude
+
+    root.mkdir(parents=True, exist_ok=True)
+    ra = df["ra"].to_numpy()
+    dec = df["dec"].to_numpy()
+    pix = np.asarray(
+        cdshealpix.lonlat_to_healpix(
+            Longitude(ra, unit="deg"), Latitude(dec, unit="deg"), np.full(len(df), order)
+        )
+    ).astype(np.int64)
+    for p in np.unique(pix):
+        sub = df.filter(pl.Series("_p", pix) == p)
+        rel = (
+            root
+            / "dataset"
+            / f"Norder={order}"
+            / f"Dir={(int(p) // 10000) * 10000}"
+            / f"Npix={int(p)}.parquet"
+        )
+        rel.parent.mkdir(parents=True, exist_ok=True)
+        sub.write_parquet(rel)
+    (root / "properties").write_text(
+        "dataproduct_type=object\nobs_collection=xmatch-test\n"
+        "hats_col_ra=ra\nhats_col_dec=dec\nhats_ordering=NESTED\n"
+        "hats_nrows=%d\nhats_max_depth=%d\n" % (df.height, order)
+    )
+    return CatalogueSource(name=name, is_local=True, path=root, ra_column="ra", dec_column="dec")
+
+
+def test_union_output_dir_convention_for_deep_pixels(tmp_path: Path) -> None:
+    """Output partitions above pixel 10000 must use the ``*10000`` Dir tree.
+
+    The bug was invisible below Norder 7 (nside <= 64 has no pixel >= 10000),
+    so a small deep-order input pins it: every emitted file, and every
+    ``partition_info`` row, must agree with the ``hats`` library's
+    ``HealpixPixel.dir``.
+    """
+    import cdshealpix
+    from astropy.coordinates import Latitude, Longitude
+    from hats.pixel_math import HealpixPixel
+
+    order = 6
+    # Pick a coordinate whose order-``order`` pixel is >= 10000.
+    ra0, dec0 = None, -40.0
+    for candidate in np.arange(0.0, 360.0, 5.0):
+        pix = int(
+            np.asarray(
+                cdshealpix.lonlat_to_healpix(
+                    Longitude(np.asarray([candidate]), unit="deg"),
+                    Latitude(np.asarray([dec0]), unit="deg"),
+                    order,
+                )
+            )[0]
+        )
+        if pix > 10_000:
+            ra0 = float(candidate)
+            break
+    assert ra0 is not None, "no order-6 pixel > 10000 found"
+
+    a = pl.DataFrame({"ra": [ra0], "dec": [dec0], "id": ["a"]})
+    b = pl.DataFrame({"ra": [ra0 + 0.00005], "dec": [dec0], "id": ["b"]})
+    src_a = _deep_pixel_catalogue(tmp_path / "a", "a", a, order)
+    src_b = _deep_pixel_catalogue(tmp_path / "b", "b", b, order)
+
+    out = tmp_path / "out"
+    ray_union.ray_union_match(
+        [src_a, src_b],
+        sep_arcsec=5.0,
+        output_file=str(out),
+        hats_threshold=1_000_000,
+        max_tuples=1_000,
+    )
+
+    files = sorted(out.rglob("Npix=*.parquet"))
+    assert files, "expected output partitions"
+    for f in files:
+        order_name = f.parent.parent.name
+        dir_name = f.parent.name
+        pix = int(f.name.removeprefix("Npix=").removesuffix(".parquet"))
+        assert pix > 10_000, f"test needs a deep pixel, got {pix}"
+        expected = HealpixPixel(int(order_name.removeprefix("Norder=")), pix).dir
+        assert dir_name == f"Dir={expected}", f"{f}: {dir_name} != Dir={expected}"
+
+    info = pl.read_csv(out / "partition_info.csv")
+    for row in info.iter_rows(named=True):
+        assert row["Dir"] == HealpixPixel(row["Norder"], row["Npix"]).dir
+
+    import hats  # noqa: PLC0415
+
+    assert hats.read_hats(out).get_healpix_pixels(), "output must be readable"

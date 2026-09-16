@@ -14,7 +14,7 @@ import polars as pl
 
 from . import io_utils
 from .exceptions import CrossMatchError
-from .matchers import MatchSpec, sky_match
+from .matchers import _UNIT_TO_ARCSEC, MatchSpec, sky_match
 from .request import MatchRequest, SideOverrides
 from .sources import CatalogueSource
 
@@ -306,9 +306,7 @@ def _required_columns(
 
 
 def _sigma_expr(src: CatalogueSource, alias: str) -> pl.Expr:
-    factor = {"arcsec": 1.0, "mas": 1e-3, "deg": 3600.0, "arcmin": 60.0}.get(
-        (src.pos_err_units or "arcsec").lower(), 1.0
-    )
+    factor = _UNIT_TO_ARCSEC.get((src.pos_err_units or "arcsec").lower(), 1.0)
     floor = (
         float(src.default_pos_error_arcsec) * math.sqrt(2.0)
         if src.default_pos_error_arcsec is not None

@@ -1996,14 +1996,13 @@ def test_pm_prior_per_row_gaia_realistic_error_budgets():
             drift = 10 * 0.3 * 16 = 48 mas = 0.048"
             sigma_per_row ~ sqrt(0.1^2 + 0.048^2) ~ 0.111"
 
-    Skyerr matches using ``chord_max = max_error * (np.nanmax(lsig)
-    + np.nanmax(rsig))`` -- i.e. across all left rows in the same query.
-    Because both left rows sit on the same sky position with the same
-    per-row astrometric error, the wide drift on the bright row drives
-    ``chord_max ~ 3 * (0.49 + 0.0007) ~ 1.47"`` and the faint row's
-    tighter budget (chord_max ~ 3 * (0.111 + 0.0007) ~ 0.34" if it
-    alone were in the table) does NOT shrink the joint chord_max.  Both
-    candidates (at 0.5" separation) match in a single query.
+    Skyerr applies the N-sigma criterion *per row*:
+    ``sep <= max_error * (sigma_l[i] + sigma_r[j])``.  The global
+    ``max_error * (nanmax(lsig) + nanmax(rsig))`` bound is only a
+    candidate pre-filter, so the wide drift on the bright row
+    (``sigma ~ 0.49"``) cannot admit a 0.5" candidate for the faint row
+    whose own budget is ``3 * (0.111 + 0.0007) ~ 0.34"``.  One row's
+    error budget must never change another row's match.
     """
     offset_deg = 0.5 / 3600.0  # 0.5 arcsec RA offset at Dec=0 (cos 0 = 1)
     sigma_b = 0.1  # 2MASS-like 100 mas per axis
@@ -2075,16 +2074,18 @@ def test_pm_prior_per_row_gaia_realistic_error_budgets():
         pm_prior_magnitude_column="mag_g",
     )
     out_pm = sky_match(src_a, src_b, left.lazy(), right.lazy(), spec_pm, engine="fast").collect()
-    # Both rows match because chord_max uses np.nanmax(lsig): the bright
-    # row's wide sigma (drift 0.48") drives the joint budget to ~1.47",
-    # admitting both candidates.  The faint-only check below shows that
-    # the faint row's *own* tight budget (~0.34") would otherwise reject
-    # the 0.5" candidate -- so per-row drift is genuinely computed
-    # differently for the two rows.
-    assert out_pm.height == 2, (
-        'Expected both rows to match: chord_max ~1.47" (driven by '
-        "bright's per-row wide sigma under np.nanmax) admits both 0.5\" "
-        f"candidates; got {out_pm.height} matches"
+    # Only the bright row matches.  Its wide sigma (drift 0.48") admits the
+    # 0.5" candidate (per-row budget ~1.47"); the faint row's own tight
+    # budget (~0.34") rejects it even though the bright row is in the same
+    # table -- i.e. per-row drift is genuinely computed per row and one
+    # row's error budget does not leak into another's decision.
+    assert out_pm.height == 1, (
+        "Expected only the bright row to match: bright per-row budget "
+        '~1.47" admits the 0.5" candidate, faint per-row budget ~0.34" '
+        f"rejects it; got {out_pm.height} matches"
+    )
+    assert out_pm["mag_g"].to_list() == [10.0], (
+        f"Expected the bright row (mag_g=10) to match; got {out_pm['mag_g'].to_list()}"
     )
     assert "sep_arcsec" in out_pm.columns
     # Tight tolerance: float64 precision at 0.5\" is well below
@@ -2092,7 +2093,7 @@ def test_pm_prior_per_row_gaia_realistic_error_budgets():
     # round-off while tolerating sub-milliarcsecond rounding.
     seps = out_pm["sep_arcsec"].to_numpy()
     assert all(0.499 < s < 0.501 for s in seps), (
-        f"Expected seps ~0.5 arcsec for both matches; got {seps.tolist()}"
+        f"Expected sep ~0.5 arcsec for the bright match; got {seps.tolist()}"
     )
 
     # Per-row sigma sanity: the faint row alone (chord_max driven by
@@ -2336,3 +2337,214 @@ def test_pm_prior_both_sides_drift_inflation():
         "A non-zero result suggests drift was added linearly instead "
         f"of in quadrature on at least one side. Got {out.height}"
     )
+
+
+# ------------------------------------------------------------------- audit regressions
+# `skyerr`, `skyellipse` and non-finite input used to behave differently per
+# engine.  These tests pin the pair set (and the `find="best"` ranking) across
+# `fast`, `zone` and `astropy` so error-weighted matching is engine-independent.
+
+
+def _ra_offset(arcsec: float, dec_deg: float) -> float:
+    """RA (deg) change corresponding to ``arcsec`` on-sky at ``dec_deg``."""
+    return arcsec / 3600.0 / np.cos(np.radians(dec_deg))
+
+
+def test_skyerr_per_row_criterion_engine_parity():
+    """`skyerr` must apply its per-row N-sigma test in every engine.
+
+    ``fast``/``zone`` used to keep any candidate inside the *global* chord
+    bound ``max_error * (max sigma_l + max sigma_r)``, so a row with tiny
+    errors was accepted against a partner well outside its own sigma budget.
+    """
+    dec = 5.0
+    left = pl.DataFrame({"ra": [10.0], "dec": [dec], "rae": [1.0], "dee": [0.0]})
+    # "loose": 0.45" away, 1.0" error  -> limit 0.5*(1.0+1.0)=1.0  -> accept
+    # "tight": 0.55" away, 0.05" error -> limit 0.5*(1.0+0.05)=0.525 -> reject
+    right = pl.DataFrame(
+        {
+            "ra": [10.0 + _ra_offset(0.45, dec), 10.0 + _ra_offset(0.55, dec)],
+            "dec": [dec, dec],
+            "rae": [1.0, 0.05],
+            "dee": [0.0, 0.0],
+        }
+    )
+    a = _src("a", ra_err_column="rae", dec_err_column="dee", pos_err_units="arcsec")
+    b = _src("b", ra_err_column="rae", dec_err_column="dee", pos_err_units="arcsec")
+    spec = MatchSpec(radius_arcsec=2.0, matcher="skyerr", max_error=0.5, find="all")
+    # Compare on-sky separations in arcsec: absolute degree tolerances are
+    # always dominated by the ~10 deg coordinate magnitude.
+    loose_sep = float(right["ra"][0] - left["ra"][0]) * 3600.0 * np.cos(np.radians(dec))
+    for eng in ("fast", "zone", "astropy"):
+        out = sky_match(a, b, left.lazy(), right.lazy(), spec, engine=eng).collect()
+        assert out.height == 1, f"{eng}: expected only the loose pair, got {out.height}"
+        assert abs(out["sep_arcsec"][0] - loose_sep) < 1e-3, (
+            f'{eng}: expected the 0.45" pair, got sep={out["sep_arcsec"][0]}'
+        )
+
+
+def test_skyerr_best_ranking_is_normalised_not_spatial():
+    """``find="best"`` ranks by ``sep / (sigma_l + sigma_r)``, not raw sep.
+
+    A tight-error candidate that is spatially nearest must lose to a slightly
+    farther but looser one when the normalised separation is smaller — the
+    same score ``astropy`` uses.
+    """
+    dec = 5.0
+    left = pl.DataFrame({"ra": [10.0], "dec": [dec], "rae": [1.0], "dee": [0.0]})
+    # nearest: 0.20" / (0.5*1.05) = 0.381 ; farther: 0.30" / (0.5*2.0) = 0.300
+    right = pl.DataFrame(
+        {
+            "ra": [10.0 + _ra_offset(0.20, dec), 10.0 + _ra_offset(0.30, dec)],
+            "dec": [dec, dec],
+            "rae": [0.05, 1.0],
+            "dee": [0.0, 0.0],
+        }
+    )
+    a = _src("a", ra_err_column="rae", dec_err_column="dee", pos_err_units="arcsec")
+    b = _src("b", ra_err_column="rae", dec_err_column="dee", pos_err_units="arcsec")
+    spec = MatchSpec(radius_arcsec=2.0, matcher="skyerr", max_error=0.5, find="best")
+    # the farther (0.30"), but better-normalised, pair
+    expected_sep = 0.30
+    for eng in ("fast", "zone", "astropy"):
+        out = sky_match(a, b, left.lazy(), right.lazy(), spec, engine=eng).collect()
+        assert out.height == 1, f"{eng}: expected one match, got {out.height}"
+        assert abs(out["sep_arcsec"][0] - expected_sep) < 1e-3, (
+            f'{eng}: expected the best-normalised pair at {expected_sep}", '
+            f'got sep={out["sep_arcsec"][0]} (spatially-nearest is 0.20")'
+        )
+
+
+def test_skyellipse_best_picks_mahalanobis_best_in_all_engines():
+    """`zone` must query k>1 candidates for ``skyellipse`` + ``find="best"``.
+
+    Querying only the chord-nearest candidate dropped the row whenever that
+    candidate failed the Mahalanobis test, even though a slightly farther one
+    passed it (``fast``/``astropy`` already handled this).
+    """
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [0.5], "dee": [0.01], "corr": [0.0]})
+    right = pl.DataFrame(
+        {
+            "ra": [10.00002, 10.00004],  # second is twice as far in RA
+            "dec": [5.000005, 5.0],
+            "rae": [0.5, 0.5],
+            "dee": [0.01, 0.5],
+            "corr": [0.0, 0.0],
+        }
+    )
+    a = _src("a", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    b = _src("b", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    spec = MatchSpec(radius_arcsec=1.0, matcher="skyellipse", max_error=5.0)
+    for eng in ("fast", "zone", "astropy"):
+        out = sky_match(a, b, left.lazy(), right.lazy(), spec, engine=eng).collect()
+        assert out.height == 1, f"{eng}: expected one Mahalanobis match, got {out.height}"
+        assert abs(out["ra_2"][0] - 10.00004) < 1e-6, (
+            f"{eng}: expected the Mahalanobis-best candidate (ra_2=10.00004)"
+        )
+
+
+@pytest.mark.parametrize("engine", ["fast", "zone", "astropy", "ray"])
+def test_nonfinite_coordinates_raise_clean_error(engine):
+    """A non-finite / out-of-range latitude must raise ``CrossMatchError``.
+
+    ``cdshealpix`` panics inside its Rust core on such input; the resulting
+    ``PanicException`` is a ``BaseException`` that escaped every handler.
+    """
+    left = pl.DataFrame({"ra": [10.0, 20.0], "dec": [5.0, 91.0]})
+    right = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
+    with pytest.raises(CrossMatchError, match="non-finite|out-of-range"):
+        sky_match(
+            _src("a"),
+            _src("b"),
+            left.lazy(),
+            right.lazy(),
+            MatchSpec(radius_arcsec=1.0),
+            engine=engine,
+        ).collect()
+
+
+def test_nan_dec_raises_clean_error():
+    left = pl.DataFrame({"ra": [10.0], "dec": [np.nan]})
+    right = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
+    with pytest.raises(CrossMatchError, match="non-finite|out-of-range"):
+        sky_match(
+            _src("a"), _src("b"), left.lazy(), right.lazy(), MatchSpec(radius_arcsec=1.0)
+        ).collect()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"matcher": "sky-error"},
+        {"join_type": "1and"},
+        {"find": "nearest"},
+    ],
+)
+def test_matchspec_rejects_unknown_vocabulary(kwargs):
+    """Typos in matcher/join_type/find must fail loudly, not return nothing."""
+    with pytest.raises(ValueError):
+        MatchSpec(**kwargs)
+
+
+def test_skyellipse_anisotropic_search_radius_engine_parity():
+    """astropy must use the same conservative search bound as fast/zone.
+
+    With elongated, correlated error ellipses (10" per axis, rho=0.9) the
+    combined covariance's major semi-axis is ``sqrt(2*380) ~ 27.6"`` but
+    ``max(sigma_ra^2, sigma_dec^2)`` per side only gives ``sqrt(200) ~ 14.1"``.
+    A pair at 18" along the major axis has d^2 = 18^2/760 = 0.43 <= 1 and MUST
+    match; astropy used to miss it because its candidate radius was too small.
+    """
+    left = pl.DataFrame({"ra": [10.0], "dec": [0.0], "rae": [10.0], "dee": [10.0], "corr": [0.9]})
+    off = 18.0 / np.sqrt(2.0) / 3600.0  # equal RA/Dec offsets -> 18" at 45 deg
+    right = pl.DataFrame(
+        {"ra": [10.0 + off], "dec": [off], "rae": [10.0], "dee": [10.0], "corr": [0.9]}
+    )
+    a = _src("a", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    b = _src("b", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    spec = MatchSpec(radius_arcsec=60.0, matcher="skyellipse", max_error=1.0)
+    for eng in ("fast", "zone", "astropy"):
+        out = sky_match(a, b, left.lazy(), right.lazy(), spec, engine=eng).collect()
+        assert out.height == 1, f'{eng}: expected the 18" major-axis pair to match'
+        assert abs(out["sep_arcsec"][0] - 18.0) < 1e-3, f"{eng}: sep={out['sep_arcsec'][0]}"
+
+
+def test_skyerr_ray_engine_matches_single_machine():
+    """Distributed `ray` must apply the same per-row skyerr criterion and the
+    same best-match ranking as the single-machine engines (the ray engine is
+    the union path, so its pairing must not drift)."""
+    ray = pytest.importorskip("ray")
+
+    dec = 5.0
+    left = pl.DataFrame({"ra": [10.0], "dec": [dec], "rae": [1.0], "dee": [0.0]})
+    # A: 0.20" (tight errors) -> normalised 0.381 ; C: 0.30" -> 0.300
+    # D: 0.90" with 0.02" errors -> limit 0.51 -> rejected per row
+    right = pl.DataFrame(
+        {
+            "ra": [
+                10.0 + _ra_offset(0.20, dec),
+                10.0 + _ra_offset(0.30, dec),
+                10.0 + _ra_offset(0.90, dec),
+            ],
+            "dec": [dec, dec, dec],
+            "rae": [0.05, 1.0, 0.02],
+            "dee": [0.0, 0.0, 0.0],
+        }
+    )
+    a = _src("a", ra_err_column="rae", dec_err_column="dee", pos_err_units="arcsec")
+    b = _src("b", ra_err_column="rae", dec_err_column="dee", pos_err_units="arcsec")
+
+    ray.init(ignore_reinit_error=True, logging_level=40)
+    try:
+        for find, expected in (("all", 2), ("best", 1)):
+            spec = MatchSpec(radius_arcsec=2.0, matcher="skyerr", max_error=0.5, find=find)
+            base = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="astropy").collect()
+            out = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="ray").collect()
+            assert base.height == out.height == expected, (
+                f"find={find}: astropy={base.height}, ray={out.height}, expected {expected}"
+            )
+            assert np.allclose(
+                sorted(base["sep_arcsec"].to_list()), sorted(out["sep_arcsec"].to_list()), atol=1e-6
+            ), f"find={find}: ray and astropy disagree on the pair set"
+    finally:
+        ray.shutdown()

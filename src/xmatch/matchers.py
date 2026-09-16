@@ -41,6 +41,7 @@ The output is a ``p_match`` column in [0, 1]. Numeric evaluation lives in
 """
 
 import dataclasses
+import itertools
 import logging
 import math
 from dataclasses import dataclass, field
@@ -64,6 +65,13 @@ _PROPAGATED_COV_EN = "_propagated_cov_en_arcsec2"
 _PROPAGATED_COV_PREFIX = "_propagated_cov_"
 
 _UNIT_TO_ARCSEC = {"arcsec": 1.0, "mas": 1e-3, "deg": 3600.0, "arcmin": 60.0}
+
+# Accepted match-criteria vocabularies.  Validated up front so a typo fails
+# loudly: an unknown ``join_type`` used to fall through :func:`_build_result`
+# to an empty frame, i.e. a silently empty crossmatch result.
+_MATCHER_KINDS = frozenset({"sky", "skyerr", "skyellipse", "lr", "ml", "xgb", "auf", "macauff"})
+_JOIN_TYPES = frozenset({"1and2", "1or2", "all", "all1", "all2", "1not2", "2not1"})
+_FIND_MODES = frozenset({"best", "all"})
 
 
 def _first_occurrence_indices(sorted_array: np.ndarray) -> np.ndarray:
@@ -155,6 +163,16 @@ class MatchSpec:
     def __post_init__(self) -> None:
         if self.fallback_policy not in ("warn", "error"):
             raise ValueError("fallback_policy must be 'warn' or 'error'")
+        if self.matcher not in _MATCHER_KINDS:
+            raise ValueError(
+                f"matcher must be one of {sorted(_MATCHER_KINDS)}, got {self.matcher!r}"
+            )
+        if self.join_type not in _JOIN_TYPES:
+            raise ValueError(
+                f"join_type must be one of {sorted(_JOIN_TYPES)}, got {self.join_type!r}"
+            )
+        if self.find not in _FIND_MODES:
+            raise ValueError(f"find must be one of {sorted(_FIND_MODES)}, got {self.find!r}")
 
 
 # --------------------------------------------------------------------------- #
@@ -488,6 +506,119 @@ def _chord_to_arcsec(chord: np.ndarray) -> np.ndarray:
 
 def _arcsec_to_chord(arcsec: float) -> float:
     return float(2.0 * np.sin(np.radians(float(arcsec) / 3600.0) * 0.5))
+
+
+def _flatten_candidates(
+    idx_lists: List[np.ndarray],
+    l_xyz: np.ndarray,
+    r_xyz: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Flatten ``cKDTree.query_ball_point`` per-left lists into pair arrays.
+
+    Returns ``(left_idx, right_idx, sep_arcsec)``; empty arrays when no
+    candidate pair exists.  Shared by every engine branch that needs the full
+    candidate set (``find="all"``, Likelihood Ratio / ML / AUF / macauff, and
+    the per-row ``skyerr`` criterion).
+    """
+    lens = np.fromiter((len(x) for x in idx_lists), dtype=int, count=len(idx_lists))
+    total = int(lens.sum())
+    if total == 0:
+        return (
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int64),
+            np.array([], dtype=float),
+        )
+    right_idx = np.fromiter(itertools.chain.from_iterable(idx_lists), dtype=np.int64, count=total)
+    left_idx = np.repeat(np.arange(len(idx_lists), dtype=np.int64), lens)
+    chords = np.linalg.norm(l_xyz[left_idx] - r_xyz[right_idx], axis=-1)
+    return left_idx, right_idx, _chord_to_arcsec(chords)
+
+
+def _pixellate(hp_module, ra_deg, dec_deg, depth: int, *, label: str) -> np.ndarray:
+    """``lonlat_to_healpix`` that turns a Rust panic into a normal error.
+
+    ``cdshealpix`` asserts on invalid latitudes inside its Rust core; the
+    resulting ``PanicException`` is a ``BaseException`` and would otherwise
+    escape every ``except Exception`` handler on the way up (including Ray's
+    per-task error handling and the ray-union retry loop).
+    """
+
+    if len(ra_deg) and len(dec_deg):
+        from .astro_utils import require_finite_coordinates
+
+        require_finite_coordinates(ra_deg, dec_deg, label=label)
+    try:
+        return np.asarray(
+            hp_module.lonlat_to_healpix(
+                Longitude(np.radians(np.asarray(ra_deg, dtype=float)), unit="rad"),
+                Latitude(np.radians(np.asarray(dec_deg, dtype=float)), unit="rad"),
+                depth,
+            ),
+            dtype=np.int64,
+        )
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - pyo3 panics derive from BaseException
+        raise CrossMatchError(f"HEALPix pixelation failed for {label}: {exc}") from exc
+
+
+def _best_per_primary(
+    left_idx: np.ndarray,
+    right_idx: np.ndarray,
+    seps: np.ndarray,
+    scores: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Keep the lowest-*scores* candidate per primary row (deterministic ties).
+
+    Ties on *scores* fall back to the smallest separation, then the smallest
+    right index, so repeated runs and different engines agree.  Returns the
+    three arrays in ascending primary-row order.
+    """
+    if left_idx.size == 0:
+        return left_idx, right_idx, seps
+    order = np.lexsort((right_idx, seps, scores, left_idx))
+    best = order[_first_occurrence_indices(left_idx[order])]
+    best.sort()
+    return left_idx[best], right_idx[best], seps[best]
+
+
+def _skyerr_pair_filter(
+    left_idx: np.ndarray,
+    right_idx: np.ndarray,
+    seps: np.ndarray,
+    lsig: np.ndarray,
+    rsig: np.ndarray,
+    max_error: float,
+    *,
+    find: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply the per-row N-sigma criterion to candidate pairs.
+
+    ``skyerr`` matches a pair iff ``sep <= max_error * (sigma_l + sigma_r)``.
+    The engine's spatial bound is built from the *global* sigma maxima as a
+    candidate pre-filter only; applying the criterion per row (as ``astropy``,
+    ``stilts``, ``torchsky`` and the bounded-memory spill path do) keeps every
+    engine on the same pair set.  Rows with a non-finite per-row sigma are
+    rejected — an unknown uncertainty is not an infinite acceptance radius.
+
+    With ``find="best"`` the surviving candidates are ranked by *normalised*
+    separation ``sep / (sigma_l + sigma_r)``, matching astropy's score, then
+    reduced to one row per primary source.
+    """
+    if left_idx.size == 0:
+        return left_idx, right_idx, seps
+    limit = max_error * (lsig[left_idx] + rsig[right_idx])
+    keep = np.isfinite(limit) & np.isfinite(seps) & (seps <= limit)
+    left_idx, right_idx, seps, limit = (
+        left_idx[keep],
+        right_idx[keep],
+        seps[keep],
+        limit[keep],
+    )
+    if find != "best" or left_idx.size == 0:
+        return left_idx, right_idx, seps
+    scores = np.divide(seps, limit, out=np.full_like(seps, np.inf), where=limit > 0.0)
+    return _best_per_primary(left_idx, right_idx, seps, scores)
 
 
 # --------------------------------------------------------------------------- #
@@ -1058,7 +1189,6 @@ def _scipy_match(
     right_src: CatalogueSource,
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    import itertools
 
     from scipy.spatial import cKDTree
 
@@ -1125,19 +1255,23 @@ def _scipy_match(
     # function can compute reliabilities across the full candidate set.
     if spec.matcher in ("lr", "ml", "xgb", "auf", "macauff"):
         idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
-        # ⚡ Bolt Optimization: Replace O(N) python loop over cKDTree lists with O(N) vectorized C-level operations
-        # Itertools chain flattens the list of lists significantly faster than native Python concatenation
-        lens = np.fromiter((len(x) for x in idx_lists), dtype=int, count=len(idx_lists))
-        total_matches = lens.sum()
-        if total_matches == 0:
-            return empty
+        return _flatten_candidates(idx_lists, l_xyz, r_xyz)
 
-        right_idx = np.fromiter(
-            itertools.chain.from_iterable(idx_lists), dtype=np.int64, count=total_matches
+    if spec.matcher == "skyerr":
+        # ``skyerr`` is a per-row criterion, so the global-chord candidate set
+        # must be scored rather than reduced to the nearest candidate.
+        assert lsig is not None and rsig is not None
+        idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
+        left_idx, right_idx, seps = _flatten_candidates(idx_lists, l_xyz, r_xyz)
+        return _skyerr_pair_filter(
+            left_idx,
+            right_idx,
+            seps,
+            lsig,
+            rsig,
+            spec.max_error,
+            find=spec.find,
         )
-        left_idx = np.repeat(np.arange(len(idx_lists), dtype=np.int64), lens)
-        sep = _chord_to_arcsec(np.linalg.norm(l_xyz[left_idx] - r_xyz[right_idx], axis=-1))
-        return left_idx, right_idx, sep
     if spec.find == "best":
         # --- skyellipse: query k>1 candidates, pick best by Mahalanobis d² --
         if spec.matcher == "skyellipse":
@@ -1152,7 +1286,6 @@ def _scipy_match(
             if k_candidates == 1:
                 dist_sp = dist_sp[:, None]
                 idx_sp = idx_sp[:, None]
-            idx_sp.shape[1]
 
             sra2_l, sde2_l, rho_l = cov_l
             sra2_r, sde2_r, rho_r = cov_r
@@ -1186,31 +1319,10 @@ def _scipy_match(
             if not np.any(keep):
                 return empty
 
-            valid_i = valid_i[keep]
-            candidates = candidates[keep]
-            d2 = d2[keep]
-            valid_k_kept = valid_k[keep]
+            candidate_seps = _chord_to_arcsec(dist_sp[valid_i[keep], valid_k[keep]])
+            return _best_per_primary(valid_i[keep], candidates[keep], candidate_seps, d2[keep])
 
-            seps = _chord_to_arcsec(dist_sp[valid_i, valid_k_kept])
-
-            # Pick best by smallest d². Vectorized O(N log N) replacement for loop argmin
-            order = np.lexsort((d2, valid_i))
-            best_indices = _first_occurrence_indices(valid_i[order])
-            best_positions = order[best_indices]
-
-            final_l_idx = valid_i[best_positions]
-            final_r_idx = candidates[best_positions]
-            final_sep = seps[best_positions]
-
-            # Maintain original insertion order stability
-            sort_order = np.argsort(final_l_idx)
-            return (
-                final_l_idx[sort_order],
-                final_r_idx[sort_order],
-                final_sep[sort_order],
-            )
-
-        # --- plain sky / skyerr: spatial-nearest match ---------------------
+        # --- plain sky: spatial-nearest match ------------------------------
         dist, idx = tree.query(l_xyz, k=1, distance_upper_bound=chord_max, workers=-1)
         valid = np.isfinite(dist) & (idx < r_xyz.shape[0])
         left_idx = np.nonzero(valid)[0]
@@ -1220,18 +1332,7 @@ def _scipy_match(
 
     # find == "all": per-left list of matched right indices.
     idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
-    # ⚡ Bolt Optimization: Replace O(N) python loop over cKDTree lists with O(N) vectorized C-level operations
-    # Itertools chain flattens the list of lists significantly faster than native Python concatenation
-    lens = np.fromiter((len(x) for x in idx_lists), dtype=int, count=len(idx_lists))
-    total_matches = lens.sum()
-    if total_matches == 0:
-        return empty
-
-    right_idx = np.fromiter(
-        itertools.chain.from_iterable(idx_lists), dtype=np.int64, count=total_matches
-    )
-    left_idx = np.repeat(np.arange(len(idx_lists), dtype=np.int64), lens)
-    sep = _chord_to_arcsec(np.linalg.norm(l_xyz[left_idx] - r_xyz[right_idx], axis=-1))
+    left_idx, right_idx, sep = _flatten_candidates(idx_lists, l_xyz, r_xyz)
 
     # --- skyellipse Mahalanobis post-filter (find="all") -------------------
     if spec.matcher == "skyellipse" and left_idx.size > 0:
@@ -2548,16 +2649,17 @@ def _torchsky_match(
     right_idx = as_numpy(result.right_index, np.int64)
     seps = as_numpy(result.separation_arcsec, float)
     if spec.matcher == "skyerr" and left_idx.size:
-        pair_sigma = lsig[left_idx] + rsig[right_idx]
-        keep = np.isfinite(pair_sigma) & (seps <= spec.max_error * pair_sigma)
-        left_idx, right_idx, seps = left_idx[keep], right_idx[keep], seps[keep]
-        if spec.find == "best" and left_idx.size:
-            order = np.lexsort((right_idx, seps, left_idx))
-            left_idx = left_idx[order]
-            right_idx = right_idx[order]
-            seps = seps[order]
-            first = _first_occurrence_indices(left_idx)
-            left_idx, right_idx, seps = left_idx[first], right_idx[first], seps[first]
+        # Same per-row criterion and normalised-separation ranking as every
+        # other engine, so `skyerr` pair sets are engine-independent.
+        left_idx, right_idx, seps = _skyerr_pair_filter(
+            left_idx,
+            right_idx,
+            seps,
+            lsig,
+            rsig,
+            spec.max_error,
+            find=spec.find,
+        )
     return left_idx, right_idx, seps
 
 
@@ -2577,7 +2679,7 @@ def _cone_search_pixels(
     parents are expanded to all children at the requested depth — callers get
     a flat set of same-depth pixels like the pre-0.8 ``cone_search_lonlat``.
     """
-    from astropy.coordinates import Angle, Latitude, Longitude  # noqa: PLC0415
+    from astropy.coordinates import Angle  # noqa: PLC0415
 
     ipix, depths, _ = hp_module.cone_search(
         Longitude(lon_rad, unit="rad"),
@@ -2644,7 +2746,6 @@ def _zone_match_healpix(
     right_src: CatalogueSource,
     spec: MatchSpec,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    import itertools
 
     import cdshealpix as hp
     from scipy.spatial import cKDTree
@@ -2688,22 +2789,8 @@ def _zone_match_healpix(
         return empty
 
     DEPTH = 5  # nside = 2 ** DEPTH == 32
-    l_pix = np.asarray(
-        hp.lonlat_to_healpix(
-            Longitude(np.radians(l_ra), unit="rad"),
-            Latitude(np.radians(l_dec), unit="rad"),
-            DEPTH,
-        ),
-        dtype=int,
-    )
-    r_pix = np.asarray(
-        hp.lonlat_to_healpix(
-            Longitude(np.radians(r_ra), unit="rad"),
-            Latitude(np.radians(r_dec), unit="rad"),
-            DEPTH,
-        ),
-        dtype=int,
-    )
+    l_pix = _pixellate(hp, l_ra, l_dec, DEPTH, label=f"catalogue '{left_src.name}'")
+    r_pix = _pixellate(hp, r_ra, r_dec, DEPTH, label=f"catalogue '{right_src.name}'")
 
     # Cache per-pixel right xyz buffers and per-pixel cKDTree instances.
     r_sort_idx = np.argsort(r_pix, kind="stable")
@@ -2783,7 +2870,12 @@ def _zone_match_healpix(
             margin_global = np.concatenate(margin_global_parts)
             margin_tree = cKDTree(margin_xyz)
 
-            if spec.find == "best":
+            if spec.find == "best" and spec.matcher == "sky":
+                # Plain radius + find="best": the spatial-nearest candidate is
+                # the answer, so one candidate per row suffices.  ``skyerr``
+                # must NOT take this path: it has to see every candidate inside
+                # the global bound so the per-row filter can rank by
+                # ``sep / (sigma_l + sigma_r)`` (below).
                 dist, local_idx = margin_tree.query(
                     batch_xyz,
                     k=1,
@@ -2798,34 +2890,45 @@ def _zone_match_healpix(
                     batch_l.append(np.array([k_idx], dtype=np.int64))
                     batch_r.append(np.array([global_r_index], dtype=np.int64))
                     batch_s.append(np.array([sep_arcsec], dtype=float))
+            elif spec.find == "best":
+                # skyellipse + find="best": a chord-nearest candidate can fail the
+                # Mahalanobis criterion while a slightly farther one passes it, so
+                # retrieve several candidates per primary row here and let the d²
+                # post-filter below select the best (mirrors the ``fast`` engine).
+                k_candidates = min(max(10, int(spec.max_error * 2)), margin_tree.n)
+                dist, local_idx = margin_tree.query(
+                    batch_xyz,
+                    k=k_candidates,
+                    distance_upper_bound=chord_max,
+                    workers=-1,
+                )
+                if k_candidates == 1:
+                    dist = dist[:, None]
+                    local_idx = local_idx[:, None]
+                valid = np.isfinite(dist) & (local_idx < margin_tree.n)
+                valid_l, valid_k = np.nonzero(valid)
+                if valid_l.size:
+                    k_indices = np.asarray(left_indices, dtype=np.int64)[valid_l]
+                    global_r_indices = margin_global[local_idx[valid_l, valid_k]].astype(np.int64)
+                    batch_l.append(k_indices)
+                    batch_r.append(global_r_indices)
+                    batch_s.append(
+                        np.asarray(_chord_to_arcsec(dist[valid_l, valid_k]), dtype=float)
+                    )
             else:
                 idx_lists = margin_tree.query_ball_point(
                     batch_xyz,
                     r=chord_max,
                     workers=-1,
                 )
-
-                # ⚡ Bolt Optimization: Replace O(N) python loop over cKDTree lists with O(N) vectorized C-level operations
-                # Itertools chain flattens the list of lists significantly faster than native Python concatenation
-                lens = np.fromiter((len(x) for x in idx_lists), dtype=int, count=len(idx_lists))
-                total_matches = lens.sum()
-                if total_matches > 0:
-                    local_r_indices = np.fromiter(
-                        itertools.chain.from_iterable(idx_lists),
-                        dtype=np.int64,
-                        count=total_matches,
-                    )
-                    local_l_indices = np.repeat(np.arange(len(idx_lists), dtype=np.int64), lens)
-
+                local_l_indices, local_r_indices, seps = _flatten_candidates(
+                    idx_lists,
+                    batch_xyz,
+                    margin_xyz,
+                )
+                if local_l_indices.size:
                     k_indices = np.asarray(left_indices, dtype=np.int64)[local_l_indices]
                     global_r_indices = margin_global[local_r_indices].astype(np.int64)
-
-                    chords = np.linalg.norm(
-                        margin_xyz[local_r_indices] - batch_xyz[local_l_indices],
-                        axis=-1,
-                    )
-                    seps = _chord_to_arcsec(chords)
-
                     batch_l.append(k_indices)
                     batch_r.append(global_r_indices)
                     batch_s.append(np.asarray(seps, dtype=float))
@@ -2869,7 +2972,27 @@ def _zone_match_healpix(
             rho_r[right_idx],
         )
         keep = d2 <= spec.max_error**2
-        left_idx, right_idx, seps = left_idx[keep], right_idx[keep], seps[keep]
+        left_idx, right_idx, seps, d2 = (
+            left_idx[keep],
+            right_idx[keep],
+            seps[keep],
+            d2[keep],
+        )
+        if spec.find == "best" and left_idx.size:
+            left_idx, right_idx, seps = _best_per_primary(left_idx, right_idx, seps, d2)
+
+    # --- per-row skyerr N-sigma criterion -----------------------------------
+    if spec.matcher == "skyerr" and left_idx.size > 0:
+        assert lsig is not None and rsig is not None
+        left_idx, right_idx, seps = _skyerr_pair_filter(
+            left_idx,
+            right_idx,
+            seps,
+            lsig,
+            rsig,
+            spec.max_error,
+            find=spec.find,
+        )
 
     return left_idx, right_idx, seps
 
@@ -2921,9 +3044,14 @@ def _astropy_match(
                 spec.matcher,
             )
             return empty
-        search_radius_arcsec = spec.max_error * math.sqrt(
-            max(float(np.nanmax(cov_l[0])), float(np.nanmax(cov_l[1])))
-            + max(float(np.nanmax(cov_r[0])), float(np.nanmax(cov_r[1])))
+        # Same conservative chord bound as ``fast``/``zone``/``torchsky``.
+        # Taking ``max(sigma_ra^2, sigma_dec^2)`` per side under-estimates the
+        # worst-case Mahalanobis radius whenever the ellipses are elongated
+        # and/or correlated, so astropy silently dropped pairs the other
+        # engines accept.  One shared bound keeps the engines on the same
+        # *candidate* set; the d^2 filter below is the actual criterion.
+        search_radius_arcsec = _chord_to_arcsec(
+            _skyellipse_search_chord_max(cov_l, cov_r, spec.max_error)
         )
         if search_radius_arcsec <= 0:
             return empty
@@ -2933,19 +3061,22 @@ def _astropy_match(
             search_radius_arcsec * u.arcsec,
         )
         seps = sep2d.arcsec
-        # Mahalanobis post-filter.
+        # Mahalanobis post-filter.  The RA difference is scaled by the *pair's*
+        # mean declination (not a table-wide scalar), matching the ``fast``,
+        # ``zone`` and ``torchsky`` engines so every engine accepts the same
+        # pairs away from the equator.
         if left_idx.size > 0:
             sra2_l, sde2_l, rho_l = cov_l
             sra2_r, sde2_r, rho_r = cov_r
+            l_dec_pairs = left[left_src.dec_column].to_numpy()[left_idx]
+            r_dec_pairs = right[right_src.dec_column].to_numpy()[right_idx]
             delta_ra = (
                 (
                     left[left_src.ra_column].to_numpy()[left_idx]
                     - right[right_src.ra_column].to_numpy()[right_idx]
                 )
                 * 3600.0
-                * math.cos(
-                    math.radians(float(np.nanmean(left[left_src.dec_column].to_numpy()[left_idx])))
-                )
+                * np.cos(np.radians(0.5 * (l_dec_pairs + r_dec_pairs)))
             )
             delta_dec = (
                 left[left_src.dec_column].to_numpy()[left_idx]
@@ -3241,31 +3372,50 @@ def sky_match(
             logger.warning("STILTS match failed (%s); falling back to fast engine.", exc)
             chosen = "fast"
 
+    def _collect_side(lf: pl.LazyFrame, src: CatalogueSource, side: str) -> pl.DataFrame:
+        """Materialise one side and validate its coordinates exactly once.
+
+        Every in-process engine works on collected frames, and a single
+        non-finite latitude used to make ``cdshealpix`` panic with a
+        ``PanicException`` (a ``BaseException``) instead of raising an
+        actionable error.
+        """
+        from .astro_utils import require_finite_coordinates
+
+        frame = lf.collect()
+        if src.ra_column in frame.columns and src.dec_column in frame.columns and frame.height:
+            require_finite_coordinates(
+                frame[src.ra_column].cast(pl.Float64).to_numpy(),
+                frame[src.dec_column].cast(pl.Float64).to_numpy(),
+                label=f"catalogue '{src.name}' ({side} side)",
+            )
+        return frame
+
     if chosen == "astropy":
-        left = left_lf.collect()
-        right = right_lf.collect()
+        left = _collect_side(left_lf, left_src, "left")
+        right = _collect_side(right_lf, right_src, "right")
         l_idx, r_idx, seps = _astropy_match(left, right, left_src, right_src, spec)
         logger.info("astropy sky match: %d matched pairs.", len(l_idx))
     elif chosen == "fast":
-        left = left_lf.collect()
-        right = right_lf.collect()
+        left = _collect_side(left_lf, left_src, "left")
+        right = _collect_side(right_lf, right_src, "right")
         l_idx, r_idx, seps = _scipy_match(left, right, left_src, right_src, spec)
         logger.info("fast (cKDTree) sky match: %d matched pairs.", len(l_idx))
     elif chosen == "torchsky":
-        left = left_lf.collect()
-        right = right_lf.collect()
+        left = _collect_side(left_lf, left_src, "left")
+        right = _collect_side(right_lf, right_src, "right")
         l_idx, r_idx, seps = _torchsky_match(left, right, left_src, right_src, spec)
         logger.info("torchsky sky match: %d matched pairs.", len(l_idx))
     elif chosen == "zone":
-        left = left_lf.collect()
-        right = right_lf.collect()
+        left = _collect_side(left_lf, left_src, "left")
+        right = _collect_side(right_lf, right_src, "right")
         l_idx, r_idx, seps = _zone_match(left, right, left_src, right_src, spec)
         logger.info("zone (HEALPix pixellated) sky match: %d matched pairs.", len(l_idx))
     elif chosen == "ray":
         from .ray_engine import ray_zone_match
 
-        left = left_lf.collect()
-        right = right_lf.collect()
+        left = _collect_side(left_lf, left_src, "left")
+        right = _collect_side(right_lf, right_src, "right")
         l_idx, r_idx, seps = ray_zone_match(left, right, left_src, right_src, spec)
         logger.info("ray (distributed) sky match: %d matched pairs.", len(l_idx))
     else:

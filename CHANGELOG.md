@@ -5,6 +5,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — v0.5 Audit + HATS + Data Lab + New Engines
 
+### Added — Formats & Documentation Overhaul
+
+* **Native TSV / Tab-separated I/O** (`io_utils.py`): added `.tsv` and `.tab` to
+  `SUPPORTED_SUFFIXES`, streaming reads via `pl.scan_csv(separator="\t")`, and
+  streaming writes via `sink_csv(separator="\t")`.
+* **Consolidated Documentation Architecture** (`docs/`): authoring of comprehensive
+  `docs/api.md` (public surface reference), `docs/usage.md` (practical guide & recipes),
+  `docs/algorithms.md` (mathematical formulations, literature citations, and Astropy vs
+  SciPy cKDTree deep dive), and `docs/roadmap.md` (strategic roadmap to v1.0, deep
+  Polars integration, and persistent HATS master unions).
+* **Repository Cleanup**: deleted obsolete audit logs (`AUDIT.md`, `ci_log_xmatch.txt`,
+  `docs/audits/`), moved `install_stilts.sh` to `scripts/`, and modernized `README.md`
+  and `AGENTS.md`.
+
+### Fixed — Engine parity & correctness (union audit round 2)
+
+* **`skyerr` per-row criterion in `fast`/`zone`** (`matchers.py`): the default
+  and scalable engines accepted any candidate inside the *global* chord bound
+  `max_error · (max σ_l + max σ_r)`, so one row's wide error budget admitted
+  another row's mate. `astropy`, `stilts`, `torchsky` and the bounded-memory
+  spill path all applied `sep ≤ max_error · (σ_l + σ_r)` per row, which made
+  results depend on the installed engine. All engines now filter per pair, and
+  `find="best"` ranks by the normalised separation `sep / (σ_l + σ_r)`.
+* **`zone` + `skyerr` + `find="best"`** (`matchers.py`): the HEALPix engine
+  queried only the chord-nearest candidate before applying the N-sigma test,
+  so it could return a different pair than `fast`/`astropy` (and, with the
+  per-row filter, drop a valid pair entirely). It now retrieves every
+  candidate inside the global bound and lets the shared filter rank them.
+* **`skyellipse` + `find="best"` in `zone`** (`matchers.py`): a chord-nearest
+  candidate that failed the Mahalanobis test dropped the row even when a
+  slightly farther candidate passed. `zone` now queries `k>1` candidates like
+  `fast` does and selects by `d²`.
+* **`astropy` skyellipse search radius** (`matchers.py`): the candidate radius
+  used `max(σ_ra², σ_dec²)` per side, which under-estimates the worst-case
+  Mahalanobis radius for elongated/correlated ellipses, so `astropy` silently
+  missed pairs `fast`/`zone` accepted. All engines now share
+  `_skyellipse_search_chord_max`.
+* **RAY engine right-catalogue materialisation** (`ray_engine.py`): every task
+  received *every* right-pixel `ObjectRef` and resolved the whole right
+  catalogue (`O(P)` object-store reads per task, `O(P²)` overall — over the
+  network per task on a cluster). The driver now scopes each task to the right
+  pixels inside its cone; results are unchanged.
+* **Sequential union with heterogeneous coordinate names** (`crossmatch.py`):
+  `--union` hard-coded `<ra>_3`/`<ra>_4` for catalogues 3+, which raised
+  `ColumnNotFoundError` (or silently left rows without positions) whenever a
+  survey named its columns differently (`RAJ2000`, `ra_icrs`, …). Result-side
+  names are now resolved from the actual post-rename schema.
+* **ray-union `Dir=` tree** (`ray_union.py`): output used `pix // 10000`
+  instead of the HATS/HiPS `(pix // 10000) * 10000`, so every output pixel
+  ≥ 10000 landed in a directory no conforming reader looks in.
+* **Non-finite coordinates** (`astro_utils.py`, `matchers.py`, `ray_engine.py`,
+  `mirror.py`): a single non-finite latitude made `cdshealpix` panic inside
+  its Rust core (`PanicException` is a `BaseException`, escaping every
+  `except Exception` handler and the ray-union retry loop). Inputs are now
+  validated once with an actionable `CrossMatchError`.
+* **Empty catalogue mirroring** (`mirror.py`): `_write_hats_native` built its
+  `partition_info` frame from an empty record list, so mirroring a zero-row
+  input (a region with no sources, an empty local file) raised
+  `ColumnNotFoundError` instead of writing a valid empty HATS catalogue.
+* **Unknown `matcher`/`join_type`/`find`** (`matchers.py`): typos now raise at
+  `MatchSpec` construction instead of silently producing an empty result.
+* **N-way `p_match` overflow** (`bayes.py`): `compute_nway_p_match` formed
+  `10**log10_B` (and multiplied by `exp(log_match - log_bg)`), overflowing to
+  `inf` for well-matched tuples; it is now computed with a stable sigmoid in
+  log space.
+
+### Changed — Performance (union audit round 2)
+
+* **ray-union plan build** (`ray_union.py`): the per-catalogue
+  `(order, pixel) → partition` index was rebuilt on every
+  `_cone_candidate_idx` call and `open_storage` ran inside the innermost
+  candidate loop, making the plan `O(P²)`. Both are now computed once per
+  catalogue.
+* **ray-union assembly** (`ray_union.py`): the emitted-partition set was a
+  list (linear membership test ⇒ `O(P²)`) and its row counts re-read every
+  output partition; the set is now insertion-ordered and counts come from the
+  parquet footer.
+* **RAY left-pixel grouping** (`ray_engine.py`): per-pixel index arrays are
+  kept as numpy arrays instead of Python int lists.
+
 ### Added — Versioned Association Contract
 
 * **`xmatch.association.member.equivalence.release.v1`**: atomic,
@@ -135,14 +215,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   code; `--dry-run` prints the plan without calling the platform.
   `engine='ray'` and `engine='ray-union'` join the cluster in
   `RAY_ADDRESS` when set.
-* **Tests**: 14 `tests/test_mirror_sync.py` tests (incremental TAP sync,
+* **Tests**: 15 `tests/test_mirror_sync.py` tests (incremental TAP sync,
   force re-fetch, window-shrink/append continuation, HATS-over-HTTP mirror,
   HATS-over-`vos:` mirror, endpoint failover, partial-transfer failover,
-  column-gate refusal, multi-root locate probing),
-  12 `tests/test_ray_union.py` tests (3-catalogue-vs-oracle,
+  column-gate refusal, multi-root locate probing, empty-catalogue mirror),
+  14 `tests/test_ray_union.py` tests (3-catalogue-vs-oracle,
   brute-force-oracle comparison, resume skip, far-partner singles,
   cone-covering regression, rest-partition dedup, block-combination
-  gating, max-tuples cap, mixed-order oracle, ring-to-nested conversion) —
+  gating, max-tuples cap, mixed-order oracle, ring-to-nested conversion,
+  deep-pixel directory conventions) —
   plus 4 CLI sync tests (`test_cli_sync.py`, incl. the platform output-root
   resolution), 13 `tests/test_storage.py` tests (`all_cache_roots`
   precedence, platform `/arc` defaults for cache and output roots), a
