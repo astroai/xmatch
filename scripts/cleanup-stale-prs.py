@@ -204,9 +204,8 @@ def close_and_debranch(rows: list[StalePR]) -> tuple[str, str]:
                 str(row.number),
                 "--delete-branch",
                 "--comment",
-                "Closing as superseded by v0.3 audit batch (see AUDIT.md, "
-                "CHANGELOG.md). Reopen if still relevant: gh pr reopen "
-                f"{row.number}.",
+                "Closing as superseded (see CHANGELOG.md). "
+                f"Reopen if still relevant: gh pr reopen {row.number}.",
             ],
             check=True,
         )
