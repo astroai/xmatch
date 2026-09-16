@@ -27,6 +27,14 @@ def test_roundtrip_csv(tmp_path, sample):
     assert io_utils.frame_columns(io_utils.scan_frame(path)) == ["id", "ra", "dec"]
 
 
+def test_roundtrip_tsv(tmp_path, sample):
+    path = tmp_path / "x.tsv"
+    io_utils.write_frame(sample, path)
+    assert io_utils.frame_columns(io_utils.scan_frame(path)) == ["id", "ra", "dec"]
+    back = io_utils.scan_frame(path).collect()
+    assert back.sort("id").equals(sample.sort("id"))
+
+
 def test_roundtrip_fits(tmp_path, sample):
     path = tmp_path / "x.fits"
     io_utils.write_frame(sample, path)

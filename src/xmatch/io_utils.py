@@ -30,7 +30,7 @@ from .exceptions import InputError
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_SUFFIXES = {".parquet", ".csv", ".fits", ".fit", ".hats"}
+SUPPORTED_SUFFIXES = {".parquet", ".csv", ".tsv", ".tab", ".fits", ".fit", ".hats"}
 
 # Files that, when present in a directory, identify a HATS / HiPSCat catalogue.
 _HATS_MARKERS = ("properties", "hats.properties", "catalog_info.json", "_metadata")
@@ -190,6 +190,8 @@ def scan_frame(path: Union[str, Path]) -> pl.LazyFrame:
         return pl.scan_parquet(p)
     if suffix == ".csv":
         return pl.scan_csv(p)
+    if suffix in (".tsv", ".tab"):
+        return pl.scan_csv(p, separator="\t")
     if suffix in (".fits", ".fit"):
         return _read_fits(p).lazy()
     raise InputError(f"Unsupported file format '{suffix}'. Supported: {sorted(SUPPORTED_SUFFIXES)}")
@@ -313,6 +315,8 @@ def _write_frame_vospace(
             lf.sink_parquet(local, engine="streaming")
         elif suffix == ".csv":
             lf.sink_csv(local, engine="streaming")
+        elif suffix in (".tsv", ".tab"):
+            lf.sink_csv(local, separator="\t")
         elif suffix in (".fits", ".fit"):
             polars_to_astropy(lf).write(local, overwrite=True)
         else:
@@ -362,6 +366,8 @@ def write_frame(
         lf.sink_parquet(out, engine="streaming")
     elif suffix == ".csv":
         lf.sink_csv(out, engine="streaming")
+    elif suffix in (".tsv", ".tab"):
+        lf.sink_csv(out, separator="\t")
     elif suffix in (".fits", ".fit"):
         polars_to_astropy(lf).write(out, overwrite=True)
     elif suffix == ".hats":
