@@ -149,12 +149,13 @@ def tap_self_join(
     b_dec_q = _quote_id(src2.dec_column)
     a_table_q = _table_ref(src1.access_identifier, tap_url=src1.tap_url)
     b_table_q = _table_ref(src2.access_identifier, tap_url=src2.tap_url)
-    cols1 = ", ".join(f"a.{_quote_id(c)} AS a_{c}" for c in list1)
-    cols2 = ", ".join(f"b.{_quote_id(c)} AS b_{c}" for c in list2)
+    cols1 = ", ".join(f"a.{_quote_id(c)} AS {_quote_id(f'a_{c}')}" for c in list1)
+    cols2 = ", ".join(f"b.{_quote_id(c)} AS {_quote_id(f'b_{c}')}" for c in list2)
+    sep_col_q = _quote_id(f"{spec.find}_sep_arcsec")
     query = (
         f"SELECT {cols1}, {cols2}, "
         f"DISTANCE(POINT('ICRS', a.{a_ra_q}, a.{a_dec_q}),"
-        f" POINT('ICRS', b.{b_ra_q}, b.{b_dec_q}))*3600 AS {spec.find}_sep_arcsec "
+        f" POINT('ICRS', b.{b_ra_q}, b.{b_dec_q}))*3600 AS {sep_col_q} "
         f"FROM {a_table_q} AS a JOIN {b_table_q} AS b "
         f"ON 1=CONTAINS(POINT('ICRS', a.{a_ra_q}, a.{a_dec_q}),"
         f" CIRCLE('ICRS', b.{b_ra_q}, b.{b_dec_q}, {radius_deg}))"
