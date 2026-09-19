@@ -899,6 +899,18 @@ def _write_hats_native(
     import numpy as np  # noqa: PLC0415
     from astropy.coordinates import Latitude, Longitude  # noqa: PLC0415
 
+    from .astro_utils import require_finite_coordinates  # noqa: PLC0415
+
+    # Validate once, before any pixellation: one non-finite latitude makes
+    # cdshealpix panic (PanicException, a BaseException) and would otherwise
+    # kill a cold sync of an entire survey with an unhelpful Rust assertion.
+    if not frame.is_empty():
+        require_finite_coordinates(
+            frame[ra_column].cast(pl.Float64).to_numpy(),
+            frame[dec_column].cast(pl.Float64).to_numpy(),
+            label=f"catalogue to mirror ({ra_column}/{dec_column})",
+        )
+
     out_dir = Path(out_dir)
     dataset = out_dir / "dataset"
     dataset.mkdir(parents=True, exist_ok=True)
@@ -943,9 +955,19 @@ def _write_hats_native(
         )
 
     total = frame.height
-    info_df = pl.DataFrame(info).select(
-        ["Norder", "Dir", "Npix", "Nfiles", "file_loc", "file_size", "count"]
-    )
+    # An empty catalogue is legal (a region / query with no rows) and must
+    # still produce a readable HATS dir.  Building from ``info`` alone left the
+    # frame with no columns, so ``.select`` raised ColumnNotFoundError.
+    info_schema = {
+        "Norder": pl.Int64,
+        "Dir": pl.Int64,
+        "Npix": pl.Int64,
+        "Nfiles": pl.Int64,
+        "file_loc": pl.Utf8,
+        "file_size": pl.Int64,
+        "count": pl.Int64,
+    }
+    info_df = pl.DataFrame(info, schema=info_schema).select(list(info_schema))
     # hats 0.7.x reads the root copy; the dataset copy is the classic spec.
     info_df.write_csv(dataset / "partition_info.csv")
     info_df.write_csv(out_dir / "partition_info.csv")
@@ -968,8 +990,12 @@ def _write_hats_native(
         import pyarrow as pa  # noqa: PLC0415
         import pyarrow.parquet as pq  # noqa: PLC0415
 
-        schemas = [pq.read_schema(dataset / f"{e['file_loc']}.parquet") for e in info]
-        unified = pa.unify_schemas(schemas)
+        if info:
+            schemas = [pq.read_schema(dataset / f"{e['file_loc']}.parquet") for e in info]
+            unified = pa.unify_schemas(schemas)
+        else:
+            # No partitions: the input frame's own schema is still known.
+            unified = frame.to_arrow().schema
         pq.write_metadata(unified, dataset / "_common_metadata")
         pq.write_metadata(unified, dataset / "_metadata")
     except Exception:  # noqa: BLE001

@@ -207,9 +207,14 @@ def test_bundled_new_survey_aliases():
     assert cm.resolve_name("nvss") == "nvss"
     assert cm.resolve_name("delve3") == "delve3"
     assert cm.resolve_name("desi") == "desi"
+    assert cm.resolve_name("cosmos-web") == "cosmos_web"
+    assert cm.resolve_name("z-cosmos") == "zcosmos"
     src = cm.resolve_source("ps1", {})
     assert src.access_identifier == "II/349/ps1"
     assert src.ra_column == "RAJ2000"
+    src_cw = cm.resolve_source("cosmos-web", {})
+    assert src_cw.access_identifier == "J/A+A/704/A339/phot"
+    assert src_cw.ra_column == "RAJ2000"
 
 
 def test_resolve_access_identifier_uses_bundled_catalogue():

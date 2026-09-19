@@ -444,3 +444,36 @@ def test_locate_mirrored_probes_roots_in_order(tmp_path: Path, tap_server) -> No
     msg = str(ei.value)
     assert "not mirrored yet" in msg
     assert r1 in msg and str(tmp_path / "root3") in msg  # lists every probed root
+
+
+def test_write_hats_native_empty_frame_produces_readable_catalogue(tmp_path: Path) -> None:
+    """An empty input (a region/query with no rows) must still mirror as a
+    valid, readable HATS catalogue.
+
+    Regression: ``pl.DataFrame([])`` has no columns, so the
+    ``partition_info`` ``.select([...])`` raised ``ColumnNotFoundError`` — a
+    local input file with zero rows crashed ``--engine ray-union`` with an
+    opaque polars error instead of writing an empty catalogue.
+    """
+    import hats
+
+    empty = pl.DataFrame(schema={"ra": pl.Float64, "dec": pl.Float64, "id": pl.Utf8})
+    out = tmp_path / "empty"
+    mirror._write_hats_native(empty, out, ra_column="ra", dec_column="dec", threshold=10)
+
+    info = pl.read_csv(out / "partition_info.csv")
+    assert info.height == 0
+    assert info.columns == [
+        "Norder",
+        "Dir",
+        "Npix",
+        "Nfiles",
+        "file_loc",
+        "file_size",
+        "count",
+    ]
+    props = (out / "properties").read_text()
+    assert "hats_nrows=0" in props
+    read = hats.read_hats(out)
+    assert read.catalog_info.total_rows == 0
+    assert read.get_healpix_pixels() == []

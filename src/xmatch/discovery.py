@@ -220,7 +220,26 @@ def discover_columns(
     table = execute_tap_query(service, query)
     from .io_utils import astropy_table_to_polars
 
-    return astropy_table_to_polars(table)
+    df = astropy_table_to_polars(table)
+    if df.height == 0 and not safe_table.startswith('"') and not safe_table.endswith('"'):
+        # VizieR TAP_SCHEMA stores slash-delimited table names with literal double quotes: "II/349/ps1"
+        q_quoted = (
+            "SELECT column_name, datatype, ucd, unit, description "
+            "FROM TAP_SCHEMA.columns "
+            f"WHERE table_name = '\"{safe_table}\"'"
+        )
+        if schema_name:
+            safe = schema_name.replace("'", "''")
+            q_quoted += f" AND schema_name = '{safe}'"
+        q_quoted += " ORDER BY column_name"
+        try:
+            t_quoted = execute_tap_query(service, q_quoted)
+            df = astropy_table_to_polars(t_quoted)
+        except Exception:
+            pass
+    if df.height > 0 and "column_name" in df.columns:
+        df = df.with_columns(pl.col("column_name").str.strip_chars('"'))
+    return df
 
 
 def detect_radec_columns(cols_df: pl.DataFrame) -> Tuple[Optional[str], Optional[str]]:

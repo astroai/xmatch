@@ -153,8 +153,6 @@ a failing state on intermediate SHAs that CI will flag.
 
 ## Quarterly maintenance: stale AI-agent PR cleanup
 
-> A reusable, automation-aware variant of this runbook lives at
-> [`docs/audits/quarterly-review.md`](docs/audits/quarterly-review.md).
 > The GitHub Actions workflow
 > [`.github/workflows/q3-review-reminder.yml`](.github/workflows/q3-review-reminder.yml)
 > runs the dry-run scan (`--json`) automatically on the 1st of each
@@ -210,7 +208,7 @@ reflects the post-apply state.
     bash scripts/cleanup-stale-prs.sh --apply
 
 This closes each matching PR with a comment that points at
-``AUDIT.md`` / ``CHANGELOG.md`` and runs ``gh pr close --delete-branch``
+``CHANGELOG.md`` and runs ``gh pr close --delete-branch``
 to remove the remote branch.  The script writes **two rollback files**
 to a temp dir on success:
 

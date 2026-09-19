@@ -270,14 +270,14 @@ def compute_nway_p_match(
 
     log10_B = compute_nway_bayes_factor(ras, decs, sigmas, radius_arcsec)
 
-    # Convert log10 Bayes factor to log posterior odds.
-    # p_match = 1 / (1 + 1/B) = B / (1 + B)
-    # For large B, this saturates at 1.
-    B = 10.0**log10_B  # B can overflow for well-matched tuples; clip.
-    B = np.clip(B, 0.0, 1e300)
+    # Everything below stays in log space: p = sigmoid(ln B).  Forming
+    # ``10**log10_B`` first overflowed to ``inf`` for well-matched tuples
+    # (and was only rescued by a clip to 1e300), and multiplying by
+    # ``exp(log_match - log_bg)`` could overflow again.
+    log_odds = log10_B * math.log(10.0)
 
     if prior_columns:
-        # Photometric likelihood ratio multiplies B.
+        # Photometric likelihood ratio multiplies B (adds in log space).
         from scipy.stats import gaussian_kde
 
         for col_idx in range(len(prior_columns)):
@@ -295,10 +295,14 @@ def compute_nway_p_match(
                 log_bg = np.zeros(n_tuples, dtype=float)
                 for v in col_values:
                     log_bg += kde.logpdf(np.asarray(v, dtype=float))
-                B *= np.exp(log_match - log_bg)
+                log_odds = log_odds + (log_match - log_bg)
             except Exception:
                 pass  # uniform prior if KDE fails
 
-    B_safe = np.clip(B, 0.0, 1e300)
-    p_match = B_safe / (1.0 + B_safe)
+    # Numerically stable sigmoid: never evaluates exp of a positive number.
+    p_match = np.empty_like(log_odds, dtype=float)
+    non_neg = log_odds >= 0
+    p_match[non_neg] = 1.0 / (1.0 + np.exp(-log_odds[non_neg]))
+    exp_pos = np.exp(log_odds[~non_neg])
+    p_match[~non_neg] = exp_pos / (1.0 + exp_pos)
     return np.clip(p_match, 0.0, 1.0)

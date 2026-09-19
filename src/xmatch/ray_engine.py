@@ -19,12 +19,12 @@ object store with ``ray.put()`` so workers can read it zero-copy.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from typing import Tuple
 
 import numpy as np
-from astropy.coordinates import Latitude, Longitude
 
 from .exceptions import CrossMatchError
 from .matchers import _first_occurrence_indices
@@ -65,19 +65,19 @@ def _get_ray_pixel_batch():
         r_xyz_refs: dict,
         r_groups_ref: dict,
         spec,
-        radius_deg: float,
         chord_max: float,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Process one left HEALPix pixel batch as a Ray task.
 
-        Builds a merged margin-cached cKDTree for all neighbouring right
-        pixels and queries it once, returning
+        ``r_xyz_refs``/``r_groups_ref`` hold *only* this batch's neighbouring
+        right pixels (the driver scopes them with a cone search), so a worker
+        never materialises the whole right catalogue.  Builds one merged
+        margin-cached cKDTree and queries it once, returning
         ``(left_idx, right_idx, seps)`` for this batch only.
         """
-        import cdshealpix as hp
         from scipy.spatial import cKDTree
 
-        from .matchers import _chord_to_arcsec, _cone_search_pixels
+        from .matchers import _chord_to_arcsec
 
         empty = (
             np.array([], dtype=np.int64),
@@ -89,32 +89,13 @@ def _get_ray_pixel_batch():
         batch_xyz = l_xyz[indices_arr]
 
         # Nested ObjectRefs are NOT resolved by Ray 2.x when passed inside a
-        # dict argument — resolve the right-side pixel buffers here.
+        # dict argument — resolve this batch's neighbour buffers here.
         import ray  # noqa: PLC0415
 
-        r_xyz = {pix: ray.get(ref) for pix, ref in r_xyz_refs.items()}
-
-        # Determine neighbouring right pixels via cone search.
-        mid = len(indices_arr) // 2
-        rep_xyz = batch_xyz[mid]
-        rep_lon = float(np.arctan2(rep_xyz[1], rep_xyz[0]))
-        rep_lat = float(np.arcsin(np.clip(rep_xyz[2], -1.0, 1.0)))
-        npix = _cone_search_pixels(
-            hp,
-            rep_lon,
-            rep_lat,
-            float(np.radians(radius_deg)),
-            5,
-        )
-
-        # Build merged margin tree from all neighbouring right pixels.
         margin_xyz_parts: list = []
         margin_global_parts: list = []
-        for rpix in npix:
-            rpix_int = int(rpix)
-            if rpix_int not in r_xyz_refs:
-                continue
-            margin_xyz_parts.append(r_xyz[rpix_int])
+        for rpix_int, ref in r_xyz_refs.items():
+            margin_xyz_parts.append(ray.get(ref))
             margin_global_parts.append(r_groups_ref[rpix_int])
 
         if not margin_xyz_parts:
@@ -229,7 +210,7 @@ def ray_zone_match(
 
     Parameters are identical to :func:`xmatch.matchers._scipy_match`.
     """
-    from .matchers import _scipy_match, _zone_match
+    from .matchers import _pixellate, _scipy_match, _skyerr_pair_filter, _zone_match
 
     # N-dimensional extra_distance_cols are delegated to _scipy_match
     # (single-machine cKDTree with N-d ranking).
@@ -240,6 +221,19 @@ def ray_zone_match(
             )
         logger.info("extra_distance_cols set; using Tier 1 cKDTree for N-d matching.")
         return _scipy_match(left, right, left_src, right_src, spec)
+
+    # The distributed tasks score candidates on an isotropic per-row radius only,
+    # so a full 2-D Mahalanobis match cannot be expressed here.  Say so instead
+    # of silently matching a different criterion (torchsky does the same).
+    if spec.matcher == "skyellipse":
+        message = (
+            "engine='ray' does not implement matcher='skyellipse'; "
+            "use engine='zone' or engine='fast'"
+        )
+        if spec.fallback_policy == "error":
+            raise CrossMatchError(message)
+        logger.warning("%s — falling back to the single-machine zone engine.", message)
+        return _zone_match(left, right, left_src, right_src, spec)
 
     if not ray_available():
         if spec.fallback_policy == "error":
@@ -275,33 +269,22 @@ def ray_zone_match(
             return _zone_match(left, right, left_src, right_src, spec)
 
     # --- partition left-side data by HEALPix pixel ------------------------
+    from .astro_utils import require_finite_coordinates
     from .matchers import _radec_to_xyz
 
     l_ra = left[left_src.ra_column].to_numpy().astype(float)
     l_dec = left[left_src.dec_column].to_numpy().astype(float)
     r_ra = right[right_src.ra_column].to_numpy().astype(float)
     r_dec = right[right_src.dec_column].to_numpy().astype(float)
+    require_finite_coordinates(l_ra, l_dec, label=f"catalogue '{left_src.name}'")
+    require_finite_coordinates(r_ra, r_dec, label=f"catalogue '{right_src.name}'")
 
     try:
         import cdshealpix as hp
 
         DEPTH = 5  # nside = 2 ** DEPTH == 32
-        l_pix = np.asarray(
-            hp.lonlat_to_healpix(
-                Longitude(np.radians(l_ra), unit="rad"),
-                Latitude(np.radians(l_dec), unit="rad"),
-                DEPTH,
-            ),
-            dtype=int,
-        )
-        r_pix = np.asarray(
-            hp.lonlat_to_healpix(
-                Longitude(np.radians(r_ra), unit="rad"),
-                Latitude(np.radians(r_dec), unit="rad"),
-                DEPTH,
-            ),
-            dtype=int,
-        )
+        l_pix = _pixellate(hp, l_ra, l_dec, DEPTH, label=f"catalogue '{left_src.name}'")
+        r_pix = _pixellate(hp, r_ra, r_dec, DEPTH, label=f"catalogue '{right_src.name}'")
     except ImportError as exc:
         if spec.fallback_policy == "error":
             raise CrossMatchError(
@@ -316,8 +299,10 @@ def ray_zone_match(
     l_unique_indices = _first_occurrence_indices(l_sorted_pix)
     l_unique_pix = l_sorted_pix[l_unique_indices]
     l_splits = np.split(l_sort_idx, l_unique_indices[1:])
-    l_by_pix: dict[int, list] = {
-        int(k): v.tolist() for k, v in zip(l_unique_pix, l_splits, strict=False)
+    # Keep numpy arrays (not Python int lists) — a full-sky catalogue has
+    # millions of row indices and ``.tolist()`` triples their footprint.
+    l_by_pix: dict[int, np.ndarray] = {
+        int(k): v for k, v in zip(l_unique_pix, l_splits, strict=False)
     }
 
     # Group right by pixel.
@@ -351,31 +336,51 @@ def ray_zone_match(
         radius_deg = max(search_radius, 0.0) / 3600.0
         chord_max = _arcsec_to_chord(max(search_radius, 0.0))
 
-    # Put immutable data in object store.
-    l_xyz_ref = ray.put(_radec_to_xyz(l_ra, l_dec))
-    r_groups_ref = ray.put({int(k): v for k, v in r_groups.items()})
-    spec_ref = ray.put(spec)
-    radius_deg_ref = ray.put(radius_deg)
+    # Put immutable data in object store.  ``skyerr`` is a per-row criterion, so
+    # the workers must hand back every candidate inside the global bound; the
+    # driver applies the N-sigma filter and the best-per-primary reduction once
+    # the batch results are gathered.
+    task_spec = dataclasses.replace(spec, find="all") if spec.matcher == "skyerr" else spec
+    l_xyz = _radec_to_xyz(l_ra, l_dec)
+    l_xyz_ref = ray.put(l_xyz)
+    spec_ref = ray.put(task_spec)
     chord_max_ref = ray.put(chord_max)
+
+    # Scope every task's right-side inputs to the pixels inside its cone.
+    # Passing the full ``r_xyz_refs`` dict made each worker resolve and
+    # materialise the ENTIRE right catalogue (O(P) object-store reads per
+    # task, O(P^2) overall — and on a multi-node cluster the whole catalogue
+    # over the network per task).  The neighbour set is identical to the one
+    # the worker used to compute locally, so results do not change.
+    from .matchers import _cone_search_pixels
 
     # Submit one task per left pixel group.
     pixel_batch_fn = _get_ray_pixel_batch()
     futures: list = []
-    pixel_items = list(l_by_pix.items())
-    total_batches = len(pixel_items)
-    for l_pix_int, left_indices in pixel_items:
+    total_batches = 0
+    for l_pix_int, left_indices in l_by_pix.items():
         indices_arr = np.asarray(left_indices, dtype=np.int64)
+        rep = l_xyz[indices_arr[indices_arr.shape[0] // 2]]
+        npix = _cone_search_pixels(
+            hp,
+            float(np.arctan2(rep[1], rep[0])),
+            float(np.arcsin(np.clip(rep[2], -1.0, 1.0))),
+            float(np.radians(radius_deg)),
+            DEPTH,
+        )
+        task_refs = {int(p): r_xyz_refs[int(p)] for p in npix if int(p) in r_xyz_refs}
+        task_groups = {int(p): r_groups[int(p)] for p in npix if int(p) in r_groups}
         future = pixel_batch_fn.remote(
             l_pix_int,
             indices_arr,
             l_xyz_ref,
-            r_xyz_refs,
-            r_groups_ref,
+            task_refs,
+            task_groups,
             spec_ref,
-            radius_deg_ref,
             chord_max_ref,
         )
         futures.append(future)
+        total_batches += 1
 
     logger.info("Submitted %d pixel batches to Ray workers.", total_batches)
 
@@ -394,8 +399,17 @@ def ray_zone_match(
     empty = (np.array([], int), np.array([], int), np.array([], float))
     if not l_parts:
         return empty
-    return (
-        np.concatenate(l_parts),
-        np.concatenate(r_parts),
-        np.concatenate(sep_parts),
-    )
+    left_idx = np.concatenate(l_parts)
+    right_idx = np.concatenate(r_parts)
+    seps = np.concatenate(sep_parts)
+    if spec.matcher == "skyerr":
+        left_idx, right_idx, seps = _skyerr_pair_filter(
+            left_idx,
+            right_idx,
+            seps,
+            lsig,
+            rsig,
+            spec.max_error,
+            find=spec.find,
+        )
+    return left_idx, right_idx, seps

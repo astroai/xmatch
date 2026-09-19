@@ -54,6 +54,15 @@ class Storage:
     def read_parquet(self, rel: str) -> pl.DataFrame:  # pragma: no cover - protocol
         raise NotImplementedError
 
+    def parquet_schema(self, rel: str) -> "dict[str, object]":  # pragma: no cover - protocol
+        """Column name -> polars dtype for the parquet file at ``rel``.
+
+        Used by the union plan builder, which must know every catalogue's
+        columns before fanning out (a remote root cannot be probed with a
+        local ``Path``).
+        """
+        raise NotImplementedError
+
     def write_parquet(self, df: pl.DataFrame, rel: str) -> None:  # pragma: no cover
         raise NotImplementedError
 
@@ -125,6 +134,9 @@ class LocalStorage(Storage):
 
     def read_parquet(self, rel: str) -> pl.DataFrame:
         return pl.read_parquet(self._path(rel))
+
+    def parquet_schema(self, rel: str) -> "dict[str, object]":
+        return dict(pl.read_parquet_schema(self._path(rel)))
 
     def write_parquet(self, df: pl.DataFrame, rel: str) -> None:
         target = self._path(rel)
@@ -316,6 +328,20 @@ class VOSpaceStorage(Storage):
             if not local.exists():
                 raise FileNotFoundError(rel)
             return pl.read_parquet(local)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def parquet_schema(self, rel: str) -> "dict[str, object]":
+        """Stage the partition in and read its footer (one transfer, not two)."""
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix="xmatch-vos-schema-")
+        local = Path(tmpdir) / "part.parquet"
+        try:
+            self.stage_in(rel, local)
+            if not local.exists():
+                raise FileNotFoundError(rel)
+            return dict(pl.read_parquet_schema(local))
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

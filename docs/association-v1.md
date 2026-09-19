@@ -1,5 +1,10 @@
 # `xmatch.association.v1`
 
+> [!NOTE]
+> This document is the normative schema and release directory specification for the `xmatch.association.v1` contract.
+> - For the Python API reference, see [`docs/api.md`](api.md#association-contract--provenance-graph-xmatchassociation-implemented).
+> - For the graph association and identity algorithm formulation, see [`docs/algorithms.md`](algorithms.md#11-graph-association--provenance-identity-xmatchassociationv1-implemented).
+
 This contract records evaluated source/candidate pairs. It does not define a
 permanent celestial-object identifier, claim that a selected candidate is true,
 or coalesce redshift evidence. Xmatch owns candidate generation and association;

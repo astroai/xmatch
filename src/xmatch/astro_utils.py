@@ -12,6 +12,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .exceptions import CrossMatchError
+
 logger = logging.getLogger(__name__)
 
 _RA_PATTERNS = [
@@ -74,6 +76,30 @@ def validate_coordinates(ra: np.ndarray, dec: np.ndarray) -> None:
         raise ValueError("RA values outside [0, 360].")
     if ((dec < -90 - eps) | (dec > 90 + eps)).any():
         raise ValueError("Dec values outside [-90, 90].")
+
+
+def require_finite_coordinates(ra, dec, *, label: str) -> None:
+    """Raise :class:`CrossMatchError` when RA/Dec are non-finite or Dec is invalid.
+
+    A single non-finite latitude makes ``cdshealpix`` (the ``zone``/``ray``
+    engines, and the HATS mirror writer) panic inside its Rust core.  That
+    ``pyo3_runtime.PanicException`` is a ``BaseException``, so it escapes every
+    ``except Exception`` handler on the way up — including the ray-union retry
+    loop.  Engines validate once here and report an actionable error instead.
+
+    RA is only required to be finite (longitude is accepted any modulo-360
+    value and wraps inside cdshealpix); Dec must lie in ``[-90, 90]``.
+    """
+    ra_arr = np.asarray(ra, dtype=float)
+    dec_arr = np.asarray(dec, dtype=float)
+    bad = ~(np.isfinite(ra_arr) & np.isfinite(dec_arr) & (dec_arr >= -90.0) & (dec_arr <= 90.0))
+    if bad.any():
+        first = int(np.flatnonzero(bad)[0])
+        raise CrossMatchError(
+            f"{label} has {int(bad.sum())} row(s) with non-finite or out-of-range "
+            f"coordinates (first at row {first}); clean the input coordinates "
+            "before matching"
+        )
 
 
 def sky_extent(ra: np.ndarray, dec: np.ndarray) -> Optional[Dict[str, float]]:

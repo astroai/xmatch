@@ -984,3 +984,33 @@ def test_io_vos_output_staged_upload(monkeypatch, tmp_path):
     )
     assert fake.exists("out.csv")
     assert "ra,dec" in (tmp_path / "vosroot" / "out.csv").read_text()
+
+
+def test_union_match_heterogeneous_coordinate_column_names():
+    """A later catalogue whose RA/Dec columns do not collide with the first
+    catalogue's keeps its own names in the chained result; the union must find
+    them instead of assuming ``<ra>_3`` (which used to raise
+    ``ColumnNotFoundError`` for real survey naming such as ``RAJ2000``)."""
+    a = pl.DataFrame({"id": [1, 2], "ra": [10.0, 20.0], "dec": [5.0, 6.0]})
+    b = pl.DataFrame({"id": [10, 20], "ra": [10.00005, 20.00005], "dec": [5.0, 6.0]})
+    c = pl.DataFrame({"id": [100], "ra_icrs": [10.0001], "de_icrs": [5.0]})
+    cm = CrossMatch()
+    out = cm.union_match([a, b, c], radius_arcsec=1.0)
+    assert isinstance(out, pl.DataFrame)
+    assert "ra_icrs" in out.columns  # non-colliding name survives the chain
+    src_cats = set(out["_src_cats"].to_list())
+    assert src_cats == {"1+2+3", "1+2"}, f"unexpected _src_cats: {src_cats}"
+    assert out.height == 2
+
+
+def test_union_match_heterogeneous_names_four_way():
+    """Four catalogues, each naming RA/Dec differently, must all be positioned
+    in the accumulator (regression for the hard-coded ``_3``/``_4`` suffixes)."""
+    a = pl.DataFrame({"id": [1], "ra": [10.0], "dec": [5.0]})
+    b = pl.DataFrame({"id": [10], "RAJ2000": [10.00005], "DEJ2000": [5.0]})
+    c = pl.DataFrame({"id": [100], "ra_icrs": [10.0001], "de_icrs": [5.0]})
+    d = pl.DataFrame({"id": [1000], "ra_deg": [10.00015], "dec_deg": [5.0]})
+    cm = CrossMatch()
+    out = cm.union_match([a, b, c, d], radius_arcsec=1.0)
+    assert isinstance(out, pl.DataFrame)
+    assert set(out["_src_cats"].to_list()) == {"1+2+3+4"}

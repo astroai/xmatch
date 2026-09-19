@@ -25,7 +25,7 @@ import time
 from dataclasses import replace
 from itertools import product as cartesian_product
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import numpy as np
 import polars as pl
@@ -95,6 +95,37 @@ def _side_overrides(params: Dict[str, Any], side: int) -> Dict[str, Any]:
         ):
             out[key[: -len(suffix)]] = value
     return out
+
+
+def _joined_column_name(
+    schema_names: Set[str],
+    original: str,
+    suffix: str,
+    added: Optional[Set[str]] = None,
+) -> Optional[str]:
+    """Resolve a right-hand catalogue's column name inside a chained result.
+
+    ``_rename_right`` suffixes *only* the columns that collide with the
+    accumulator's, so a survey whose coordinate columns are named differently
+    from the first catalogue's keeps its own name (``RAJ2000``, ``ra_icrs``,
+    …).  Chained matching has to look up the name the result actually carries
+    instead of assuming ``f"{first_catalogue_name}{suffix}"``.
+
+    ``added`` (the names the last match step contributed) is the unambiguous
+    source when the pre-step schema is known; otherwise the suffixed name is
+    preferred and the plain name is the fallback.
+    """
+    suffixed = f"{original}{suffix}"
+    if added:
+        if suffixed in added:
+            return suffixed
+        if original in added:
+            return original
+    if suffixed in schema_names:
+        return suffixed
+    if original in schema_names:
+        return original
+    return None
 
 
 def _angsep_deg(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
@@ -1411,27 +1442,35 @@ class CrossMatch:
 
         # First pair.
         accum_lf = self._dispatch(sources[0], sources[1], req)
+        pair_cols = set(accum_lf.collect_schema().names())
+        # The result-side names of catalogue 2's coordinate columns: only
+        # suffixes when they collide with catalogue 1's names.
+        kept_cols = set(sources[0].columns()) if sources[0].is_local else set()
+        pair_added = (pair_cols - kept_cols) if kept_cols else None
+        prev_ra = _joined_column_name(pair_cols, sources[1].ra_column or "ra", "_2", pair_added)
+        prev_dec = _joined_column_name(pair_cols, sources[1].dec_column or "dec", "_2", pair_added)
+        if prev_ra is None or prev_dec is None:
+            if union_match:
+                raise CrossMatchError(
+                    f"Could not locate catalogue '{sources[1].name}' coordinate columns "
+                    "in the match result; pass --ra2/--dec2 to name them explicitly."
+                )
+            logger.debug(
+                "catalogue '%s' coordinate columns not found in the pair result; "
+                "later steps will not re-position its rows",
+                sources[1].name,
+            )
         if union_match:
-            # Per-row detection: which catalogue(s) contributed?
-            # Check if the right side's spatial columns are non-null.
-            r2_ra = sources[1].ra_column or "ra"
-            r2_dec = sources[1].dec_column or "dec"
-            # Determine the renamed right-side RA/Dec columns in the result.
-            # If they collide with left columns, _build_result renames them
-            # with a ``_2`` suffix; mirror that suffixing here so the
-            # ``_src_cats`` tag accurately reflects which side(s) contributed
-            # (i.e. requires *both* RA and Dec non-null on every side).
-            left_cols = set(sources[0].columns()) if sources[0].is_local else set()
-            r2_ra_in_result = f"{r2_ra}_2" if r2_ra in left_cols else r2_ra
-            r2_dec_in_result = f"{r2_dec}_2" if r2_dec in left_cols else r2_dec
+            # Per-row detection: which catalogue(s) contributed?  Requires BOTH
+            # RA and Dec to be non-null on a side.
             accum_lf = accum_lf.with_columns(
                 pl.when(
-                    pl.col(r2_ra_in_result).is_not_null()
-                    & pl.col(r2_dec_in_result).is_not_null()
+                    pl.col(prev_ra).is_not_null()
+                    & pl.col(prev_dec).is_not_null()
                     & pl.col(first_ra).is_not_null()
                 )
                 .then(pl.lit("1+2"))
-                .when(pl.col(r2_ra_in_result).is_not_null())
+                .when(pl.col(prev_ra).is_not_null())
                 .then(pl.lit("2"))
                 .otherwise(pl.lit("1"))
                 .alias("_src_cats")
@@ -1442,17 +1481,19 @@ class CrossMatch:
             right_src = sources[i]
             suffix = f"_{i + 1}"
 
-            # Coalesce spatial columns for unmatched rows.
+            # Coalesce spatial columns for unmatched rows.  ``prev_ra``/``prev_dec``
+            # are the result-side names of the catalogue added by the previous
+            # step, whatever they happen to be called.
             accum_cols = set(accum_lf.collect_schema().names())
             if i == 2:
-                ra_candidates = [first_ra, f"{first_ra}_2"]
-                dec_candidates = [first_dec, f"{first_dec}_2"]
+                ra_candidates = [first_ra, prev_ra]
+                dec_candidates = [first_dec, prev_dec]
             else:
-                ra_candidates = ["_accum_ra", f"{first_ra}_{i}"]
-                dec_candidates = ["_accum_dec", f"{first_dec}_{i}"]
+                ra_candidates = ["_accum_ra", prev_ra]
+                dec_candidates = ["_accum_dec", prev_dec]
 
-            ra_present = [c for c in ra_candidates if c in accum_cols]
-            dec_present = [c for c in dec_candidates if c in accum_cols]
+            ra_present = [c for c in ra_candidates if c and c in accum_cols]
+            dec_present = [c for c in dec_candidates if c and c in accum_cols]
             if ra_present:
                 accum_lf = accum_lf.with_columns(
                     pl.coalesce([pl.col(c) for c in ra_present]).alias("_accum_ra")
@@ -1489,11 +1530,30 @@ class CrossMatch:
                     .lazy()
                 )
 
+            step_cols = set(accum_lf.collect_schema().names())
+            step_added = step_cols - accum_cols
+            rN_ra_in_result = _joined_column_name(
+                step_cols, right_src.ra_column or "ra", suffix, step_added
+            )
+            rN_dec_in_result = _joined_column_name(
+                step_cols, right_src.dec_column or "dec", suffix, step_added
+            )
+            if rN_ra_in_result is None or rN_dec_in_result is None:
+                if union_match:
+                    raise CrossMatchError(
+                        f"Could not locate catalogue '{right_src.name}' coordinate columns "
+                        "in the match result; add them with --ra/--dec for that catalogue."
+                    )
+                logger.debug(
+                    "catalogue '%s' coordinate columns not found in the result; "
+                    "later steps will not re-position its rows",
+                    right_src.name,
+                )
+
             if union_match:
-                # Per-row detection: did accumulator row match the new catalogue?
-                # Use the suffixed column name since right-side columns are renamed.
-                rN_ra = right_src.ra_column or "ra"
-                rN_ra_in_result = f"{rN_ra}{suffix}"
+                # Per-row detection: did this accumulator row match the new
+                # catalogue?  Check the right side's coordinate columns only
+                # (they are null for an unmatched right row).
                 cat_tag = f"+{i + 1}"
                 cat_only = str(i + 1)
                 accum_lf = accum_lf.with_columns(
@@ -1506,6 +1566,8 @@ class CrossMatch:
                     .otherwise(pl.col("_src_cats"))
                     .alias("_src_cats")
                 )
+
+            prev_ra, prev_dec = rN_ra_in_result, rN_dec_in_result
 
         if output_file:
             io_utils.write_frame(

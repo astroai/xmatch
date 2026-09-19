@@ -85,6 +85,11 @@ catalogue_aliases:
   unwise_dr1: "unwise"
   allwise_dl: "allwise"
 
+  # Extragalactic / Deep fields
+  cosmos-web: "cosmos_web"
+  cosmosweb: "cosmos_web"
+  z-cosmos: "zcosmos"
+
   # Archive-qualified pins (optional; prefer the short name)
   galex_cds: "galex"
   vhs_cds: "vhs"
@@ -675,6 +680,36 @@ catalogues:
     id_column: "id"
     default_columns: ["id", "raj2000", "dej2000", "b1_mag", "r1_mag", "b2_mag", "r2_mag", "i_mag"]
     default_pos_error_arcsec: 0.2
+
+  zcosmos:
+    description: "The zCOSMOS 10k-bright spectroscopic sample (Lilly+ 2009) via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "2009"
+    access_identifier: "J/ApJS/184/218/table3"
+    table_name: "J/ApJS/184/218/table3"
+    epoch: 2000.0
+    estimated_size: 'small'
+    ra_column: "RAJ2000"
+    dec_column: "DEJ2000"
+    id_column: "zCOSMOS"
+    default_columns: ["zCOSMOS", "RAJ2000", "DEJ2000", "z", "CClass", "Imag"]
+    default_pos_error_arcsec: 0.1
+
+  cosmos_web:
+    description: "COSMOS2025: The COSMOS-Web JWST/HST galaxy catalog (Casey, Franco, Weaver+ 2025) via CDS VizieR"
+    archive: cds
+    service_id: tap_service
+    release: "2025"
+    access_identifier: "J/A+A/704/A339/phot"
+    table_name: "J/A+A/704/A339/phot"
+    epoch: 2023.0
+    estimated_size: 'huge'
+    ra_column: "RAJ2000"
+    dec_column: "DEJ2000"
+    id_column: "Id"
+    default_columns: ["Id", "RAJ2000", "DEJ2000", "mag-auto-HST-F814W", "mag-auto-F115W", "mag-auto-F150W", "mag-auto-F277W", "mag-auto-F444W", "mag-auto-F770W"]
+    default_pos_error_arcsec: 0.05
 
   # --- ESA Archive Catalogues ---
   gaia_esa:

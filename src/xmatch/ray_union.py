@@ -284,14 +284,23 @@ def _list_partitions(rel: str, storage: Storage) -> List[PartitionPlan]:
     return out
 
 
+def _hats_dir(pix: int) -> int:
+    """HATS/HiPS ``Dir=`` directory number for a nested pixel.
+
+    The `hats` library derives the directory from the pixel number as
+    ``(pixel // 10000) * 10000`` (``HealpixPixel.dir``) and *reconstructs* the
+    file path from it, so a ``pix // 10000`` grouping writes partitions a
+    conforming reader cannot find.
+    """
+    return (int(pix) // 10_000) * 10_000
+
+
 def _catalogue_schema(storage: Storage, rel: str) -> Dict[str, str]:
     """Column name -> polars dtype name ('{}' when unknown)."""
-    if isinstance(storage, LocalStorage):
-        try:
-            return {c: str(t) for c, t in pl.read_parquet_schema(Path(storage.root) / rel).items()}
-        except Exception:  # noqa: BLE001
-            return {}
-    return {}
+    try:
+        return {c: str(t) for c, t in storage.parquet_schema(rel).items()}
+    except Exception:  # noqa: BLE001 - schema is best-effort; empty means unknown
+        return {}
 
 
 def _est_rows(part: PartitionPlan, storage: Storage, fallback: int) -> int:
@@ -323,19 +332,29 @@ def _lookup_partition(pix_to_idx: Dict[Tuple[int, int], int], od: int, px: int) 
     return None
 
 
+def _partition_index(cat: CataloguePlan) -> Dict[Tuple[int, int], int]:
+    """``(order, pixel) -> partition position`` for one catalogue.
+
+    Built once per catalogue: rebuilding it inside :func:`_cone_candidate_idx`
+    made the plan build O(P^2) in dict construction for a full-sky input.
+    """
+    return {(q.order, q.pix): idx for idx, q in enumerate(cat.partitions)}
+
+
 def _cone_candidate_idx(
     part: PartitionPlan,
     catalogues: Sequence[CataloguePlan],
     depths: Sequence[int],
     cone_radius: float,
     centre: Optional[int] = None,
+    pix_index: Optional[Sequence[Dict[Tuple[int, int], int]]] = None,
 ) -> Dict[int, List[int]]:
     """Partitions of each other catalogue intersecting the cone around ``part``."""
     cand: Dict[int, List[int]] = {}
     for j, other in enumerate(catalogues):
         if j == centre:
             continue
-        other_pix = {(q.order, q.pix): idx for idx, q in enumerate(other.partitions)}
+        other_pix = pix_index[j] if pix_index is not None else _partition_index(other)
         seen: set[int] = set()
         for od, px in _cone_pixels(part.order, part.pix, cone_radius, depths[j]):
             if od > depths[j]:
@@ -413,10 +432,16 @@ def build_union_plan(
             schema = {}
         cols = list(schema)
         if not cols:
-            try:
-                cols = list(pl.read_parquet_schema(Path(storage.root) / parts[0].rel))
-            except Exception:  # noqa: BLE001
-                cols = []
+            # Without the partition schema the plan cannot name this
+            # catalogue's output columns (or type its all-null blocks), and
+            # every chunk would fail hours later.  Fail here instead, with the
+            # root named — non-local roots (e.g. `vos:`) need the schema read
+            # through Storage.parquet_schema.
+            raise CrossMatchError(
+                f"Cannot read the HATS schema of catalogue '{src.name}' "
+                f"({root!r}/{parts[0].rel!r}); the union plan needs each catalogue's "
+                "column list before it starts. Check the cache copy is readable."
+            )
         final_cols: List[str] = []
         for col in cols:
             while col in used:
@@ -425,19 +450,9 @@ def build_union_plan(
             final_cols.append(col)
         all_cols.extend(final_cols)
 
-        dtypes: Dict[str, str] = {}
-        if schema:
-            dtypes = {
-                final: str(schema[orig]) for orig, final in zip(cols, final_cols, strict=True)
-            }
-        else:
-            try:
-                raw = pl.read_parquet_schema(Path(storage.root) / parts[0].rel)
-                dtypes = {
-                    final: str(raw[orig]) for orig, final in zip(cols, final_cols, strict=True)
-                }
-            except Exception:  # noqa: BLE001
-                dtypes = {}
+        dtypes: Dict[str, str] = {
+            final: str(schema[orig]) for orig, final in zip(cols, final_cols, strict=True)
+        }
 
         ra_orig = src.ra_column or "ra"
         dec_orig = src.dec_column or "dec"
@@ -465,19 +480,21 @@ def build_union_plan(
 
     chunks: List[ChunkPlan] = []
     covered: List[List[int]] = [[] for _ in catalogues]
+    # Open each catalogue's storage once and build each pixel->partition index
+    # once: both used to be rebuilt inside the per-partition (O(P)) loops.
+    storages = [open_storage(cat.root) for cat in catalogues]
+    pix_index = [_partition_index(cat) for cat in catalogues]
 
     for ci, cat in enumerate(catalogues):
-        cat_storage = open_storage(cat.root)
+        cat_storage = storages[ci]
         for pi, part in enumerate(cat.partitions):
             extra = _est_rows(part, cat_storage, hats_threshold)
-            cand = _cone_candidate_idx(part, catalogues, depths, cone_radius, centre=ci)
+            cand = _cone_candidate_idx(
+                part, catalogues, depths, cone_radius, centre=ci, pix_index=pix_index
+            )
             for j, seen in cand.items():
                 extra += sum(
-                    _est_rows(
-                        catalogues[j].partitions[i],
-                        open_storage(catalogues[j].root),
-                        hats_threshold,
-                    )
+                    _est_rows(catalogues[j].partitions[i], storages[j], hats_threshold)
                     for i in seen
                 )
                 if j > ci:
@@ -511,7 +528,9 @@ def build_union_plan(
         for pi in range(len(catalogues[ci].partitions)):
             if pi not in covered_set:
                 part = catalogues[ci].partitions[pi]
-                cand = _cone_candidate_idx(part, catalogues, depths, cone_radius, centre=ci)
+                cand = _cone_candidate_idx(
+                    part, catalogues, depths, cone_radius, centre=ci, pix_index=pix_index
+                )
                 # lower-indexed mates are provably absent (the coverage proof);
                 # only higher catalogues can hold a mate of a rest row.
                 rest.append(
@@ -1093,6 +1112,21 @@ def _atomic_write_csv(table: pl.DataFrame, dest: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def _parquet_row_count(path: Path) -> int:
+    """Row count from the parquet footer (no data pages read).
+
+    ``pl.read_parquet(dest).height`` re-read and decoded every output
+    partition just to size the catalog; for a full-sky union that is a second
+    pass over the whole dataset.
+    """
+    try:
+        import pyarrow.parquet as pq  # noqa: PLC0415
+
+        return int(pq.ParquetFile(path).metadata.num_rows)
+    except Exception:  # noqa: BLE001 - fall back to a real read
+        return pl.read_parquet(path).height
+
+
 def _atomic_write_text(text: str, dest: Path) -> None:
     tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
     try:
@@ -1107,16 +1141,24 @@ def _assemble(plan: UnionPlan) -> Dict[str, Any]:
     out = Path(plan.out_dir)
     dataset = out / "dataset"
     dataset.mkdir(parents=True, exist_ok=True)
-    seen: List[Path] = []
+    # Insertion-ordered set: a list made the membership test below a linear
+    # scan, i.e. O(P^2) for a full-sky output (P ~ 10^5-10^6 pixels).
+    seen: Dict[Path, None] = {}
 
     def add_partition(part: PartitionPlan, src: Path, keep: bool = True) -> None:
-        relf = f"Norder={part.order}/Dir={part.pix // 10000}/Npix={part.pix}.parquet"
+        relf = f"Norder={part.order}/Dir={_hats_dir(part.pix)}/Npix={part.pix}.parquet"
         dest = dataset / relf
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest in seen:
             # several chunks can carry rows of the same output pixel
             # (one per input catalogue); merge them deterministically.
-            merged = pl.concat([pl.read_parquet(dest), pl.read_parquet(src)])
+            # ``vertical_relaxed``: a chunk that matched no row of a catalogue
+            # contributes all-null columns (Null dtype when the input schema was
+            # unreadable, e.g. a vos: cache root), and a strict vertical concat
+            # refuses to stack Null next to the typed column another chunk wrote.
+            merged = pl.concat(
+                [pl.read_parquet(dest), pl.read_parquet(src)], how="vertical_relaxed"
+            )
             _atomic_write_parquet(merged, dest)
         elif keep:
             tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
@@ -1127,12 +1169,12 @@ def _assemble(plan: UnionPlan) -> Dict[str, Any]:
                 os.replace(tmp, dest)
             finally:
                 tmp.unlink(missing_ok=True)
-            seen.append(dest)
+            seen[dest] = None
         else:
             # `src` is our own staging file (rest-routing tmp): the move is
             # the rename, and it consumes the tmp -> no litter.
             os.replace(src, dest)
-            seen.append(dest)
+            seen[dest] = None
         # NOTE: the source chunk parquet is deliberately NOT removed — they
         # are the resume points (a rerun skips existing chunk files).
 
@@ -1191,15 +1233,15 @@ def _assemble(plan: UnionPlan) -> Dict[str, Any]:
         for dest in seen:
             order = int(dest.parent.parent.name.removeprefix("Norder="))
             pix = int(dest.name.removeprefix("Npix=").removesuffix(".parquet"))
-            count = pl.read_parquet(dest).height
+            count = _parquet_row_count(dest)
             total_rows += count
             info.append(
                 {
                     "Norder": order,
-                    "Dir": int(pix // 10000),
+                    "Dir": int(_hats_dir(pix)),
                     "Npix": int(pix),
                     "Nfiles": 1,
-                    "file_loc": f"Norder={order}/Dir={pix // 10000}/Npix={pix}",
+                    "file_loc": f"Norder={order}/Dir={_hats_dir(pix)}/Npix={pix}",
                     "file_size": dest.stat().st_size,
                     "count": count,
                 }
