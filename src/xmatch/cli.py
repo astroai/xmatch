@@ -1047,7 +1047,7 @@ def _build_match_subparser() -> argparse.ArgumentParser:
         prog="xmatch match",
         description=(
             "Cross-match two or more catalogues.\n\n"
-            "Inputs may be local Parquet/CSV/FITS files, polars/pandas frames,\n"
+            "Inputs may be local Parquet/CSV/TSV/FITS files, Polars frames,\n"
             "HATS directories, or configured remote catalogues (TAP / CDS XMatch).\n"
             "Coordinate columns and matching strategy are auto-detected; flags\n"
             "below refine geometry, algorithm, and output."

@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Added NOIRLab Data Lab catalogues (`nsc`, `des`, `decals`, `smash`, `unwise`, `allwise_dl`, and pre-computed `*_x_gaia` crossmatch tables) and COSMOS (`cosmos-web`, `zcosmos`).
   - Terminal progress indicator for remote TAP and VizieR downloads.
 
+### Changed
+
+- Updated Python requirement to $\ge 3.13$ (with full Python 3.14 compatibility) and modernized all type annotations to PEP 585 / PEP 604 built-ins.
+- Trimmed core runtime dependencies to `numpy`, `polars`, `pyarrow`, `astropy`, `scipy`, `pyyaml`, and `pyvo`: replaced the `pandas` table fallback with a direct PyArrow/NumPy `Table`/`MaskedColumn` bridge, moved `astroquery` to the optional `xmatch[cds]` extra, and lazy-loaded `requests` and `keyring` for authenticated sessions.
+
 ### Fixed
 
 - Unified per-row `skyerr` thresholds and `skyellipse` Mahalanobis search bounds across `fast`, `zone`, `astropy`, `torchsky`, and out-of-core spill engines.
@@ -49,5 +54,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Switched Astropy–Polars table conversions (`astropy_table_to_polars`, `polars_to_astropy`) to zero-copy Apache Arrow (`Table.to_arrow` / `Table.from_arrow`).
+- Switched Astropy–Polars table conversions (`astropy_table_to_polars`, `polars_to_astropy`) to Apache Arrow column buffers.
 - Quoted ADQL identifiers in remote TAP queries to handle reserved words and special characters safely.

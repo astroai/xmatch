@@ -6,7 +6,7 @@ A practical, end-to-end user manual for astronomical catalogue crossmatching usi
 
 ## 1. Installation & Environment Setup
 
-`xmatch` requires Python $\ge 3.10$. It is built natively on the **Polars** streaming dataframe engine, with optional hardware and distributed accelerators.
+`xmatch` requires Python $\ge 3.13$ (Python 3.13 and 3.14 supported). It is built natively on the **Polars** streaming dataframe engine, with optional hardware, distributed, and remote archive accelerators.
 
 ### Recommended: Pixi Workflow
 
@@ -31,17 +31,23 @@ pixi run preflight-push
 pip install xmatch
 
 # Full scientific stack with all optional extras
-pip install "xmatch[hats,ray,torchsky,torchfits]"
+pip install "xmatch[cds,hats,ray,torchsky,torchfits,ml,nway]"
 ```
 
 #### Optional Dependency Extras
 
 | Extra | Packages | Status | Purpose |
 |---|---|---|---|
-| `[hats]` | `hats`, `lsdb` | `[IMPLEMENTED]` | Hierarchical Adaptive Tiling Scheme (HATS) native reading and LSDB spatial queries. |
-| `[ray]` | `ray` | `[IMPLEMENTED]` | Distributed parallel execution across clusters and multi-core nodes. |
-| `[torchfits]`| `torchfits` | `[IMPLEMENTED]` | High-speed, Arrow/Polars-native local FITS table reader. |
+| `[cds]` | `astroquery` | `[IMPLEMENTED]` | CDS VizieR and CDS XMatch remote service backends. |
+| `[zone]` | `cdshealpix` | `[IMPLEMENTED]` | HEALPix spatial zoning engine. |
+| `[hats]` | `hats`, `lsdb`, `cdshealpix` | `[IMPLEMENTED]` | Hierarchical Adaptive Tiling Scheme (HATS) native reading and LSDB spatial queries. |
+| `[hats-ray]` | `hats`, `ray`, `cdshealpix` | `[IMPLEMENTED]` | Native HATS + Ray pixel matcher and `ray-union` full-sky union engine (no Dask). |
+| `[ray]` | `ray`, `cdshealpix` | `[IMPLEMENTED]` | Distributed parallel HEALPix pixel-batch matching across clusters and multi-core nodes. |
+| `[torchfits]` | `torchfits` | `[IMPLEMENTED]` | High-speed, Arrow/Polars-native local FITS table reader. |
 | `[torchsky]` | `torchsky` | `[IMPLEMENTED]` | Tensor-native nearest-neighbour spatial engine with coarse HEALPix pruning. |
+| `[ml]` | `scikit-learn`, `xgboost`, `lightgbm`, `joblib` | `[IMPLEMENTED]` | Machine-learning (`matcher="ml"`) and gradient-boosted (`matcher="xgb"`) probabilistic matchers. |
+| `[nway]` | `nway` | `[IMPLEMENTED]` | Bayesian $N$-way simultaneous crossmatching backend. |
+| `[keyring_backends]` | `keyring`, `keyrings.*` | `[IMPLEMENTED]` | Optional desktop keyring backends for authenticated archive sessions. |
 
 ---
 
@@ -469,7 +475,7 @@ master = pl.scan_parquet("/arc/projects/hats/master_union_v1.hats/dataset/*/*/*.
 features = (
     master.filter(pl.col("phot_g_mean_mag").is_not_null() & pl.col("w1mpro").is_not_null())
     .select(["ra", "dec", "phot_g_mean_mag", "phot_bp_mean_mag", "w1mpro", "w2mpro", "j_m", "h_m"])
-    .collect(streaming=True)
+    .collect(engine="streaming")
 )
 ```
 

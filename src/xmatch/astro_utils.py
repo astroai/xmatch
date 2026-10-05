@@ -1,7 +1,7 @@
 """Astronomy helpers: coordinate-column detection, validation and sky extent.
 
 These functions operate on column-name lists and numpy arrays so they are
-agnostic to whether the data lives in a polars or pandas frame.
+independent of the surrounding dataframe container.
 """
 
 from __future__ import annotations

@@ -36,7 +36,7 @@ cm = CrossMatch()  # loads bundled xmatch.yaml and user overrides
 **The preferred, strongly-typed API entry point.**
 
 ```python
-def crossmatch_request(self, req: MatchRequest) -> Optional[pl.DataFrame | pl.LazyFrame]
+def crossmatch_request(self, req: MatchRequest) -> pl.DataFrame | pl.LazyFrame | None
 ```
 
 **Parameters**:
@@ -56,7 +56,7 @@ def crossmatch(
     self,
     cat1: FrameInput,
     cat2: FrameInput,
-    output_file: Optional[str | Path] = None,
+    output_file: str | Path | None = None,
     lazy: bool = False,
     radius_arcsec: float = 1.0,
     matcher: str = "sky",
@@ -64,7 +64,7 @@ def crossmatch(
     join_type: str = "1and2",
     find: str = "best",
     **params: Any,
-) -> Optional[pl.DataFrame | pl.LazyFrame]
+) -> pl.DataFrame | pl.LazyFrame | None
 ```
 
 **Key Parameters**:
@@ -88,10 +88,10 @@ Chains sequential pairwise crossmatches across $N \ge 2$ catalogues. Catalogue 1
 def crossmatch_multi(
     self,
     catalogues: Sequence[FrameInput],
-    output_file: Optional[str | Path] = None,
+    output_file: str | Path | None = None,
     lazy: bool = False,
     **params: Any,
-) -> Optional[pl.DataFrame | pl.LazyFrame]
+) -> pl.DataFrame | pl.LazyFrame | None
 ```
 
 ```python
@@ -115,10 +115,10 @@ Constructs a master union catalogue via sequential full outer joins or Ray distr
 def union_match(
     self,
     catalogues: Sequence[FrameInput],
-    output_file: Optional[str | Path] = None,
+    output_file: str | Path | None = None,
     lazy: bool = False,
     **params: Any,
-) -> Optional[pl.DataFrame | pl.LazyFrame]
+) -> pl.DataFrame | pl.LazyFrame | None
 ```
 
 - When full-sky remote surveys are passed without a cone constraint (`ra`, `dec`, `radius_deg`), `union_match` automatically routes to `engine="ray-union"`, mirroring the full tables into HATS and producing a distributed partitioned master HATS catalogue.
@@ -132,16 +132,16 @@ Simultaneous Bayesian $N$-catalogue crossmatching implementing the Budavári & S
 ```python
 def nway_match(
     self,
-    catalogues: List[FrameInput],
-    output_file: Optional[str | Path] = None,
+    catalogues: list[FrameInput],
+    output_file: str | Path | None = None,
     *,
     radius_arcsec: float = 1.0,
-    prior_columns: Optional[List[str]] = None,
+    prior_columns: list[str] | None = None,
     max_tuples_per_source: int = 10_000,
     chunk_size: int = 50_000,
     hats_threshold: int = 100_000,
     **params: Any,
-) -> Optional[pl.DataFrame]
+) -> pl.DataFrame | None
 ```
 
 Evaluates Cartesian candidate tuples $c_1 \times c_2 \times \dots \times c_N$ inside the spatial radius and scores each joint tuple with positional and photometric KDE Bayes factors, emitting a joint `p_match` posterior in $[0, 1]$.
@@ -155,13 +155,13 @@ Friends-of-Friends transitive closure algorithm. Groups detections across multip
 ```python
 def fof_match(
     self,
-    catalogues: List[FrameInput],
-    output_file: Optional[str | Path] = None,
+    catalogues: list[FrameInput],
+    output_file: str | Path | None = None,
     *,
     radius_arcsec: float = 1.0,
     hats_threshold: int = 100_000,
     **params: Any,
-) -> Optional[pl.DataFrame]
+) -> pl.DataFrame | None
 ```
 
 **Output Columns**:
@@ -222,10 +222,10 @@ Defines the algorithm criteria:
 ```python
 @dataclass
 class SideOverrides:
-    ra_column: Optional[str] = None
-    dec_column: Optional[str] = None
-    id_column: Optional[str] = None
-    columns: Optional[List[str]] = None
+    ra_column: str | None = None
+    dec_column: str | None = None
+    id_column: str | None = None
+    columns: list[str] | None = None
 ```
 
 ---
