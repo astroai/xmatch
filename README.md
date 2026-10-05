@@ -14,7 +14,7 @@ xmatch match catalog1.parquet catalog2.csv -o matches.parquet -r 1.0
 
 ## 📚 Complete Documentation Suite
 
-All detailed architectural references, user guides, and roadmaps are organized in the [`docs/`](docs/) directory:
+All detailed architectural references and user guides are organized in the [`docs/`](docs/) directory:
 
 - **[User Guide & Cookbooks (`docs/usage.md`)](docs/usage.md)**: End-to-end recipes covering CLI commands, universal formats, remote archive federation, SOTA matching algorithms, proper motions, out-of-core scaling, and Ray clustering.
 - **[Public API Reference (`docs/api.md`)](docs/api.md)**: Full Python API specifications for `CrossMatch`, `MatchRequest`, `MatchSpec`, observation/candidate release helpers, engines, storage abstractions, and exception hierarchies.
@@ -36,7 +36,7 @@ All detailed architectural references, user guides, and roadmaps are organized i
 - **SOTA Astrometric & Probabilistic Matchers**:
   - Simple radius (`sky`) and adaptive per-row astrometric uncertainties (`skyerr`).
   - 2D Gaussian error ellipses via Mahalanobis distance (`skyellipse`).
-  - Proper-motion epoch propagation (`target_epoch`) and probabilistic PM drift prior for legacy catalogues (Wilson 2023 `pm_prior`).
+  - Proper-motion epoch propagation (`target_epoch`) and probabilistic PM drift prior for catalogues without proper motions (Wilson 2023 `pm_prior`).
   - Sutherland & Saunders (1992) Likelihood Ratio (`lr`) with magnitude background subtraction.
   - Machine learning classifiers (`ml` Random Forest, `xgb` XGBoost/LightGBM) with self-match pseudo-labeling.
   - Wilson & Naylor (2017) Astrometric Uncertainty Function (`auf`) and flux-enhanced AUF (`macauff`).

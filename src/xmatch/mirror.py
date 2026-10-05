@@ -854,12 +854,12 @@ def _write_hats_native(
     threshold: int = 100_000,
     max_order: int = 10,
 ) -> None:
-    """Convert ``frame`` into a valid HATS catalogue at ``out_dir`` (no LSDB).
+    """Convert ``frame`` into a valid HATS catalogue at ``out_dir``.
 
     Adaptive NESTED tiling: any cell holding more than ``threshold`` rows is
     split until ``max_order``.  Layout matches the `hats` reader contract:
     ``dataset/Norder=…/Dir=…/Npix=….parquet`` pixel files, a root
-    ``partition_info.csv`` (plus legacy parquet), and ``properties``.
+    ``partition_info.csv`` (and parquet copy), and ``properties``.
 
     cdshealpix computes every row's pixel per level (O(N·orders));
     fine for mirror-sized frames, replace with an index scan when a frame

@@ -36,16 +36,16 @@ pip install "xmatch[cds,hats,ray,torchsky,torchfits,ml]"
 
 #### Optional Dependency Extras
 
-| Extra | Packages | Status | Purpose |
-|---|---|---|---|
-| `[cds]` | `astroquery` | `[IMPLEMENTED]` | CDS VizieR and CDS XMatch remote service backends. |
-| `[zone]` | `cdshealpix` | `[IMPLEMENTED]` | HEALPix spatial zoning engine. |
-| `[hats]` | `hats`, `lsdb`, `cdshealpix` | `[IMPLEMENTED]` | Hierarchical Adaptive Tiling Scheme (HATS) native reading and LSDB spatial queries. |
-| `[hats-ray]` | `hats`, `ray`, `cdshealpix` | `[IMPLEMENTED]` | Native HATS + Ray pixel matcher and `ray-union` full-sky union engine (no Dask). |
-| `[ray]` | `ray`, `cdshealpix` | `[IMPLEMENTED]` | Distributed parallel HEALPix pixel-batch matching across clusters and multi-core nodes. |
-| `[torchfits]` | `torchfits` | `[IMPLEMENTED]` | High-speed, Arrow/Polars-native local FITS table reader. |
-| `[torchsky]` | `torchsky` | `[IMPLEMENTED]` | Tensor-native nearest-neighbour spatial engine with coarse HEALPix pruning. |
-| `[ml]` | `scikit-learn`, `xgboost`, `lightgbm`, `joblib` | `[IMPLEMENTED]` | Machine-learning (`matcher="ml"`) and gradient-boosted (`matcher="xgb"`) probabilistic matchers. |
+| Extra | Packages | Purpose |
+|---|---|---|
+| `[cds]` | `astroquery` | CDS VizieR and CDS XMatch remote service backends. |
+| `[zone]` | `cdshealpix` | HEALPix spatial zoning engine. |
+| `[hats]` | `hats`, `cdshealpix` | Hierarchical Adaptive Tiling Scheme (HATS) native reading and spatial partitioning. |
+| `[hats-ray]` | `hats`, `ray`, `cdshealpix` | Native HATS + Ray pixel matcher and `ray-union` full-sky union engine (no Dask). |
+| `[ray]` | `ray`, `cdshealpix` | Distributed parallel HEALPix pixel-batch matching across clusters and multi-core nodes. |
+| `[torchfits]` | `torchfits` | High-speed, Arrow/Polars-native local FITS table reader. |
+| `[torchsky]` | `torchsky` | Tensor-native nearest-neighbour spatial engine with coarse HEALPix pruning. |
+| `[ml]` | `scikit-learn`, `xgboost`, `lightgbm`, `joblib` | Machine-learning (`matcher="ml"`) and gradient-boosted (`matcher="xgb"`) probabilistic matchers. |
 
 ---
 
@@ -117,15 +117,14 @@ flowchart LR
 
 ### Supported Formats Overview
 
-| Format | Extension | Read Engine | Write Engine | Memory Footprint | Status |
-|---|---|---|---|---|---|
-| **Parquet** | `.parquet` | `pl.scan_parquet` | `sink_parquet(streaming=True)` | Bounded / Streaming | `[IMPLEMENTED]` |
-| **CSV** | `.csv` | `pl.scan_csv` | `sink_csv(streaming=True)` | Bounded / Streaming | `[IMPLEMENTED]` |
-| **TSV / Tab** | `.tsv`, `.tab` | `pl.scan_csv(separator="\t")` | `sink_csv(separator="\t")` | Bounded / Streaming | `[IMPLEMENTED]` |
-| **FITS** | `.fits`, `.fit` | `torchfits` (fallback Astropy) | `polars_to_astropy().write()` | Eager | `[IMPLEMENTED]` |
-| **HATS** | directory | Native reader / `lsdb` | `write_hats()` / `ray_union` | Partitioned / Out-of-core | `[IMPLEMENTED]` |
-| **VOSpace** | `vos:*` | `storage.py` staging | Staged upload to VOSpace node | Bounded | `[IMPLEMENTED]` |
-| **Arrow IPC**| `.arrow`, `.ipc`| `pl.scan_ipc` | `sink_ipc()` | Zero-copy | `[ROADMAP]` |
+| Format | Extension | Read Engine | Write Engine | Memory Footprint |
+|---|---|---|---|---|
+| **Parquet** | `.parquet` | `pl.scan_parquet` | `sink_parquet(streaming=True)` | Bounded / Streaming |
+| **CSV** | `.csv` | `pl.scan_csv` | `sink_csv(streaming=True)` | Bounded / Streaming |
+| **TSV / Tab** | `.tsv`, `.tab` | `pl.scan_csv(separator="\t")` | `sink_csv(separator="\t")` | Bounded / Streaming |
+| **FITS** | `.fits`, `.fit` | `torchfits` (fallback Astropy) | `polars_to_astropy().write()` | Eager |
+| **HATS** | directory | Native HATS pixel reader | `write_hats()` / `ray_union` | Partitioned / Out-of-core |
+| **VOSpace** | `vos:*` | `storage.py` staging | Staged upload to VOSpace node | Bounded |
 
 ### Streaming vs. Eager Execution
 
@@ -226,7 +225,7 @@ xmatch sync gaia --force
 
 ## 6. SOTA Crossmatch Algorithms Cookbook
 
-### A. Simple Positional Matching (`matcher="sky"`) `[IMPLEMENTED]`
+### A. Simple Positional Matching (`matcher="sky"`)
 
 Standard great-circle angular distance criterion: $\text{sep} \le \text{radius\_arcsec}$.
 
@@ -235,7 +234,7 @@ spec = MatchSpec(radius_arcsec=1.2, matcher="sky", find="best")
 result = cm.crossmatch("cat_a.parquet", "cat_b.parquet", spec=spec)
 ```
 
-### B. Adaptive Astrometric Uncertainties (`matcher="skyerr"`) `[IMPLEMENTED]`
+### B. Adaptive Astrometric Uncertainties (`matcher="skyerr"`)
 
 Adapts the match radius per row based on positional error columns:
 
@@ -247,7 +246,7 @@ spec = MatchSpec(matcher="skyerr", max_error=3.0, find="best")
 result = cm.crossmatch("gaia_dr3.parquet", "hst_sources.csv", spec=spec)
 ```
 
-### C. 2D Gaussian Error Ellipses (`matcher="skyellipse"`) `[IMPLEMENTED]`
+### C. 2D Gaussian Error Ellipses (`matcher="skyellipse"`)
 
 Evaluates full 2D positional covariance matrices ($C = C_1 + C_2$) via the Mahalanobis distance:
 
@@ -258,7 +257,7 @@ spec = MatchSpec(matcher="skyellipse", max_error=3.0, find="best")
 result = cm.crossmatch("chandra_xray.fits", "vla_radio.parquet", spec=spec)
 ```
 
-### D. Proper Motions & Target Epoch Propagation (`target_epoch`) `[IMPLEMENTED]`
+### D. Proper Motions & Target Epoch Propagation (`target_epoch`)
 
 Propagates coordinates across epoch baselines to a common Julian-year target epoch:
 
@@ -270,7 +269,7 @@ spec = MatchSpec(
 result = cm.crossmatch("historical_survey_1995.csv", "gaia_dr3.parquet", spec=spec)
 ```
 
-### E. Probabilistic Proper-Motion Drift Prior (Wilson 2023) `[IMPLEMENTED]`
+### E. Probabilistic Proper-Motion Drift Prior (Wilson 2023)
 
 When matching catalogues separated by years or decades where one side lacks proper motion measurements, stars drift due to Galactic kinematics. The Wilson (2023) model inflates the positional error budget based on Galactic latitude:
 
@@ -287,7 +286,7 @@ spec = MatchSpec(
 result = cm.crossmatch("usno_b1.parquet", "gaia_dr3.parquet", spec=spec)
 ```
 
-### F. Likelihood Ratio Counterpart Identification (`matcher="lr"`) `[IMPLEMENTED]`
+### F. Likelihood Ratio Counterpart Identification (`matcher="lr"`)
 
 Sutherland & Saunders (1992) method for cross-identifying surveys with disparate resolutions (e.g. radio to optical):
 
@@ -304,7 +303,7 @@ result = cm.crossmatch("radio_catalog.csv", "optical_catalog.parquet", spec=spec
 # Result includes 'lr' and 'reliability' columns in [0, 1]
 ```
 
-### G. Machine Learning Classifiers (`matcher="ml"`, `matcher="xgb"`) `[IMPLEMENTED]`
+### G. Machine Learning Classifiers (`matcher="ml"`, `matcher="xgb"`)
 
 Trained on-the-fly with nearest-neighbour pseudo-labels using normalized separations, multi-band color differences, and local source densities:
 
@@ -319,7 +318,7 @@ result = cm.crossmatch("survey_a.parquet", "survey_b.parquet", spec=spec)
 # Result includes 'xgb_score' column in [0, 1]
 ```
 
-### H. Empirical Astrometric Uncertainty Function (`matcher="auf"`, `matcher="macauff"`) `[IMPLEMENTED]`
+### H. Empirical Astrometric Uncertainty Function (`matcher="auf"`, `matcher="macauff"`)
 
 Wilson & Naylor (2017) non-Gaussian error model capturing real-world ground-based PSF wings:
 

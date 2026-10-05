@@ -36,7 +36,7 @@ capped by ``max_tuples``.
 Output: ``<out>/dataset/Norder=…/Dir=…/Npix=….parquet`` — one directory
 partition per input partition (no re-heap), plus
 ``dataset/partition_info.parquet``, ``properties`` and
-``_metadata``/``_common_metadata``, readable via ``hats`` and LSDB-style
+``_metadata``/``_common_metadata``, readable via standard HATS
 readers.  Chunk outputs go to ``<out>/chunks/<key>.parquet`` and are skipped
 on resume when present.
 

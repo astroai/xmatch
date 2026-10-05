@@ -1,10 +1,9 @@
 """Typed request objects for xmatch crossmatch operations.
 
-The :class:`MatchRequest` dataclass consolidates all match parameters that were
-previously passed as ad-hoc ``**kwargs``, giving mypy (and IDEs) a fully-typed
-view of what every match call requires. Side-level column overrides are bundled
-into :class:`SideOverrides` so the orchestrator never needs to re-derive the
-same dict twice.
+The :class:`MatchRequest` dataclass consolidates all match parameters into a
+fully-typed specification. Side-level column overrides are bundled into
+:class:`SideOverrides` so the orchestrator never needs to re-derive the same
+dict twice.
 
 .. code-block:: python
 
@@ -127,9 +126,9 @@ class SideOverrides:
 class MatchRequest:
     """All typed parameters for a single catalogue crossmatch.
 
-    Populate this directly (preferred for new code) or build one from a legacy
-    ``**params`` dict via :meth:`from_legacy`. The ``CrossMatch`` orchestrator
-    resolves the sources and dispatches to the appropriate backend.
+    Populate this directly or build one from keyword parameters via
+    :meth:`from_params`. The ``CrossMatch`` orchestrator resolves the sources
+    and dispatches to the appropriate backend.
     """
 
     cat1: FrameInput
@@ -195,7 +194,7 @@ class MatchRequest:
 
     # ----------------------------------------------------------------- factory
     @classmethod
-    def from_legacy(
+    def from_params(
         cls,
         cat1: FrameInput,
         cat2: FrameInput,
@@ -204,11 +203,7 @@ class MatchRequest:
         lazy: bool = False,
         **params: Any,
     ) -> MatchRequest:
-        """Build a ``MatchRequest`` from the legacy ``**params`` dict.
-
-        Used internally by :meth:`CrossMatch.crossmatch` so the old spread-args
-        API keeps working while the internals migrate to typed dataclasses.
-        """
+        """Build a ``MatchRequest`` from keyword arguments."""
         prior: list[str] = list(params.get("prior_columns") or [])
         extra_distance: dict[str, float] = dict(params.get("extra_distance_cols") or {})
         # Normalise extra_distance_cols values to float (may arrive as str/int).

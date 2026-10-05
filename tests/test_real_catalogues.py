@@ -240,13 +240,7 @@ def usno_csv() -> pathlib.Path:
 # CatalogueSource construction per test
 # --------------------------------------------------------------------------- #
 def _gaia_source(csv: pathlib.Path) -> CatalogueSource:
-    """Build a Gaia CatalogueSource for a cached CSV.
-
-    Includes ``corr_column`` only when the cached CSV actually contains the
-    ``ra_dec_corr`` column (added to the fetcher after the initial cache
-    population).  This keeps the helper backward-compatible with older cache
-    files that were fetched before the column was included.
-    """
+    """Build a Gaia CatalogueSource for a cached CSV."""
     src = CatalogueSource(
         name=csv.stem,
         is_local=True,
@@ -258,7 +252,6 @@ def _gaia_source(csv: pathlib.Path) -> CatalogueSource:
         dec_err_column="dec_error",
         pos_err_units="mas",
     )
-    # Only wire corr_column if the CSV actually has it (backward compat).
     if csv.exists():
         import polars as pl
 

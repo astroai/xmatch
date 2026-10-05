@@ -2,8 +2,6 @@
 
 Stable public surface only. Anything not exported from `xmatch.__init__` is considered internal.
 
-> Every feature and parameter below is explicitly tagged as **`[IMPLEMENTED]`** (available in current release) or **`[ROADMAP]`** (targeted for upcoming milestones).
-
 ---
 
 ## Top-Level Entry Points (`xmatch.CrossMatch`)
@@ -18,20 +16,20 @@ cm = CrossMatch()  # loads bundled xmatch.yaml and user overrides
 
 ### Methods Summary
 
-| Method | Status | Purpose |
-|---|---|---|
-| [`crossmatch(...)`](#crossmatch) | `[IMPLEMENTED]` | Classic spread-arguments pairwise matching between two catalogues. |
-| [`crossmatch_request(req)`](#crossmatch_request) | `[IMPLEMENTED]` | **Preferred** typed entry point using a `MatchRequest` dataclass. |
-| [`crossmatch_multi(...)`](#crossmatch_multi) | `[IMPLEMENTED]` | $N$-catalogue sequential pairwise crossmatching ($A \times B \times C \dots$). |
-| [`union_match(...)`](#union_match) | `[IMPLEMENTED]` | Master union crossmatch producing a full-outer-join catalogue (in-memory or distributed HATS). |
-| [`nway_match(...)`](#nway_match) | `[IMPLEMENTED]` | Simultaneous Bayesian $N$-way crossmatching (Budavári & Szalay 2008 posterior). |
-| [`fof_match(...)`](#fof_match) | `[IMPLEMENTED]` | Friends-of-Friends transitive closure clustering detections into object bundles. |
-| `resolve_source(value, overrides)` | `[IMPLEMENTED]` | Builds a `CatalogueSource` from a file path, DataFrame, or configured name. |
-| `get_catalogue_config(name)` | `[IMPLEMENTED]` | Returns the merged YAML configuration for a catalogue alias or name. |
+| Method | Purpose |
+|---|---|
+| [`crossmatch(...)`](#crossmatch) | Classic spread-arguments pairwise matching between two catalogues. |
+| [`crossmatch_request(req)`](#crossmatch_request) | **Preferred** typed entry point using a `MatchRequest` dataclass. |
+| [`crossmatch_multi(...)`](#crossmatch_multi) | $N$-catalogue sequential pairwise crossmatching ($A \times B \times C \dots$). |
+| [`union_match(...)`](#union_match) | Master union crossmatch producing a full-outer-join catalogue (in-memory or distributed HATS). |
+| [`nway_match(...)`](#nway_match) | Simultaneous Bayesian $N$-way crossmatching (Budavári & Szalay 2008 posterior). |
+| [`fof_match(...)`](#fof_match) | Friends-of-Friends transitive closure clustering detections into object bundles. |
+| `resolve_source(value, overrides)` | Builds a `CatalogueSource` from a file path, DataFrame, or configured name. |
+| `get_catalogue_config(name)` | Returns the merged YAML configuration for a catalogue alias or name. |
 
 ---
 
-### `crossmatch_request` `[IMPLEMENTED]`
+### `crossmatch_request`
 
 **The preferred, strongly-typed API entry point.**
 
@@ -47,7 +45,7 @@ def crossmatch_request(self, req: MatchRequest) -> pl.DataFrame | pl.LazyFrame |
 
 ---
 
-### `crossmatch` `[IMPLEMENTED]`
+### `crossmatch`
 
 Classic spread-arguments entry point.
 
@@ -80,7 +78,7 @@ def crossmatch(
 
 ---
 
-### `crossmatch_multi` `[IMPLEMENTED]`
+### `crossmatch_multi`
 
 Chains sequential pairwise crossmatches across $N \ge 2$ catalogues. Catalogue 1 provides the spatial reference coordinate frame throughout the chain. Overlapping column names automatically receive `_2`, `_3`, `_4`, etc., suffixes.
 
@@ -107,7 +105,7 @@ result = cm.crossmatch_multi(
 
 ---
 
-### `union_match` `[IMPLEMENTED]`
+### `union_match`
 
 Constructs a master union catalogue via sequential full outer joins or Ray distributed union. Single-source rows retain their original coordinates and attributes while empty counterpart slots are populated with nulls.
 
@@ -125,7 +123,7 @@ def union_match(
 
 ---
 
-### `nway_match` `[IMPLEMENTED]`
+### `nway_match`
 
 Simultaneous Bayesian $N$-catalogue crossmatching implementing the Budavári & Szalay (2008) multi-catalogue Bayes factor:
 
@@ -148,7 +146,7 @@ Evaluates Cartesian candidate tuples $c_1 \times c_2 \times \dots \times c_N$ in
 
 ---
 
-### `fof_match` `[IMPLEMENTED]`
+### `fof_match`
 
 Friends-of-Friends transitive closure algorithm. Groups detections across multiple surveys into connected components (bundles) via union-find graph clustering.
 
@@ -173,7 +171,7 @@ def fof_match(
 
 ## Dataclasses and Request Specifications
 
-### `MatchRequest` `[IMPLEMENTED]`
+### `MatchRequest`
 
 Consolidated request dataclass.
 
@@ -190,34 +188,32 @@ Consolidated request dataclass.
 | `ra`, `dec`, `radius_deg` | `float | None` | `None` | Bounding cone for remote TAP/CDS downloads. |
 | `probabilistic` | `bool` | `False` | Append Budavári-style `p_match` posterior column. |
 
-### `MatchSpec` `[IMPLEMENTED]`
+### `MatchSpec`
 
 Defines the algorithm criteria:
 
-| Field | Type | Default | Status | Description |
-|---|---|---|---|---|
-| `radius_arcsec` | `float` | `1.0` | `[IMPLEMENTED]` | Search radius for `matcher="sky"`. |
-| `matcher` | `str` | `"sky"` | `[IMPLEMENTED]` | `"sky"`, `"skyerr"`, `"skyellipse"`, `"lr"`, `"ml"`, `"xgb"`, `"auf"`, `"macauff"`. |
-| `max_error` | `float` | `3.0` | `[IMPLEMENTED]` | $N$-$\sigma$ cap for `skyerr` and Mahalanobis $d^2$ cap for `skyellipse`. |
-| `join_type` | `str` | `"1and2"` | `[IMPLEMENTED]` | `"1and2"`, `"1or2"`, `"all1"`, `"all2"`, `"1not2"`, `"2not1"`, `"all"`. |
-| `find` | `str` | `"best"` | `[IMPLEMENTED]` | `"best"` (nearest/top-ranked) or `"all"` (all pairs within radius). |
-| `target_epoch` | `float | None` | `None` | `[IMPLEMENTED]` | Julian-year epoch for proper-motion propagation. |
-| `pm_prior` | `bool` | `False` | `[IMPLEMENTED]` | Enable probabilistic PM drift prior (Wilson 2023). |
-| `pm_prior_magnitude_column` | `str | None` | `None` | `[IMPLEMENTED]` | Magnitude column for Wilson (2023) distance-proxy scaling. |
-| `filter_expr` | `str | None` | `None` | `[IMPLEMENTED]` | Polars SQL WHERE clause for post-match filtering. |
-| `extra_distance_cols` | `dict[str, float]` | `{}` | `[IMPLEMENTED]` | Extra columns & weights for $N$-dimensional cKDTree ranking. |
-| `batch_size` | `int | None` | `None` | `[IMPLEMENTED]` | HEALPix pixel batch size for out-of-core memory management. |
-| `lr_magnitude_column` | `str | None` | `None` | `[IMPLEMENTED]` | Secondary magnitude column for Likelihood Ratio (`matcher="lr"`). |
-| `lr_q` | `float` | `0.8` | `[IMPLEMENTED]` | Prior probability of counterpart detection in primary survey. |
-| `ml_color_columns` | `list[str]` | `[]` | `[IMPLEMENTED]` | Colour/magnitude feature columns for RF/XGB matchers. |
-| `ml_model_path` | `str | None` | `None` | `[IMPLEMENTED]` | Save/load path for Random Forest model artifact (`.joblib`). |
-| `xgb_model_path` | `str | None` | `None` | `[IMPLEMENTED]` | Save/load path for XGBoost model artifact (`.joblib`). |
-| `macauff_flux_columns` | `list[str]` | `[]` | `[IMPLEMENTED]` | Multi-band flux columns for `matcher="macauff"`. |
-| `prior_columns` | `list[str]` | `[]` | `[IMPLEMENTED]` | Photometric columns for Bayesian KDE prior (`p_match`). |
-| `photo_z_prior` | `bool` | `False` | `[ROADMAP]` | Photometric redshift prior for extragalactic cross-matching. |
-| `sed_template_fitting` | `bool` | `False` | `[ROADMAP]` | Multi-wavelength SED template fitting likelihood scoring. |
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `radius_arcsec` | `float` | `1.0` | Search radius for `matcher="sky"`. |
+| `matcher` | `str` | `"sky"` | `"sky"`, `"skyerr"`, `"skyellipse"`, `"lr"`, `"ml"`, `"xgb"`, `"auf"`, `"macauff"`. |
+| `max_error` | `float` | `3.0` | $N$-$\sigma$ cap for `skyerr` and Mahalanobis $d^2$ cap for `skyellipse`. |
+| `join_type` | `str` | `"1and2"` | `"1and2"`, `"1or2"`, `"all1"`, `"all2"`, `"1not2"`, `"2not1"`, `"all"`. |
+| `find` | `str` | `"best"` | `"best"` (nearest/top-ranked) or `"all"` (all pairs within radius). |
+| `target_epoch` | `float | None` | `None` | Julian-year epoch for proper-motion propagation. |
+| `pm_prior` | `bool` | `False` | Enable probabilistic PM drift prior (Wilson 2023). |
+| `pm_prior_magnitude_column` | `str | None` | `None` | Magnitude column for Wilson (2023) distance-proxy scaling. |
+| `filter_expr` | `str | None` | `None` | Polars SQL WHERE clause for post-match filtering. |
+| `extra_distance_cols` | `dict[str, float]` | `{}` | Extra columns & weights for $N$-dimensional cKDTree ranking. |
+| `batch_size` | `int | None` | `None` | HEALPix pixel batch size for out-of-core memory management. |
+| `lr_magnitude_column` | `str | None` | `None` | Secondary magnitude column for Likelihood Ratio (`matcher="lr"`). |
+| `lr_q` | `float` | `0.8` | Prior probability of counterpart detection in primary survey. |
+| `ml_color_columns` | `list[str]` | `[]` | Colour/magnitude feature columns for RF/XGB matchers. |
+| `ml_model_path` | `str | None` | `None` | Save/load path for Random Forest model artifact (`.joblib`). |
+| `xgb_model_path` | `str | None` | `None` | Save/load path for XGBoost model artifact (`.joblib`). |
+| `macauff_flux_columns` | `list[str]` | `[]` | Multi-band flux columns for `matcher="macauff"`. |
+| `prior_columns` | `list[str]` | `[]` | Photometric columns for Bayesian KDE prior (`p_match`). |
 
-### `SideOverrides` `[IMPLEMENTED]`
+### `SideOverrides`
 
 ```python
 @dataclass
@@ -234,16 +230,15 @@ class SideOverrides:
 
 `xmatch` decouples matching algorithms from spatial indexing engines.
 
-| Engine | Primary Backend | Threading / Scaling | Memory Overhead | Status | Notes |
-|---|---|---|---|---|---|
-| **`fast`** | `scipy.spatial.cKDTree` | OpenMP multi-threaded (`workers=-1`) | Minimal (3D unit vectors) | `[IMPLEMENTED]` | Default high-performance engine for local data (~3–5× faster than Astropy). |
-| **`zone`** | `cdshealpix` + `cKDTree` | Single-machine HEALPix sharding | Bounded per pixel | `[IMPLEMENTED]` | Partitions data into HEALPix pixels; falls back to `fast` if `cdshealpix` missing. |
-| **`ray`** | Ray cluster | Multi-node / Multi-process Ray tasks | Distributed | `[IMPLEMENTED]` | Fans out HEALPix pixel matching tasks across a Ray cluster. |
-| **`ray-union`** | Ray cluster | Distributed star-shaped join | Resumable chunk storage | `[IMPLEMENTED]` | Distributed full-outer-join union producing full HATS partition trees. |
-| **`astropy`** | Astropy `SkyCoord` | Single-threaded Python | High (object trees) | `[IMPLEMENTED]` | Pure-Python fallback; used when SciPy or C extensions are unavailable. |
-| **`stilts`** | STILTS `tmatch2` | External Java subprocess | Managed by JVM | `[IMPLEMENTED]` | Requires Java and `stilts` CLI tool. |
-| **`torchsky`** | PyTorch / Torchsky | GPU / Vectorized Tensor ops | Fixed PyTorch RSS | `[IMPLEMENTED]` | Tensor-native candidate pruning; requires `torchsky`. |
-| **`polars-rust`** | Polars Rust plugin | Multithreaded Rust engine | Zero-copy | `[ROADMAP]` | Native Rust HEALPix spatial join plugin directly inside Polars. |
+| Engine | Primary Backend | Threading / Scaling | Memory Overhead | Notes |
+|---|---|---|---|---|
+| **`fast`** | `scipy.spatial.cKDTree` | OpenMP multi-threaded (`workers=-1`) | Minimal (3D unit vectors) | Default high-performance engine for local data (~3–5× faster than Astropy). |
+| **`zone`** | `cdshealpix` + `cKDTree` | Single-machine HEALPix sharding | Bounded per pixel | Partitions data into HEALPix pixels; falls back to `fast` if `cdshealpix` missing. |
+| **`ray`** | Ray cluster | Multi-node / Multi-process Ray tasks | Distributed | Fans out HEALPix pixel matching tasks across a Ray cluster. |
+| **`ray-union`** | Ray cluster | Distributed star-shaped join | Resumable chunk storage | Distributed full-outer-join union producing full HATS partition trees. |
+| **`astropy`** | Astropy `SkyCoord` | Single-threaded Python | High (object trees) | Pure-Python fallback; used when SciPy or C extensions are unavailable. |
+| **`stilts`** | STILTS `tmatch2` | External Java subprocess | Managed by JVM | Requires Java and `stilts` CLI tool. |
+| **`torchsky`** | PyTorch / Torchsky | GPU / Vectorized Tensor ops | Fixed PyTorch RSS | Tensor-native candidate pruning; requires `torchsky`. |
 
 ---
 
@@ -294,14 +289,13 @@ from xmatch import (
 )
 ```
 
-| Symbol | Signature | Status | Description |
-|---|---|---|---|
-| `scan_frame(path)` | `(str | Path) -> pl.LazyFrame` | `[IMPLEMENTED]` | Lazily scans `.parquet`, `.csv`, `.tsv`, `.tab`. Reads `.fits` via Torchfits/Astropy. |
-| `write_frame(frame, path, ...)` | `(FrameLike, str | Path, ...) -> None` | `[IMPLEMENTED]` | Streams to `.parquet`, `.csv`, `.tsv`, `.fits`, `.hats`, or `vos:`. |
-| `is_hats_dir(path)` | `(str | Path) -> bool` | `[IMPLEMENTED]` | Returns `True` if directory has HATS metadata (`properties`, `_metadata`). |
-| `astropy_table_to_polars(tbl)` | `(Table) -> pl.DataFrame` | `[IMPLEMENTED]` | Zero-copy PyArrow bridge with automatic UTF-8 string decoding. |
-| `polars_to_astropy(df)` | `(FrameLike) -> Table` | `[IMPLEMENTED]` | Zero-copy Arrow bridge to Astropy `Table`. |
-| `scan_ipc_stream(path)` | `(str | Path) -> pl.LazyFrame` | `[ROADMAP]` | Native Arrow IPC / Feather streaming scan. |
+| Symbol | Signature | Description |
+|---|---|---|
+| `scan_frame(path)` | `(str | Path) -> pl.LazyFrame` | Lazily scans `.parquet`, `.csv`, `.tsv`, `.tab`. Reads `.fits` via Torchfits/Astropy. |
+| `write_frame(frame, path, ...)` | `(FrameLike, str | Path, ...) -> None` | Streams to `.parquet`, `.csv`, `.tsv`, `.fits`, `.hats`, or `vos:`. |
+| `is_hats_dir(path)` | `(str | Path) -> bool` | Returns `True` if directory has HATS metadata (`properties`, `_metadata`). |
+| `astropy_table_to_polars(tbl)` | `(Table) -> pl.DataFrame` | Zero-copy PyArrow bridge with automatic UTF-8 string decoding. |
+| `polars_to_astropy(df)` | `(FrameLike) -> Table` | Zero-copy Arrow bridge to Astropy `Table`. |
 
 ---
 
@@ -320,7 +314,7 @@ from xmatch.storage import open_storage
 
 ---
 
-## Association Contract & Provenance Graph (`xmatch.association`) `[IMPLEMENTED]`
+## Association Contract & Provenance Graph (`xmatch.association`)
 
 The `xmatch.association` module provides an audit-grade, content-addressed association contract (`xmatch.association.v1`) for astronomical candidate generation, graph components, and identity continuity. (See [`docs/association-v1.md`](association-v1.md) for normative schema specifications).
 
@@ -343,7 +337,7 @@ from xmatch.association import (
 
 ### Core Data Models
 
-#### `AssociationRecord` `[IMPLEMENTED]`
+#### `AssociationRecord`
 Represents an evaluated candidate pairing with deterministic SHA-256 identity:
 - `association_id`: SHA-256 hash of `evidence_id`, `source_id`, `candidate_id`, evaluation epoch, software version, input release IDs, and parameter hash.
 - `evidence_id`, `source_id`, `candidate_id`: Opaque, release-scoped identifiers.
@@ -355,7 +349,7 @@ Represents an evaluated candidate pairing with deterministic SHA-256 identity:
   - `calibrated_probability`: Statistically calibrated probability in $[0, 1]$ with non-empty `calibration_id`.
 - `flags`: List of diagnostic flags (e.g. `blended_candidate`, `epoch_unknown`, `pm_extrapolated`).
 
-#### `AssociationComponent` & `AssociationComponentMember` `[IMPLEMENTED]`
+#### `AssociationComponent` & `AssociationComponentMember`
 Sidecar graph representation for multi-survey crossmatch components:
 - `input_release_id`: Namespace of the member catalogue (e.g. `"catalog:gaia_dr3:v1"`).
 - `member_id`: Source identifier within that catalogue release.
@@ -384,22 +378,6 @@ comp_manifest = write_association_component_release(
     association_release_directory="releases/cosmos_v1",
     component_release_directory="components/cosmos_v1",
 )
-```
-
----
-
-## Top-Level Functional Convenience API `[ROADMAP]`
-
-To simplify interactive notebook workflows for astronomers, functional shortcuts that bypass manual orchestrator instantiation are targeted for v0.6:
-
-```python
-import xmatch
-
-# Direct functional match [ROADMAP: v0.6.0]
-df = xmatch.match("optical.parquet", "radio.csv", radius_arcsec=1.5)
-
-# Direct functional union [ROADMAP: v0.6.0]
-master_lf = xmatch.union(["gaia", "des", "allwise"], radius_arcsec=1.0)
 ```
 
 ---

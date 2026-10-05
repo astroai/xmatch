@@ -9,7 +9,7 @@ Polars' storage layer is Apache Arrow, and a polars ``DataFrame`` can be
 materialised as a ``pyarrow.Table`` via ``df.to_arrow()`` with zero copy.
 Wherever possible (e.g. when streaming to a parquet sink) this module takes
 that fast path. Conversions involving astropy ``Table`` go directly through
-``pyarrow`` and ``numpy`` column buffers without ``pandas``.
+``pyarrow`` and ``numpy`` column buffers.
 
 Bytes-string columns from VOTable responses (e.g. raw ``bytes`` for ``char``
 TVP fields) are decoded to UTF-8 so polars sees ``pl.String`` instead of
@@ -139,9 +139,9 @@ def polars_to_astropy(frame: FrameLike):
 def _read_fits(path: Path) -> pl.DataFrame:
     """Read a local FITS table with Torchfits, falling back to Astropy.
 
-    Torchfits keeps the local catalogue path Arrow/Polars-native.  Astropy
-    remains the compatibility fallback for FITS variants not yet supported by
-    Torchfits and when the optional ``torchfits`` extra is not installed.
+    Torchfits keeps the local catalogue path Arrow/Polars-native. Astropy
+    serves as the fallback for FITS variants not supported by Torchfits or
+    when the optional ``torchfits`` extra is not installed.
     """
     last_err = None
     try:
@@ -173,7 +173,7 @@ def scan_frame(path: str | Path) -> pl.LazyFrame:
 
     Parquet and CSV are scanned lazily (projection/predicate push-down). FITS
     reads are eager and then exposed as a lazy frame; they use optional
-    Torchfits first and Astropy as a compatibility fallback.
+    Torchfits first and Astropy as a fallback.
     """
     p = Path(path)
     suffix = p.suffix.lower()
@@ -206,11 +206,11 @@ def write_hats(
     dec_column: str = "dec",
     threshold: int = 100_000,
 ) -> None:
-    """Write a frame as a HATS catalogue directory via LSDB.
+    """Write a frame as a HATS catalogue directory.
 
-    LSDB partitions the catalogue into a hierarchical tiling scheme and writes
-    one parquet file per pixel, making the catalogue efficient for spatial
-    queries on massive datasets (especially union-catalogue results).
+    Partitions the catalogue into an adaptive hierarchical HEALPix tiling
+    scheme and writes one Parquet file per pixel, making the catalogue
+    efficient for spatial queries on massive datasets.
 
     Parameters
     ----------
@@ -228,27 +228,30 @@ def write_hats(
     Raises
     ------
     CrossMatchError
-        If ``lsdb`` is not installed.
+        If ``cdshealpix`` is not installed.
     """
     try:
-        import lsdb
+        import cdshealpix  # noqa: F401
     except ImportError as exc:
         from .exceptions import CrossMatchError
 
         raise CrossMatchError(
-            "HATS output requires the optional 'lsdb' package. Install it with `pip install lsdb`."
+            "HATS output requires the optional 'cdshealpix' package. "
+            "Install it with `pip install xmatch[hats]`."
         ) from exc
 
     if isinstance(frame, pl.LazyFrame):
         frame = frame.collect()
 
-    catalog = lsdb.from_dataframe(
+    from .mirror import _write_hats_native
+
+    _write_hats_native(
         frame,
+        Path(output_dir),
         ra_column=ra_column,
         dec_column=dec_column,
         threshold=threshold,
     )
-    catalog.to_hats(str(output_dir))
     logger.info(
         "Wrote HATS catalogue to %s (%d rows, threshold=%d)",
         output_dir,
@@ -332,7 +335,7 @@ def write_frame(
     so large results never need to be fully materialised in memory.
 
     When the suffix is ``.hats`` the result is written as a HATS catalogue
-    directory (requires ``lsdb``).  ``ra_column`` and ``dec_column`` identify
+    directory (requires ``cdshealpix``).  ``ra_column`` and ``dec_column`` identify
     the spatial columns for partitioning; ``hats_threshold`` controls the
     maximum rows per HEALPix pixel.
 

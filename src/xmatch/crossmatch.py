@@ -79,7 +79,7 @@ DEFAULT_HATS_THRESHOLD = 100_000
 DEFAULT_RADIUS_ARCSEC = 1.0
 
 # Geometry/identity overrides the ray-union route honours per catalogue
-# (mirrors the MatchRequest.from_legacy side mapping; --columns-* filtering
+# (mirrors the MatchRequest.from_params side mapping; --columns-* filtering
 # is sequential-path output concern the union output does not implement).
 _SIDE_OVERRIDE_KEYS = ("ra_column", "dec_column", "id_column", "frame")
 
@@ -449,10 +449,6 @@ class CrossMatch:
             lf = value.lazy() if isinstance(value, pl.DataFrame) else value
             return self._local_source("frame", lf=lf, overrides=overrides)
 
-        # pandas frame support without importing pandas eagerly.
-        if value.__class__.__module__.startswith("pandas"):
-            return self._local_source("frame", lf=pl.from_pandas(value).lazy(), overrides=overrides)
-
         text = str(value)
         resolved = self.resolve_name(text)
         if resolved in self.catalogues_config:
@@ -708,9 +704,9 @@ class CrossMatch:
         progress_cb: Callable[[str], None] | None = None,
         **params,
     ) -> pl.DataFrame | pl.LazyFrame | None:
-        """Run a crossmatch (backward-compatible spread-args entry point).
+        """Run a two-catalogue crossmatch.
 
-        For new code prefer :meth:`crossmatch_request` with a typed
+        For typed request objects see :meth:`crossmatch_request` with
         :class:`~xmatch.request.MatchRequest`.
 
         ``progress_cb``, when supplied, is forwarded to :meth:`_download_remote`
@@ -727,7 +723,7 @@ class CrossMatch:
                 progress_cb=progress_cb,
                 **params,
             )
-        req = MatchRequest.from_legacy(
+        req = MatchRequest.from_params(
             catalogue_1_input,
             catalogue_2_input,
             output_file=output_file,
@@ -923,7 +919,7 @@ class CrossMatch:
             )
 
         # Resolve all sources (reuse shared multi-match plumbing).
-        req = MatchRequest.from_legacy(
+        req = MatchRequest.from_params(
             catalogues[0],
             catalogues[1],
             output_file=None,
@@ -1283,7 +1279,7 @@ class CrossMatch:
             attempt += 1
             try:
                 _append_run("attempt_start", attempt=attempt)
-                # Per-catalogue column overrides exactly like MatchRequest.from_legacy
+                # Per-catalogue column overrides like MatchRequest.from_params
                 # (--ra1/--dec1/--id1 apply to the first catalogue, --ra2/--dec2/--id2
                 # to the second); extras beyond catalogue 2 resolve like the sequential
                 # path — with no overrides.
@@ -1402,7 +1398,7 @@ class CrossMatch:
             )
             return None
 
-        req = MatchRequest.from_legacy(
+        req = MatchRequest.from_params(
             catalogues[0],
             catalogues[1],
             output_file=None,
@@ -1545,12 +1541,13 @@ class CrossMatch:
             accum_src = replace(first_src, ra_column="_accum_ra", dec_column="_accum_dec")
 
             if right_src.access_method == "hats":
-                from . import hats_source
+                from . import hats_native
 
-                accum_lf = hats_source.hats_crossmatch(
+                accum_lf = hats_native.hats_native_crossmatch(
                     accum_src,
                     right_src,
                     req.spec,
+                    engine=req.engine,
                     local_lf1=accum_lf,
                     right_suffix=suffix,
                 ).lazy()
@@ -1682,7 +1679,7 @@ class CrossMatch:
         for i, src in enumerate(sources):
             if not src.is_local:
                 if src.access_method in ("tap", "cds_xmatch"):
-                    req = MatchRequest.from_legacy(
+                    req = MatchRequest.from_params(
                         catalogues[0],
                         catalogues[0],  # dummy cat1/cat2
                         ra=params.get("ra"),
@@ -1943,29 +1940,15 @@ class CrossMatch:
             [src1, src2], target_epoch=req.spec.target_epoch, id_join=req.id_join
         )
         if src1.access_method == "hats" or src2.access_method == "hats":
-            from . import hats_native, hats_source
+            from . import hats_native
 
             lf1 = src1.lazy() if src1.is_local else None
             lf2 = src2.lazy() if src2.is_local else None
-            # Native path: real matchers/engines + outer joins (no LSDB/Dask).
-            if hats_native.should_use_native(req):
-                return hats_native.hats_native_crossmatch(
-                    src1,
-                    src2,
-                    req.spec,
-                    engine=req.engine,
-                    local_lf1=lf1,
-                    local_lf2=lf2,
-                    right_suffix=right_suffix,
-                ).lazy()
-            if req.spec.target_epoch is not None:
-                raise CrossMatchError(
-                    "target-epoch propagation is not yet supported by the HATS/LSDB engine"
-                )
-            return hats_source.hats_crossmatch(
+            return hats_native.hats_native_crossmatch(
                 src1,
                 src2,
                 req.spec,
+                engine=req.engine,
                 local_lf1=lf1,
                 local_lf2=lf2,
                 right_suffix=right_suffix,

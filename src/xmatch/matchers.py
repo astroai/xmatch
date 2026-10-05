@@ -156,8 +156,8 @@ class MatchSpec:
     # to ``None`` (process all pixels in one pass).  Only effective with
     # ``engine="zone"`` and ``cdshealpix`` installed.
     batch_size: int | None = None
-    # ``warn`` preserves legacy fallback behavior; ``error`` is required for
-    # scientific promotion when an engine cannot honor the requested semantics.
+    # ``warn`` logs a warning and falls back; ``error`` raises when an engine
+    # cannot honor the requested semantics.
     fallback_policy: str = "warn"
 
     def __post_init__(self) -> None:
@@ -2691,7 +2691,7 @@ def _cone_search_pixels(
 
     ``cone_search`` returns *parent* cells for fully-contained subtrees, so
     parents are expanded to all children at the requested depth — callers get
-    a flat set of same-depth pixels like the pre-0.8 ``cone_search_lonlat``.
+    a flat set of same-depth pixels.
     """
     from astropy.coordinates import Angle, Latitude, Longitude
 
@@ -2719,7 +2719,7 @@ def _zone_match(
     right_src: CatalogueSource,
     spec: MatchSpec,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """HEALPix zone cone-match (LSDB-orthogonal, lightweight).
+    """HEALPix zone cone-match.
 
     When ``cdshealpix`` is importable we shard both sides into HEALPix pixels
     (nside=32 by default), build a per-pixel cKDTree on the right, and only

@@ -190,7 +190,7 @@ def test_polars_to_astropy_accepts_lazyframe():
 
 
 # --------------------------------------------------------------------------- #
-# HATS write tests (mocked — no actual lsdb required)
+# HATS write tests
 # --------------------------------------------------------------------------- #
 
 
@@ -237,21 +237,21 @@ def test_write_frame_hats_custom_ra_dec(tmp_path):
 
 
 def test_write_hats_unavailable_raises():
-    """write_hats raises clean CrossMatchError when lsdb is missing."""
+    """write_hats raises clean CrossMatchError when cdshealpix is missing."""
     import builtins
 
     sample = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     _original_import = builtins.__import__
 
-    def _raise_on_lsdb(name, *args, **kwargs):
-        if name == "lsdb":
-            raise ImportError("No module named 'lsdb'")
+    def _raise_on_cdshealpix(name, *args, **kwargs):
+        if name == "cdshealpix":
+            raise ImportError("No module named 'cdshealpix'")
         return _original_import(name, *args, **kwargs)
 
-    with mock.patch("builtins.__import__", side_effect=_raise_on_lsdb):
+    with mock.patch("builtins.__import__", side_effect=_raise_on_cdshealpix):
         with pytest.raises(Exception) as exc_info:
             io_utils.write_hats(sample, "/tmp/fake.hats")
-        assert "lsdb" in str(exc_info.value).lower()
+        assert "cdshealpix" in str(exc_info.value).lower()
 
 
 def test_supported_suffixes_includes_hats():
@@ -260,16 +260,17 @@ def test_supported_suffixes_includes_hats():
 
 
 def test_write_hats_collects_lazy_frame(tmp_path):
-    """write_hats must collect LazyFrame before passing to lsdb."""
+    """write_hats collects a LazyFrame and writes a native HATS directory."""
     lf = pl.LazyFrame({"ra": [10.0, 20.0], "dec": [5.0, 10.0]})
     hats_dir = tmp_path / "lazy.hats"
-    mock_lsdb = mock.MagicMock()
-    fake_catalog = mock_lsdb.from_dataframe.return_value
 
-    with mock.patch.dict("sys.modules", {"lsdb": mock_lsdb}):
+    with (
+        mock.patch.dict("sys.modules", {"cdshealpix": mock.MagicMock()}),
+        mock.patch("xmatch.mirror._write_hats_native") as mock_native,
+    ):
         io_utils.write_hats(lf, hats_dir)
-        # from_dataframe received a collected (eager) DataFrame, not LazyFrame.
-        call_args, _ = mock_lsdb.from_dataframe.call_args
-        assert not isinstance(call_args[0], pl.LazyFrame)
+        call_args, kwargs = mock_native.call_args
         assert isinstance(call_args[0], pl.DataFrame)
-        fake_catalog.to_hats.assert_called_once_with(str(hats_dir))
+        assert call_args[1] == hats_dir
+        assert kwargs["ra_column"] == "ra"
+        assert kwargs["dec_column"] == "dec"

@@ -31,15 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Updated Python requirement to $\ge 3.13$ (with full Python 3.14 compatibility) and modernized all type annotations to PEP 585 / PEP 604 built-ins.
-- Trimmed core runtime dependencies to `numpy`, `polars`, `pyarrow`, `astropy`, `scipy`, `pyyaml`, and `pyvo`: replaced the `pandas` table fallback with a direct PyArrow/NumPy `Table`/`MaskedColumn` bridge, moved `astroquery` to the optional `xmatch[cds]` extra, removed obsolete `keyring`/`nway` extras, and lazy-loaded `requests` for authenticated sessions.
-
-### Fixed
-
-- Unified per-row `skyerr` thresholds and `skyellipse` Mahalanobis search bounds across `fast`, `zone`, `astropy`, `torchsky`, and out-of-core spill engines.
-- Fixed HATS `Dir=(pix // 10000) * 10000` directory naming in `ray-union` and full descendant expansion for `cdshealpix.cone_search` parent cells.
-- Added upfront finite-coordinate validation to prevent `cdshealpix` Rust panics on non-finite inputs.
-- Replaced exponential Bayes factor computation in `compute_nway_p_match` with a numerically stable log-space sigmoid, and corrected the 2D Gaussian positional log-likelihood normalization in `bayes.py`.
-- Resolved result-side coordinate column names dynamically in `union_match` when combining catalogues with heterogeneous coordinate column names.
+- Streamlined core runtime dependencies to `numpy`, `polars`, `pyarrow`, `astropy`, `scipy`, `pyyaml`, and `pyvo`, with direct PyArrow/NumPy `Table`/`MaskedColumn` conversions and optional `xmatch[cds]` extra for `astroquery`.
+- Consolidated HATS reading, writing, and spatial crossmatching on the native HATS engine (`hats` + `cdshealpix`).
 
 ---
 

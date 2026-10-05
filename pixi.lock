@@ -7643,7 +7643,6 @@ packages:
   - torchfits>=1.0.0rc4 ; extra == 'torchfits'
   - cdshealpix>=0.8 ; extra == 'zone'
   - hats>=0.7 ; extra == 'hats'
-  - lsdb ; extra == 'hats'
   - cdshealpix>=0.8 ; extra == 'hats'
   - hats>=0.7 ; extra == 'hats-ray'
   - ray>=2.50 ; extra == 'hats-ray'

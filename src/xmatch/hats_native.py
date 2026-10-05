@@ -1,11 +1,9 @@
-"""HATS-native crossmatch via real xmatch matchers (no LSDB/Dask).
+"""HATS-native crossmatch via xmatch matchers.
 
 One task per left HATS pixel; right side loads the same pixel plus HEALPix
 neighbours for boundary-safe matching. Engines ``fast``/``zone``/``ray``/…
 and matchers ``sky``/``skyerr``/``skyellipse`` are honored. Outer joins
 (``1or2``, …) materialize both sides then call :func:`sky_match` once.
-
-LSDB remains optional for the legacy HATS path in :mod:`hats_source`.
 """
 
 from __future__ import annotations
@@ -23,22 +21,6 @@ from .matchers import MatchSpec, sky_match
 from .sources import CatalogueSource
 
 logger = logging.getLogger(__name__)
-
-# Engines that should never go through LSDB (which ignores matcher/engine).
-NATIVE_ENGINES = frozenset({"fast", "zone", "ray", "torchsky", "astropy", "stilts"})
-
-
-def should_use_native(req) -> bool:
-    """Prefer native path when LSDB cannot express the request."""
-    engine = (getattr(req, "engine", None) or "auto").strip().lower()
-    if engine in NATIVE_ENGINES:
-        return True
-    spec = req.spec
-    if getattr(spec, "join_type", "1and2") not in {"1and2"}:
-        return True
-    if getattr(spec, "matcher", "sky") not in {"sky"}:
-        return True
-    return getattr(spec, "target_epoch", None) is not None
 
 
 def _hats_root(src: CatalogueSource) -> Path:

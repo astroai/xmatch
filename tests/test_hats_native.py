@@ -1,4 +1,4 @@
-"""HATS-native pixel matcher (no LSDB)."""
+"""HATS-native pixel matcher tests."""
 
 from pathlib import Path
 

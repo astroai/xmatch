@@ -40,9 +40,9 @@ cds = ["astroquery>=0.4.11"]
 torchfits = ["torchfits>=1.0.0rc4"]
 # HEALPix spatial zoning engine.
 zone = ["cdshealpix>=0.8"]
-# HATS / HiPSCat catalogue support (native path needs hats; LSDB is legacy).
-hats = ["hats>=0.7", "lsdb", "cdshealpix>=0.8"]
-# Native HATS+Ray pixel matcher (no Dask).
+# HATS / HiPSCat catalogue support.
+hats = ["hats>=0.7", "cdshealpix>=0.8"]
+# Native HATS+Ray pixel matcher.
 hats-ray = ["hats>=0.7", "ray>=2.50", "cdshealpix>=0.8"]
 # Tensor-native nearest-neighbour engine.
 torchsky = ["torchsky>=0.4.0.dev0"]
@@ -77,7 +77,6 @@ ignore = [
     "B008",   # function call in argument defaults (argparse patterns)
     "SIM108", # ternary vs if/else, readability is case-by-case
     "UP031",  # printf-style formatting in logging/SQL templates
-    "UP042",  # keep str+Enum subclassing for backward compatibility
 ]
 
 [tool.mypy]

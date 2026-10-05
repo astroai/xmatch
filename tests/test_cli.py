@@ -42,7 +42,7 @@ def test_cli_requires_two_catalogues(capsys):
 
 
 def test_cli_list(capsys):
-    assert main(["--list"]) == 0
+    assert main(["list"]) == 0
     out = capsys.readouterr().out
     assert "gaia" in out
     assert "catalogues" in out.lower()
@@ -69,11 +69,11 @@ def test_cli_unknown_catalogue_returns_error(capsys):
 
 
 def test_cli_describe(capsys):
-    assert main(["--describe", "not_real"]) == 1
+    assert main(["describe", "not_real"]) == 1
     err = capsys.readouterr().err
     assert "Catalogue 'not_real' not found." in err
 
-    assert main(["--describe", "gaia_cds"]) == 0
+    assert main(["describe", "gaia_cds"]) == 0
     out = capsys.readouterr().out
     assert "Catalogue: gaia_cds" in out
 
@@ -81,7 +81,7 @@ def test_cli_describe(capsys):
 def test_cli_describe_no_dangling_whitespace_without_suggestion(capsys):
     """Unknown name with no close matches must not leave a blank hint line."""
     name = "zzzz_no_close_match_catalogue_xyzzy"
-    assert main(["--describe", name]) == 1
+    assert main(["describe", name]) == 1
     err = capsys.readouterr().err
     assert f"Catalogue '{name}' not found." in err
     assert "Did you mean" not in err
@@ -90,8 +90,8 @@ def test_cli_describe_no_dangling_whitespace_without_suggestion(capsys):
 
 # ---------------------------------------------------------------- did you mean?
 def test_cli_describe_suggests_close_match_for_typo(capsys):
-    """`xmatch --describe typo` must append a "Did you mean?" hint."""
-    assert main(["--describe", "gaiaesa"]) == 1
+    """`xmatch describe typo` must append a "Did you mean?" hint."""
+    assert main(["describe", "gaiaesa"]) == 1
     err = capsys.readouterr().err
     assert "Catalogue 'gaiaesa' not found." in err
     assert "Did you mean" in err
@@ -124,7 +124,7 @@ def test_cli_requires_at_least_two_catalogues(capsys):
 
 
 # ----------------------------------------------------------------- modern UX
-def test_cli_subcommand_match_equivalent_to_legacy(local_files, capsys):
+def test_cli_subcommand_match_equivalent_to_shorthand(local_files, capsys):
     """`xmatch match cat1 cat2` must produce the same result as `xmatch cat1 cat2`."""
     a, b = local_files
     rc = main(["match", str(a), str(b), "-r", "1.0"])
@@ -132,23 +132,6 @@ def test_cli_subcommand_match_equivalent_to_legacy(local_files, capsys):
     out = capsys.readouterr().out
     assert "sep_arcsec" in out
     assert out.count("\n") >= 3  # header + 2 rows
-
-
-def test_cli_subcommand_list_matches_legacy_alias(capsys):
-    """`xmatch list` outputs the same catalogue table as `xmatch --list`."""
-    rc = main(["list"])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "gaia" in out
-    assert "catalogues" in out.lower()
-
-
-def test_cli_subcommand_describe_matches_legacy_alias(capsys):
-    """`xmatch describe gaia_cds` matches the legacy --describe output."""
-    rc = main(["describe", "gaia_cds"])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "Catalogue: gaia_cds" in out or "gaia_cds" in out
 
 
 def test_cli_subcommand_describe_unknown_returns_error(capsys):
@@ -452,7 +435,7 @@ def test_cli_completion_falls_back_to_default_catalogues_when_config_missing(mon
     monkeypatch.setenv("XMATCH_NO_COLOR", "1")  # ensure plain output
     # --config comes AFTER the subcommand keyword so _split_subcommand
     # sees `completion` as the first non-flag token and routes to the
-    # completion subparser (not the legacy flat form).
+    # completion subparser.
     rc = main(
         [
             "completion",

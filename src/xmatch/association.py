@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +33,7 @@ _COMPONENT_DELTAS = "deltas.jsonl"
 _MEMBER_EQUIVALENCES = "equivalences.jsonl"
 
 
-class ScoreSemantics(str, Enum):
+class ScoreSemantics(StrEnum):
     """Scientific interpretation of an association score."""
 
     RANKING_SCORE = "ranking_score"
@@ -41,7 +41,7 @@ class ScoreSemantics(str, Enum):
     CALIBRATED_PROBABILITY = "calibrated_probability"
 
 
-class AssociationDecision(str, Enum):
+class AssociationDecision(StrEnum):
     """Disposition of a candidate without implying physical truth."""
 
     CANDIDATE = "candidate"
@@ -49,7 +49,7 @@ class AssociationDecision(str, Enum):
     REJECTED = "rejected"
 
 
-class AssociationComponentDeltaKind(str, Enum):
+class AssociationComponentDeltaKind(StrEnum):
     """Topology change between two component releases."""
 
     CREATED = "created"

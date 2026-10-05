@@ -25,17 +25,10 @@ def user_config_path() -> Path:
     return Path.home() / ".config" / "xmatch" / "xmatch.yaml"
 
 
-def legacy_user_config_path() -> Path:
-    """Older user path still honoured if present (``~/.xmatch/xmatch.yaml``)."""
-    return Path.home() / ".xmatch" / "xmatch.yaml"
-
-
 def find_user_config_path() -> Path | None:
-    """Return the first existing user overlay path, or ``None``."""
-    for path in (user_config_path(), legacy_user_config_path()):
-        if path.is_file():
-            return path
-    return None
+    """Return the user overlay path if it exists, else ``None``."""
+    path = user_config_path()
+    return path if path.is_file() else None
 
 
 def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:

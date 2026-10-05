@@ -196,7 +196,7 @@ def test_hypotheses_orient_pairs_and_do_not_compete_between_surveys():
     assert result["candidate_namespace"].unique().to_list() == ["infrared/v1"]
 
 
-def test_frame_overrides_reach_typed_and_legacy_matching():
+def test_frame_overrides_reach_typed_and_params_matching():
     from xmatch import CrossMatch, MatchRequest, SideOverrides
     from xmatch.exceptions import CrossMatchError
 

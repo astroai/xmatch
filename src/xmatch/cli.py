@@ -10,17 +10,10 @@ The CLI is split into:
   or ``--no-color``.
 * Nine dedicated subcommand parsers (``match``, ``list``, ``describe``,
   ``discover``, ``search``, ``adopt``, ``sync``, ``completion``, ``doctor``).
-  Each lives in its own function that produces
-  an argparse ``Namespace`` plus a colour-aware printer so help, output and
-  errors are easy to scan.
-* A backwards-compatible legacy flat parser that retains every original
-  flag (still used by users who run ``xmatch cat1 cat2`` without an
-  explicit ``match`` keyword).
-* :func:`main` which dispatches between legacy and subcommand mode based
-  on the first non-flag token.
-
-The modernized interface reuses the existing :class:`xmatch.crossmatch.CrossMatch`
-engine — no logic changes; only the surface that the user types.
+  Each lives in its own function that produces an argparse ``Namespace`` plus
+  a colour-aware printer so help, output, and errors are easy to scan.
+* :func:`main` which dispatches to the requested subcommand, or defaults to
+  ``match`` when given positional catalogues directly (``xmatch cat1 cat2``).
 """
 
 from __future__ import annotations
@@ -636,11 +629,7 @@ def _parse_extra_distance_cols(raw):
 
 
 def _build_params(args) -> dict:
-    """Extract the shared match parameters from CLI args as a kwargs dict.
-
-    Works with both legacy and subcommand-mode namespaces, since both use
-    identical ``dest=`` names.
-    """
+    """Extract the match parameters from CLI args as a kwargs dict."""
     prior_columns = [c.strip() for c in (args.priors or "").split(",") if c.strip()]
     extra_distance = _parse_extra_distance_cols(args.extra_distance_cols)
     ml_color_columns = [c.strip() for c in (args.ml_color_cols or "").split(",") if c.strip()]
@@ -700,349 +689,8 @@ def _build_params(args) -> dict:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def build_legacy_parser() -> argparse.ArgumentParser:
-    """The legacy flat-form parser.
-
-    Every original flag is preserved byte-for-byte (with identical ``dest=``
-    names) so that callers using the old form — ``xmatch --list``,
-    ``xmatch --describe NAME``, ``xmatch cat1 cat2 -r 1.0`` — keep working
-    unchanged.  Only the *display* of options changes, via grouped help.
-    """
-    parser = argparse.ArgumentParser(
-        prog="xmatch",
-        description=TAGLINE,
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument(
-        "catalogues",
-        nargs="*",
-        help="Two or more catalogues: files, HATS dirs, or configured names.",
-    )
-
-    g_out = parser.add_argument_group("Output")
-    g_out.add_argument(
-        "-o",
-        "--output",
-        dest="output_file",
-        help="Output file (.parquet/.csv/.fits/.hats). If omitted, CSV is written to stdout.",
-    )
-    g_out.add_argument(
-        "--hats-threshold",
-        dest="hats_threshold",
-        type=int,
-        default=100_000,
-        help="Max rows per HEALPix pixel for .hats output.",
-    )
-    g_out.add_argument(
-        "--batch-size",
-        dest="batch_size",
-        type=int,
-        help="HEALPix pixel groups per batch for out-of-core processing.",
-    )
-    g_out.add_argument(
-        "--memory-budget-bytes",
-        type=int,
-        help="Spill pairwise local CSV/Parquet matching above this memory budget.",
-    )
-    g_out.add_argument(
-        "--scratch-dir",
-        help="Parent directory for bounded-memory partition files.",
-    )
-    g_out.add_argument(
-        "--partition-order",
-        default="auto",
-        help="Sky-zone partition order (non-negative integer or 'auto').",
-    )
-
-    g_geom = parser.add_argument_group("Geometry (sky match)")
-    g_geom.add_argument(
-        "-r",
-        "--radius",
-        dest="radius_arcsec",
-        type=float,
-        default=1.0,
-        help="Match radius in arcseconds.",
-    )
-    g_geom.add_argument("--ra1", dest="ra_column_1", help="RA column name for catalogue 1.")
-    g_geom.add_argument("--dec1", dest="dec_column_1", help="Dec column name for catalogue 1.")
-    g_geom.add_argument("--ra2", dest="ra_column_2", help="RA column name for catalogue 2.")
-    g_geom.add_argument("--dec2", dest="dec_column_2", help="Dec column name for catalogue 2.")
-    g_geom.add_argument(
-        "--columns-1",
-        dest="columns_1",
-        help="Comma-separated columns from catalogue 1.",
-    )
-    g_geom.add_argument(
-        "--columns-2",
-        dest="columns_2",
-        help="Comma-separated columns from catalogue 2.",
-    )
-
-    g_alg = parser.add_argument_group("Match algorithm")
-    g_alg.add_argument(
-        "--matcher",
-        choices=["sky", "skyerr", "skyellipse", "lr", "ml", "xgb", "auf", "macauff"],
-        help="Match algorithm (default: sky). lr=Likelihood Ratio, ml=Random Forest, "
-        "xgb=XGBoost, auf=AUF empirical error model, macauff=AUF+flux.",
-    )
-    g_alg.add_argument(
-        "--max-error",
-        dest="max_error",
-        type=float,
-        default=3.0,
-        help="N-sigma cap for skyerr/skyellipse.",
-    )
-    g_alg.add_argument(
-        "--join",
-        dest="join_type",
-        default="1and2",
-        choices=["1and2", "1or2", "all", "1not2", "2not1", "all1", "all2"],
-        help="Join type (1and2=inner, 1or2=outer, 1not2/2not1=anti, all1/all2=outer side).",
-    )
-    g_alg.add_argument(
-        "--union",
-        dest="union_match",
-        action="store_true",
-        help="Build a master union catalogue (full outer join across all catalogues).",
-    )
-    g_alg.add_argument(
-        "--fof",
-        dest="fof_match",
-        action="store_true",
-        help="Friends-of-Friends transitive closure across all catalogues.",
-    )
-
-    g_ray = parser.add_argument_group("Distributed (engine=ray-union)")
-    g_ray.add_argument(
-        "--no-sync",
-        dest="no_sync",
-        action="store_true",
-        help="Skip auto-mirroring of remote inputs; require cached HATS copies.",
-    )
-    g_ray.add_argument(
-        "--synclimit",
-        dest="synclimit",
-        type=float,
-        help="Requests/sec rate limit for mirroring remote catalogues (default 1.0).",
-    )
-    g_ray.add_argument(
-        "--cache-root",
-        dest="cache_root",
-        help="Durable cache root for mirrored HATS catalogues (default: $XMATCH_CACHE_ROOT "
-        "or, on AstroAI/CANFAR sessions, /arc/projects/hats; else ~/.cache/xmatch).",
-    )
-    g_ray.add_argument(
-        "--task-rows",
-        dest="task_rows",
-        type=int,
-        help="Target rows per Ray chunk task (default 2,000,000).",
-    )
-    g_ray.add_argument(
-        "--max-tuples",
-        dest="max_tuples",
-        type=int,
-        help="Max output tuples per hub source row (default 10,000).",
-    )
-    g_ray.add_argument(
-        "--chunk-memory-gb",
-        dest="chunk_memory_gb",
-        type=float,
-        help="Per-chunk candidate-pool memory guard in GiB (default 8.0).",
-    )
-    g_ray.add_argument(
-        "--retries",
-        dest="retries",
-        type=int,
-        default=0,
-        help="Driver-level retries for the distributed union: on failure, re-run "
-        "the same request after a backoff (mirror gaps refill incrementally, "
-        "finished chunks are skipped). Default 0 (no retries).",
-    )
-    g_ray.add_argument(
-        "--fresh-after",
-        dest="fresh_after",
-        type=float,
-        help="Skip the mirror change-probe for copies fully synced within this many "
-        "days (default: always probe).",
-    )
-    g_ray.add_argument(
-        "--min-free-gb",
-        dest="min_free_gb",
-        type=float,
-        help="Fail fast when the cache root or output filesystem has less free space "
-        "than this (default 10.0; env XMATCH_MIN_FREE_GB overrides).",
-    )
-    g_alg.add_argument(
-        "--find",
-        choices=["best", "all"],
-        default="best",
-        help="Keep the best match or all matches within the radius.",
-    )
-    g_alg.add_argument(
-        "--engine",
-        choices=["auto", "stilts", "astropy", "fast", "torchsky", "zone", "ray", "ray-union"],
-        default="auto",
-        help=(
-            "Sky-match engine (auto=default dispatch, stilts=Java tmatch2, "
-            "astropy=pure-Python KD-tree, fast=scipy.cKDTree, torchsky=tensor-native, "
-            "zone=HEALPix, ray=distributed zone match, ray-union=distributed N-way "
-            "outer join on Ray with mirrored HATS inputs)."
-        ),
-    )
-
-    g_id = parser.add_argument_group("ID join")
-    g_id.add_argument(
-        "--id-join",
-        dest="id_join",
-        action="store_true",
-        help="Join on id columns instead of sky position.",
-    )
-    g_id.add_argument("--id1", dest="id_column_1", help="ID column for catalogue 1.")
-    g_id.add_argument("--id2", dest="id_column_2", help="ID column for catalogue 2.")
-
-    g_prob = parser.add_argument_group("Probabilistic / Bayesian")
-    g_prob.add_argument(
-        "--probabilistic",
-        dest="probabilistic",
-        action="store_true",
-        help="Compute Budavari-style hierarchical Bayes factor (+ p_match column).",
-    )
-    g_prob.add_argument(
-        "--priors",
-        dest="priors",
-        default="",
-        help="Comma-separated photometric columns used as Bayesian priors (e.g. g,r).",
-    )
-
-    g_pm = parser.add_argument_group("Proper motion")
-    g_pm.add_argument(
-        "--target-epoch",
-        dest="target_epoch",
-        type=float,
-        help="Julian-year epoch to propagate coordinates to via proper motion.",
-    )
-    g_pm.add_argument(
-        "--pm-prior",
-        dest="pm_prior",
-        action="store_true",
-        help="Inflate positional errors for sources without measured proper motions using "
-        "a Galactic-latitude drift model (Wilson 2023). Requires --target-epoch.",
-    )
-    g_pm.add_argument(
-        "--pm-prior-mag-col",
-        dest="pm_prior_mag_col",
-        help="Magnitude column for refining the PM drift dispersion estimate "
-        "(brighter = closer = larger PM). Only effective with --pm-prior.",
-    )
-
-    g_filt = parser.add_argument_group("Advanced filters")
-    g_filt.add_argument(
-        "--filter-expr",
-        dest="filter_expr",
-        help="Polars SQL WHERE clause to post-filter matched pairs "
-        "(e.g. 'abs(mag - mag_2) < 0.5').",
-    )
-    g_filt.add_argument(
-        "--extra-distance-cols",
-        dest="extra_distance_cols",
-        help="Column:weight pairs for N-dimensional cKDTree ranking (e.g. 'g:0.5,bp_rp:0.3').",
-    )
-
-    g_msm = parser.add_argument_group("Matcher-specific")
-    g_msm.add_argument(
-        "--lr-magnitude-column",
-        dest="lr_magnitude_column",
-        help="Magnitude column for Likelihood Ratio matcher (required when --matcher lr).",
-    )
-    g_msm.add_argument(
-        "--lr-q",
-        dest="lr_q",
-        type=float,
-        default=0.8,
-        help="Prior Q factor for LR matcher: fraction of primary sources with "
-        "detectable counterparts (0.5-1.0).",
-    )
-    g_msm.add_argument(
-        "--ml-color-cols",
-        dest="ml_color_cols",
-        help="Comma-separated photometric columns for ML matcher features "
-        "(e.g. 'g,r,i'). Required when --matcher ml.",
-    )
-    g_msm.add_argument(
-        "--ml-model-path",
-        dest="ml_model_path",
-        help="Path to save/load a pre-trained Random Forest model (joblib). If the file "
-        "exists it is loaded; otherwise a new model is trained and saved.",
-    )
-    g_msm.add_argument(
-        "--xgb-model-path",
-        dest="xgb_model_path",
-        help="Path to save/load a pre-trained XGBoost model (joblib).",
-    )
-    g_msm.add_argument(
-        "--macauff-flux-cols",
-        dest="macauff_flux_cols",
-        help="Comma-separated magnitude columns for macauff flux likelihoods.",
-    )
-
-    g_reg = parser.add_argument_group("Region (remote downloads)")
-    g_reg.add_argument("--ra", type=float, help="Region center RA (deg) for remote downloads.")
-    g_reg.add_argument("--dec", type=float, help="Region center Dec (deg) for remote downloads.")
-    g_reg.add_argument(
-        "--radius-deg",
-        dest="radius_deg",
-        type=float,
-        help="Region radius (deg) for remote downloads.",
-    )
-    g_reg.add_argument(
-        "--endpoint",
-        help="TAP endpoint for ad-hoc table ids (vizier, noirlab, gaia).",
-    )
-
-    g_info = parser.add_argument_group("Inspection / discovery (legacy flags)")
-    g_info.add_argument(
-        "--list",
-        dest="list_catalogues",
-        action="store_true",
-        help="List configured catalogues and exit.",
-    )
-    g_info.add_argument(
-        "--describe",
-        dest="describe",
-        help="Describe a catalogue and exit.",
-    )
-    g_info.add_argument(
-        "--search",
-        dest="search",
-        nargs="?",
-        const="*",
-        metavar="PATTERN",
-        help="Search remote TAP services for tables matching PATTERN.",
-    )
-    g_info.add_argument(
-        "--discover",
-        dest="discover",
-        metavar="ENDPOINT",
-        help="Discover tables and schema on a remote TAP endpoint.",
-    )
-    g_info.add_argument(
-        "--schema",
-        dest="schema_table",
-        metavar="TABLE",
-        help="Show column schema for a specific remote table.",
-    )
-
-    _add_global_options(parser)
-    return parser
-
-
 def _build_match_subparser() -> argparse.ArgumentParser:
-    """Standalone parser for the ``match`` subcommand.
-
-    It is *not* parented to a subparsers tree — it stands alone so each
-    subcommand can have its own argparse context.  :func:`main` calls
-    it directly when the user runs ``xmatch match ...``.
-    """
+    """Standalone parser for the ``match`` subcommand (and default ``xmatch CAT1 CAT2``)."""
     parser = argparse.ArgumentParser(
         prog="xmatch match",
         description=(
@@ -1057,7 +705,7 @@ def _build_match_subparser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "catalogues",
-        nargs="+",
+        nargs="*",
         help="Two or more catalogues: files, HATS dirs, or configured names.",
     )
 
@@ -1851,9 +1499,7 @@ def _build_top_parser() -> argparse.ArgumentParser:
         "  completion  emit a shell tab-completion script (bash | zsh | fish)\n"
         "  doctor      report drift between your xmatch.yaml and the bundled baseline\n"
         "\n"
-        "Run `xmatch COMMAND --help` for command-specific options.  The legacy\n"
-        "flat form (`xmatch --list`, `xmatch --describe NAME`, `xmatch --search`,\n"
-        "`xmatch --discover ENDPOINT`) keeps working for backward compatibility."
+        "Run `xmatch COMMAND --help` for command-specific options."
     )
     parser = argparse.ArgumentParser(
         prog="xmatch",
@@ -2237,7 +1883,7 @@ def handle_adopt(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Match execution (shared between legacy and subcommand modes)
+# Match execution
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -2265,7 +1911,7 @@ def _resolve_output_path(output_file: str | None) -> str | None:
 
 
 def _execute_match(args, cm: CrossMatch, console: Console) -> int:
-    """Drive the crossmatch orchestration common to legacy and subcommand modes."""
+    """Drive the crossmatch orchestration."""
     if args.output_file:
         args.output_file = _resolve_output_path(args.output_file)
     if len(args.catalogues) < 2:
@@ -2322,7 +1968,7 @@ def _execute_match(args, cm: CrossMatch, console: Console) -> int:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Dispatchers for each mode
+# Dispatchers for each subcommand
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -2358,46 +2004,6 @@ def _guarded(
         logger.exception("Unexpected error")
         console.error(f"Unexpected error: {exc}")
         return 1
-
-
-def _run_legacy(argv: Sequence[str]) -> int:
-    """Run with the original flat-form parser — every flag preserved.
-
-    Includes ``--version`` and ``--help`` which argparse handles
-    natively via ``action="version"``.  Any SystemExit from those
-    propagates through :func:`_guarded` unchanged.
-    """
-    parser = build_legacy_parser()
-    args = parser.parse_args(list(argv))
-    setup_logging(args.verbose)
-    console = _make_console(no_color=bool(getattr(args, "no_color", False)))
-    cm = CrossMatch(config_file=args.config_file)
-
-    def body() -> int:
-        if args.list_catalogues:
-            list_catalogues(cm, console)
-            return 0
-        if args.describe:
-            return 0 if describe(cm, args.describe, console) else 1
-        if args.discover:
-            return handle_discover(cm, args.discover, args.schema_table, console)
-        if args.search is not None:
-            return handle_search(cm, args.search, console)
-
-        # Empty positional or 1 catalogue: emit the well-known error
-        # message that legacy callers (and our tests) pin.  Note: this is
-        # the safest fallback for users who migrated from very old forms
-        # like `xmatch cat1` without an explicit subcommand.
-        if len(args.catalogues) < 2:
-            console.error("Error: at least two catalogues are required.")
-            console.hint("Try 'xmatch --help' for usage,")
-            console.hint("     'xmatch list' to list configured catalogues,")
-            console.hint("     'xmatch discover <endpoint>' for remote tables.")
-            return 2
-
-        return _execute_match(args, cm, console)
-
-    return _guarded(cm, console, body)
 
 
 def _run_match_subcommand(argv: Sequence[str]) -> int:
@@ -2576,7 +2182,7 @@ def _split_subcommand(argv: Sequence[str]) -> tuple[str | None, list[str]]:
     ``describe`` with remaining ``["--no-color", "gaia"]``.
 
     Returns ``(None, list(argv))`` when no keyword is found, so callers
-    can fall through to the legacy flat-form parser unchanged.
+    can default to the ``match`` parser.
     """
     for i, tok in enumerate(argv):
         if tok.startswith("-"):
@@ -3011,19 +2617,12 @@ def main(argv: list[str] | None = None) -> int:
       via ``argparse``'s ``action="version"`` (prints version, exits 0).
     * ``xmatch <subcommand> …``      → dedicated subcommand parser, with
       grouped options and colour-aware output.
-    * Anything else                    → legacy flat-form parser.  This is
-      how ``xmatch cat1 cat2``, ``xmatch --list``, ``xmatch --describe NAME``,
-      and every historic invocation keep working unchanged.
+    * Anything else                    → defaults to the ``match`` subcommand
+      so ``xmatch cat1 cat2`` works directly without an explicit ``match``
+      keyword.
     """
     argv_list = list(argv) if argv is not None else sys.argv[1:]
 
-    # Friendlier top-level help: when the user asks for ``-h``/``--help``
-    # without a subcommand keyword (regardless of where in argv it sits),
-    # route to the slim subcommand-blurb.  ``xmatch list --help`` and
-    # ``xmatch -h list`` still dispatch to the per-subcommand argparse
-    # help, which the subparser itself owns — fall through to the usual
-    # dispatch so the subparser receives ``["--help"]`` (or ``["-h"]``)
-    # and argparse handles everything natively.
     if any(t in ("-h", "--help") for t in argv_list):
         cmd_peek, _ = _split_subcommand(argv_list)
         if cmd_peek is None:
@@ -3051,9 +2650,7 @@ def main(argv: list[str] | None = None) -> int:
     if cmd in ("list", "discover", "search"):
         return _run_no_pos_subcommand(remaining, cmd)
 
-    # Fallback: legacy flat form (--list, --describe NAME, positional
-    # catalogues, etc.).
-    return _run_legacy(argv_list)
+    return _run_match_subcommand(argv_list)
 
 
 if __name__ == "__main__":
