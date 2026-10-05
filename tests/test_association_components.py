@@ -20,6 +20,32 @@ from xmatch.association import (
 )
 
 
+def test_component_construction_includes_sources_without_selected_edges(tmp_path) -> None:
+    from xmatch.association import AssociationDecision, construct_association_components
+
+    directory, manifest = _association_release(tmp_path, "association")
+    left_release, right_release = _records()[0].provenance.input_release_ids
+    island = AssociationComponentMember(right_release, "specz:source:isolated")
+    components = construct_association_components(
+        directory,
+        source_input_release_id=left_release,
+        candidate_input_release_id=right_release,
+        included_decisions=[AssociationDecision.SELECTED],
+        additional_members=[island],
+    )
+    assert any(component.members == (island,) for component in components)
+    published = write_association_component_release(components, directory, tmp_path / "components")
+    assert published.membership_count == sum(len(component.members) for component in components)
+    with pytest.raises(ValueError, match="input release"):
+        construct_association_components(
+            directory,
+            source_input_release_id=left_release,
+            candidate_input_release_id=right_release,
+            included_decisions=[],
+            additional_members=[AssociationComponentMember("unregistered", "island")],
+        )
+
+
 def _records() -> list[AssociationRecord]:
     payload = json.loads(
         files("xmatch").joinpath("fixtures/association_v1.json").read_text(encoding="utf-8")

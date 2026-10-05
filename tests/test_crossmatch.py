@@ -233,8 +233,7 @@ def test_suggest_lowercases_argument(cm):
 
 
 def test_suggest_preserves_original_case_with_mixed_case_pool():
-    """Regression for palette/case-insensitive-fuzzy-matching-*.
-    suggest() must tolerate mixed-case pool entries (e.g. ``Gaia_DR3``) and
+    """suggest() must tolerate mixed-case pool entries (e.g. ``Gaia_DR3``) and
     return suggestions in their **original** casing rather than the
     lowercased form picked up for matching.
     """

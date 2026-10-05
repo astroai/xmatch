@@ -413,3 +413,15 @@ CrossMatchError
 ├── TapError        (Remote ADQL syntax, network errors, or timeout)
 └── StiltsError     (STILTS CLI execution or Java environment errors)
 ```
+
+## Catalogue and model-training products
+
+`xmatch.observations` supplies `source_inventory`, `namespaced_source_id`,
+`normalize_photometry`, `normalize_property_evidence`,
+`required_observation_columns`, `validate_source_inventory`,
+`write_observation_release`, and `verify_observation_release`.
+`xmatch.candidates` supplies `write_candidate_release`,
+`verify_candidate_release`, and `normalize_candidate_hypotheses`.
+These functions are also exported from `xmatch`.
+See [observation mappings](observations.md) and the
+[catalogue-to-model pipeline](catalogue-pipeline.md) for contracts and examples.

@@ -33,6 +33,49 @@ from .tap_fake import FakeTAPServer, make_rows
 PAGE = 100
 
 
+def test_mirrored_source_preserves_measurement_and_motion_metadata(tmp_path):
+    from xmatch.storage import LocalStorage
+
+    source = CatalogueSource(
+        name="pilot",
+        is_local=False,
+        access_method="tap",
+        tap_url="https://example.org/tap",
+        release_namespace="pilot:dr1",
+        release_metadata={"citation": "upstream"},
+        photometry=[{"passband": "g", "value_column": "flux", "unit": "Jy"}],
+        property_evidence=[
+            {
+                "property": "type.native",
+                "value_column": "class",
+                "category": "literature_assertion",
+                "method": "native",
+            }
+        ],
+        frame="galactic",
+        ra_column="l",
+        dec_column="b",
+        ra_err_column="e_l",
+        dec_err_column="e_b",
+        pos_err_units="mas",
+        default_pos_error_arcsec=0.1,
+        epoch=2016.0,
+        pm_ra_column="pm_l",
+        pm_dec_column="pm_b",
+    )
+    cache = LocalStorage(tmp_path)
+    mirrored = mirror._mirrored_source(source, cache, "pilot/version", str(tmp_path))
+    assert mirrored.release_namespace == "pilot:dr1"
+    assert mirrored.photometry == source.photometry
+    assert mirrored.property_evidence == source.property_evidence
+    assert mirrored.release_metadata == {"citation": "upstream"}
+    assert mirrored.frame == "galactic" and mirrored.pos_err_units == "mas"
+    assert mirrored.ra_err_column == "e_l" and mirrored.default_pos_error_arcsec == 0.1
+    assert mirrored.path == tmp_path / "pilot/version"
+    assert mirrored.access_method == "hats"
+    assert source.access_method == "tap" and source.path is None
+
+
 @pytest.fixture()
 def tap_server() -> "Iterator[FakeTAPServer]":
     srv = FakeTAPServer(make_rows(200))

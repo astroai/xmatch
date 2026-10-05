@@ -92,6 +92,9 @@ class SideOverrides:
     endpoint: Optional[str] = None
     """TAP endpoint short-name for ad-hoc table-id resolution (vizier, noirlab, …)."""
 
+    frame: Optional[str] = None
+    """Declared coordinate frame; mixed-frame matching requires prior conversion."""
+
     def as_dict(self) -> Dict[str, Any]:
         """Return a dict suitable for ``resolve_source(…, overrides=…)``."""
         d: Dict[str, Any] = {}
@@ -112,6 +115,7 @@ class SideOverrides:
             "parallax_column",
             "radial_velocity_column",
             "endpoint",
+            "frame",
         ):
             val = getattr(self, field_name)
             if val is not None:
@@ -262,6 +266,7 @@ class MatchRequest:
                 radial_velocity_column=params.get("radial_velocity_column_1"),
                 columns=_parse_columns(params.get("columns_1")),
                 endpoint=params.get("endpoint"),
+                frame=params.get("frame_1"),
             ),
             side2=SideOverrides(
                 ra_column=params.get("ra_column_2"),
@@ -281,6 +286,7 @@ class MatchRequest:
                 radial_velocity_column=params.get("radial_velocity_column_2"),
                 columns=_parse_columns(params.get("columns_2")),
                 endpoint=params.get("endpoint"),
+                frame=params.get("frame_2"),
             ),
             ra=params.get("ra"),
             dec=params.get("dec"),

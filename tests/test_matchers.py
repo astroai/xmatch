@@ -1815,12 +1815,9 @@ def test_pm_prior_magnitude_column_scales_dispersion():
         max_error=3.0,
         target_epoch=2016.0,
     )
-    out_no = sky_match(
-        src_a, src_b, base_left.lazy(), base_right.lazy(), spec_no, engine="fast"
-    ).collect()
-    assert out_no.height == 0, (
-        f'Without pm_prior, 2.0" separation should exceed max sigma; got {out_no.height} matches'
-    )
+    # Unknown motion must be explicitly modelled at a different epoch.
+    with pytest.raises(CrossMatchError, match="finite proper motion"):
+        sky_match(src_a, src_b, base_left.lazy(), base_right.lazy(), spec_no, engine="fast")
 
     # --- pm_prior + bright stars (mag=10): should match -------------------
     left_bright = base_left.with_columns(pl.Series("mag_g", [10.0]))
@@ -1947,10 +1944,8 @@ def test_pm_prior_per_row_drift_added_to_astrometric_errors():
         max_error=3.0,
         target_epoch=2016.0,
     )
-    out_no = sky_match(src_a, src_b, left.lazy(), right.lazy(), spec_no, engine="fast").collect()
-    assert out_no.height == 0, (
-        f"Without pm_prior, 2.5 arcsec star should NOT match; got {out_no.height}"
-    )
+    with pytest.raises(CrossMatchError, match="finite proper motion"):
+        sky_match(src_a, src_b, left.lazy(), right.lazy(), spec_no, engine="fast")
 
     # With pm_prior: per-row drift added in quadrature \u2192 max sep >> 3.0\"
     spec_pm = MatchSpec(
@@ -2054,12 +2049,8 @@ def test_pm_prior_per_row_gaia_realistic_error_budgets():
         max_error=3.0,
         target_epoch=2016.0,
     )
-    out_no_pm = sky_match(
-        src_a, src_b, left.lazy(), right.lazy(), spec_no_pm, engine="fast"
-    ).collect()
-    assert out_no_pm.height == 0, (
-        f'Without pm_prior, chord_max ~0.426" < 0.5" offset; got {out_no_pm.height} matches'
-    )
+    with pytest.raises(CrossMatchError, match="finite proper motion"):
+        sky_match(src_a, src_b, left.lazy(), right.lazy(), spec_no_pm, engine="fast")
 
     # With pm_prior + magnitude scaling: per-row drift inflates the
     # left-side sigma and chord_max rises to ~1.47\", allowing both 0.5\"
@@ -2269,11 +2260,8 @@ def test_pm_prior_both_sides_drift_inflation():
 
     # --- 1a. baseline: no pm_prior at sep 1.4" -> NO MATCH -----------------
     left, right = make_lr(1980.0, 2000.0, offset_deg)
-    out = sky_match(src_a, src_b, left.lazy(), right.lazy(), spec_no_pm, engine="fast").collect()
-    assert out.height == 0, (
-        'Without pm_prior at 1.4" sep, chord_max ~ 3*(0.141+0.141) '
-        f'= 0.85" < 1.4"; got {out.height} matches'
-    )
+    with pytest.raises(CrossMatchError, match="finite proper motion"):
+        sky_match(src_a, src_b, left.lazy(), right.lazy(), spec_no_pm, engine="fast")
 
     # --- 1b. joint both drift at sep 1.4" -> MATCH -----------------------
     # Round-trip the injected separation in the same assertion to verify
@@ -2470,6 +2458,27 @@ def test_nan_dec_raises_clean_error():
         sky_match(
             _src("a"), _src("b"), left.lazy(), right.lazy(), MatchSpec(radius_arcsec=1.0)
         ).collect()
+
+
+@pytest.mark.parametrize("engine", ["auto", "stilts"])
+@pytest.mark.parametrize("bad_side", ["left", "right"])
+def test_stilts_validates_coordinates_before_external_matching(monkeypatch, engine, bad_side):
+    from xmatch import stilts
+
+    called = []
+
+    def external_match(*args, **kwargs):
+        called.append(True)
+        return pl.DataFrame()
+
+    monkeypatch.setattr(stilts, "stilts_available", lambda command: True)
+    monkeypatch.setattr(stilts, "stilts_sky_match", external_match)
+    valid = pl.DataFrame({"ra": [10.0], "dec": [0.0]})
+    invalid = valid.with_columns(pl.lit(float("nan")).alias("dec"))
+    left, right = (invalid, valid) if bad_side == "left" else (valid, invalid)
+    with pytest.raises(CrossMatchError, match="non-finite|out-of-range"):
+        sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), MatchSpec(), engine=engine)
+    assert called == []
 
 
 @pytest.mark.parametrize(

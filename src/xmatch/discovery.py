@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import polars as pl
 
-from .exceptions import InputError, TapError
+from .exceptions import InputError
 from .tap import execute_tap_query, get_tap_service
 
 logger = logging.getLogger(__name__)
@@ -258,25 +258,6 @@ def detect_radec_columns(cols_df: pl.DataFrame) -> Tuple[Optional[str], Optional
     return find_coord_columns(col_names)
 
 
-def discover_archive(
-    tap_url: str,
-    auth_session: Optional[Any] = None,
-) -> Dict[str, Any]:
-    """Get a summary of a TAP service: tables + top-level metadata.
-
-    Returns a dict with ``tables`` (DataFrame) and ``tables_count`` (int).
-    Raises ``TapError`` if the service is unreachable.
-    """
-    try:
-        tables = discover_tables(tap_url, auth_session=auth_session)
-    except Exception as exc:
-        raise TapError(f"Failed to discover tables at {tap_url}: {exc}") from exc
-    return {
-        "tables": tables,
-        "tables_count": tables.height,
-    }
-
-
 def get_table_schema(
     tap_url: str,
     table_name: str,
@@ -393,9 +374,3 @@ def _default_catalogue_name(access: str) -> str:
     text = text.replace("/", "_").replace(".", "_").replace("+", "p").replace("-", "_")
     text = re.sub(r"[^a-z0-9_]", "", text)
     return text or "adopted_table"
-
-
-def resolve_endpoint_name(name: str) -> Optional[str]:
-    """Return canonical endpoint short-name if *name* is known (else ``None``)."""
-    key = name.lower().strip()
-    return key if key in _PUBLIC_TAP_ENDPOINTS else None

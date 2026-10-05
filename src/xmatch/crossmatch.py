@@ -47,6 +47,7 @@ from .matchers import (
     _arcsec_to_chord,
     _pos_sigma_arcsec,
     _radec_to_xyz,
+    _validate_coordinate_frames,
     id_join,
     sky_match,
 )
@@ -80,7 +81,7 @@ DEFAULT_RADIUS_ARCSEC = 1.0
 # Geometry/identity overrides the ray-union route honours per catalogue
 # (mirrors the MatchRequest.from_legacy side mapping; --columns-* filtering
 # is sequential-path output concern the union output does not implement).
-_SIDE_OVERRIDE_KEYS = ("ra_column", "dec_column", "id_column")
+_SIDE_OVERRIDE_KEYS = ("ra_column", "dec_column", "id_column", "frame")
 
 
 def _side_overrides(params: Dict[str, Any], side: int) -> Dict[str, Any]:
@@ -468,6 +469,12 @@ class CrossMatch:
                 access_identifier=text,
                 ra_column=overrides.get("ra_column"),
                 dec_column=overrides.get("dec_column"),
+                id_column=overrides.get("id_column"),
+                release_namespace=overrides.get("release_namespace"),
+                release_metadata=overrides.get("release_metadata", {}),
+                photometry=overrides.get("photometry", []),
+                property_evidence=overrides.get("property_evidence", []),
+                frame=overrides.get("frame", "icrs"),
             )
 
         path = Path(text)
@@ -565,6 +572,10 @@ class CrossMatch:
             src = src.with_frame(lf)
             src.name = name
         src.id_column = overrides.get("id_column")
+        src.release_namespace = overrides.get("release_namespace")
+        src.release_metadata = overrides.get("release_metadata", {})
+        src.photometry = overrides.get("photometry", [])
+        src.property_evidence = overrides.get("property_evidence", [])
         src.ra_err_column = overrides.get("ra_err_column")
         src.dec_err_column = overrides.get("dec_err_column")
         src.corr_column = overrides.get("corr_column")
@@ -577,6 +588,7 @@ class CrossMatch:
         src.pm_dec_column = overrides.get("pm_dec_column")
         src.parallax_column = overrides.get("parallax_column")
         src.radial_velocity_column = overrides.get("radial_velocity_column")
+        src.frame = overrides.get("frame", "icrs")
         # Apply explicit overrides first; fall back to auto-detection. Note that
         # we no longer raise on missing RA/Dec here so ``id_join`` flows can
         # operate on tables without spatial columns; the hard error is now
@@ -627,6 +639,11 @@ class CrossMatch:
             ra_column=overrides.get("ra_column") or cfg.get("ra_column"),
             dec_column=overrides.get("dec_column") or cfg.get("dec_column"),
             id_column=overrides.get("id_column") or cfg.get("id_column"),
+            release_namespace=overrides.get("release_namespace", cfg.get("release_namespace")),
+            release_metadata=overrides.get("release_metadata", cfg.get("release_metadata", {})),
+            photometry=overrides.get("photometry", cfg.get("photometry", [])),
+            property_evidence=overrides.get("property_evidence", cfg.get("property_evidence", [])),
+            frame=overrides.get("frame", cfg.get("frame", "icrs")),
             ra_err_column=overrides.get("ra_err_column") or cfg.get("ra_err_column"),
             dec_err_column=overrides.get("dec_err_column") or cfg.get("dec_err_column"),
             corr_column=overrides.get("corr_column") or cfg.get("corr_column"),
@@ -666,6 +683,11 @@ class CrossMatch:
             ra_column=overrides.get("ra_column"),
             dec_column=overrides.get("dec_column"),
             id_column=overrides.get("id_column"),
+            release_namespace=overrides.get("release_namespace"),
+            release_metadata=overrides.get("release_metadata", {}),
+            photometry=overrides.get("photometry", []),
+            property_evidence=overrides.get("property_evidence", []),
+            frame=overrides.get("frame", "icrs"),
             epoch=overrides.get("epoch"),
             epoch_column=overrides.get("epoch_column"),
             pm_ra_column=overrides.get("pm_ra_column"),
@@ -917,6 +939,10 @@ class CrossMatch:
         for cat_input in catalogues[2:]:
             sources.append(self.resolve_source(cat_input, {}))
 
+        _validate_coordinate_frames(
+            sources, target_epoch=req.spec.target_epoch, id_join=req.id_join
+        )
+
         first_src = sources[0]
         n_total = len(sources)
 
@@ -1141,6 +1167,11 @@ class CrossMatch:
             raise CrossMatchError(
                 f"engine='ray-union' supports matcher='sky' only, got matcher='{matcher}'."
             )
+        if params.get("target_epoch") is not None or params.get("pm_prior"):
+            raise CrossMatchError(
+                "engine='ray-union' does not support motion alignment or missing-motion priors; "
+                "align inputs explicitly or use the local candidate-release pipeline."
+            )
         # engine='ray-union' *is* the union engine, so a default join type is
         # treated as the full outer join (only an explicit non-outer choice is
         # an error); engine='ray' needs --union/--join 1or2 to mean "union".
@@ -1258,8 +1289,9 @@ class CrossMatch:
                 # path — with no overrides.
                 sources: List[CatalogueSource] = []
                 for i, cat in enumerate(catalogues, start=1):
-                    overrides = _side_overrides(params, min(i, 2))
+                    overrides = _side_overrides(params, i) if i <= 2 else {}
                     sources.append(self.resolve_source(cat, overrides))
+                _validate_coordinate_frames(sources, target_epoch=params.get("target_epoch"))
                 if not params.get("no_sync"):
                     sources = [
                         ensure_mirrored(
@@ -1385,6 +1417,9 @@ class CrossMatch:
                 preflight_request(req)
                 left = self.resolve_source(req.cat1, req.side1.as_dict())
                 right = self.resolve_source(req.cat2, req.side2.as_dict())
+                _validate_coordinate_frames(
+                    [left, right], target_epoch=req.spec.target_epoch, id_join=req.id_join
+                )
                 if left.is_local and right.is_local and spill_required(req, left, right):
                     spill_req = replace(req, output_file=output_file, lazy=False)
                     self.last_spill_stats = match_to_output(
@@ -1409,6 +1444,10 @@ class CrossMatch:
         sources.append(self.resolve_source(req.cat2, req.side2.as_dict()))
         for cat_input in catalogues[2:]:
             sources.append(self.resolve_source(cat_input, {}))
+
+        _validate_coordinate_frames(
+            sources, target_epoch=req.spec.target_epoch, id_join=req.id_join
+        )
 
         first_src = sources[0]
         n_total = len(sources)
@@ -1638,9 +1677,9 @@ class CrossMatch:
             )
 
         # Resolve all sources and ensure they are local (download if remote).
-        sources: List[CatalogueSource] = []
-        for i, cat_input in enumerate(catalogues):
-            src = self.resolve_source(cat_input, {})
+        sources = [self.resolve_source(cat_input, {}) for cat_input in catalogues]
+        _validate_coordinate_frames(sources)
+        for i, src in enumerate(sources):
             if not src.is_local:
                 if src.access_method in ("tap", "cds_xmatch"):
                     req = MatchRequest.from_legacy(
@@ -1660,7 +1699,7 @@ class CrossMatch:
                         f"Catalogue {i + 1} ('{src.name}') is not local; "
                         f"nway_match requires local or downloadable catalogues."
                     )
-            sources.append(src)
+            sources[i] = src
 
         frames = [s.lazy().collect() for s in sources]
         n_cats = len(sources)
@@ -1866,6 +1905,9 @@ class CrossMatch:
         self.last_spill_stats = None
         src1 = self.resolve_source(req.cat1, req.side1.as_dict())
         src2 = self.resolve_source(req.cat2, req.side2.as_dict())
+        _validate_coordinate_frames(
+            [src1, src2], target_epoch=req.spec.target_epoch, id_join=req.id_join
+        )
 
         if req.memory_budget_bytes is not None and src1.is_local and src2.is_local:
             from .out_of_core import match_to_output, spill_required
@@ -1897,6 +1939,9 @@ class CrossMatch:
         right_suffix: str = _RIGHT_SUFFIX,
         progress_cb: Optional[Callable[[str], None]] = None,
     ) -> pl.LazyFrame:
+        _validate_coordinate_frames(
+            [src1, src2], target_epoch=req.spec.target_epoch, id_join=req.id_join
+        )
         if src1.access_method == "hats" or src2.access_method == "hats":
             from . import hats_native, hats_source
 
@@ -1955,6 +2000,9 @@ class CrossMatch:
         *,
         right_suffix: str = _RIGHT_SUFFIX,
     ) -> pl.LazyFrame:
+        _validate_coordinate_frames(
+            [src1, src2], target_epoch=req.spec.target_epoch, id_join=req.id_join
+        )
         ids = self._id_columns(src1, src2, req)
         if ids:
             return id_join(lf1, lf2, ids[0], ids[1], req.spec.join_type, suffix=right_suffix)

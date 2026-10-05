@@ -60,5 +60,14 @@ data/
 output/
 results/
 
-# Ignore test output files
+# Ignore test and benchmark output files
 tests/outputs/
+benchmark_results/
+cache/
+
+# Tool and package manager caches
+.pixi/
+.mypy_cache/
+.ruff_cache/
+
+

@@ -10,7 +10,7 @@ are materialised by the relevant backend (TAP/CDS/HATS) during execution.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import polars as pl
 
@@ -83,6 +83,13 @@ class CatalogueSource:
     # Local payload (exactly one is set for local sources).
     path: Optional[Path] = None
     _frame: Optional[pl.LazyFrame] = field(default=None, repr=False)
+
+    # Explicit upstream release/measurement metadata. Append fields to preserve
+    # existing positional constructors; never infer survey conventions.
+    release_namespace: Optional[str] = None
+    release_metadata: Dict[str, Any] = field(default_factory=dict)
+    photometry: List[Dict[str, Any]] = field(default_factory=list)
+    property_evidence: List[Dict[str, Any]] = field(default_factory=list)
 
     def lazy(self) -> pl.LazyFrame:
         """Return the catalogue as a LazyFrame (local sources only)."""

@@ -131,35 +131,6 @@ class SyncStats:
         self.converted = self.converted or other.converted
 
 
-def build_sync_plan(
-    src: CatalogueSource,
-    cache: Storage,
-    *,
-    cfg: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Build a cheap per-catalogue sync plan (no data movement).
-
-    Remote HATS: the partition file list known on the server.  TAP: an
-    estimated page count from ``estimated_size``.  Local sources: no work.
-    """
-    cfg = cfg or {}
-    if _is_remote_hats(src):
-        files = _remote_hats_listing(src)
-        return {"type": "hats", "files": files, "host": _rate_host(src)}
-    if src.access_method == "tap":
-        est = _parse_estimated_size(cfg.get("estimated_size"))
-        page_size = int(cfg.get("page_size", DEFAULT_PAGE_SIZE))
-        return {
-            "type": "tap",
-            "pages": max(1, int(est // max(1, page_size))),
-            "host": _rate_host(src),
-            "ceiling_rows": int(_TAP_CEILING_FACTOR * est),
-        }
-    if src.is_local or src.access_method == "hats":
-        return {"type": "local", "files": []}
-    raise CrossMatchError(f"Cannot mirror access method '{src.access_method}'.")
-
-
 # --------------------------------------------------------------------------- #
 # source classification
 # --------------------------------------------------------------------------- #
@@ -891,7 +862,7 @@ def _write_hats_native(
     ``dataset/Norder=…/Dir=…/Npix=….parquet`` pixel files, a root
     ``partition_info.csv`` (plus legacy parquet), and ``properties``.
 
-    ponytail: cdshealpix computes every row's pixel per level (O(N·orders));
+    cdshealpix computes every row's pixel per level (O(N·orders));
     fine for mirror-sized frames, replace with an index scan when a frame
     exceeds ~50M rows.
     """
@@ -929,7 +900,6 @@ def _write_hats_native(
             child = cdshealpix.nested.lonlat_to_healpix(
                 lon, lat, np.full(sub.height, order + 1, dtype=np.uint64)
             )
-            # Bolt: Replaced O(N*K) np.unique/filter with O(N) vectorized partition_by
             parts = sub.with_columns(pl.Series("_mask", child)).partition_by("_mask", as_dict=True)
             for k, psub in parts.items():
                 cpix = k[0]
@@ -1476,22 +1446,13 @@ def ensure_mirrored(
 def _mirrored_source(src: CatalogueSource, cache: Storage, rel: str, root: str) -> CatalogueSource:
     """Build the local-HATS ``CatalogueSource`` for a mirrored copy at ``rel``."""
     path = Path(cache.root) / rel if isinstance(cache, LocalStorage) else None
-    return CatalogueSource(
-        name=src.name,
+    return replace(
+        src,
         is_local=False,
         access_method="hats",
         access_identifier=str(path) if path is not None else f"{root.rstrip('/')}/{rel}",
         path=path,
         hats_cache_rel=rel,
         hats_cache_root=root,
-        ra_column=src.ra_column,
-        dec_column=src.dec_column,
-        id_column=src.id_column,
-        epoch=src.epoch,
-        epoch_column=src.epoch_column,
-        pm_ra_column=src.pm_ra_column,
-        pm_dec_column=src.pm_dec_column,
-        parallax_column=src.parallax_column,
-        radial_velocity_column=src.radial_velocity_column,
-        astrometric_covariance_columns=src.astrometric_covariance_columns,
+        _frame=None,
     )

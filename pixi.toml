@@ -7,8 +7,8 @@ platforms = ["osx-arm64", "linux-64"]
 lint = "ruff check ."
 format = "ruff format ."
 preflight-push = "ruff check . && ruff format --check . && python -m compileall -q src/xmatch tests"
-ci-local = "pixi run preflight-push && pytest tests/test_ci_smoke.py -q"
-test = "pytest"
+ci-local = "pixi run preflight-push && python -m pytest tests/test_astro_utils.py tests/test_io_utils.py -q"
+test = "python -m pytest"
 
 [dependencies]
 # <3.14: hats / cdshealpix / ray do not all ship cp314 wheels yet.

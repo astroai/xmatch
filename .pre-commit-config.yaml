@@ -36,19 +36,6 @@ repos:
 
   - repo: local
     hooks:
-      # Pre-push CI smoke gate.  Fast-fail docs-vs-test drift detector:
-      # the timeout is shorter than the slow/real-catalogue suite so a
-      # count mismatch exits before the slower lint chain runs.
-      # Per-guard rationale lives in tests/test_ci_smoke.py.
-      - id: ci-parity-pre-push-smoke
-        name: pre-push CI smoke gate
-        entry: pixi run test tests/test_ci_smoke.py -v --tb=short
-        language: system
-        pass_filenames: false
-        always_run: true
-        require_serial: true
-        timeout: 60
-        stages: [pre-push]
       - id: ci-parity-pre-push
         name: pre-push lint gate
         entry: pixi run lint

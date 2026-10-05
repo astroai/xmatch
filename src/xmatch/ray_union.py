@@ -241,10 +241,6 @@ def _catalogue_root(src: CatalogueSource, cache_root: Optional[str]) -> Tuple[st
     return str(src.path or src.access_identifier or ""), ""
 
 
-def _storage_rel(rel: str, part: str) -> str:
-    return f"{rel.rstrip('/')}/{part}" if rel else part
-
-
 def _list_partitions(rel: str, storage: Storage) -> List[PartitionPlan]:
     """Locate the standard HATS layout: ``Norder=*/Dir=*/Npix=*.parquet``.
 
@@ -1192,7 +1188,6 @@ def _assemble(plan: UnionPlan) -> Dict[str, Any]:
         hub_parts = plan.catalogues[0].partitions
         max_hub_order = max(p.order for p in hub_parts)
         hub_idx, outside_pix = _rest_hub_keys(frame, cat, hub_parts, max_hub_order)
-        # Bolt: Replaced O(N*K) np.unique/filter with O(N) vectorized partition_by
         hub_parts_dict = (
             frame.with_columns(pl.Series("_k", hub_idx))
             .filter(pl.col("_k") >= 0)
@@ -1317,6 +1312,7 @@ def ray_union_match(
     are recorded in ``resume.state``; rerunning with different parameters
     into the same directory wipes the stale chunks first.
     """
+    matchers._validate_coordinate_frames(list(sources))
     out = Path(str(output_file))
     out.mkdir(parents=True, exist_ok=True)
     task_rows = int(task_rows or DEFAULT_TASK_ROWS)

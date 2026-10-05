@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -424,9 +424,3 @@ def sky_extent_from_frame(
         "dec_center_deg": float(center_dec),
         "radius_deg": max(radius_deg, 1e-6),
     }
-
-
-def list_or_none(value) -> Optional[List[str]]:
-    if value is None:
-        return None
-    return list(value)

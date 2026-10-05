@@ -10,11 +10,24 @@ import tempfile
 from pathlib import Path
 from typing import Iterable, Optional
 
+import numpy as np
 import polars as pl
 
 from . import io_utils
 from .exceptions import CrossMatchError
-from .matchers import _UNIT_TO_ARCSEC, MatchSpec, sky_match
+from .matchers import (
+    _EPOCH_SIGMA,
+    _PROPAGATED_COV_EE,
+    _PROPAGATED_COV_NN,
+    _UNIT_TO_ARCSEC,
+    MatchSpec,
+    _apply_pm_drift_prior,
+    _apply_proper_motion,
+    _astrometric_covariance_mas,
+    _pos_sigma_arcsec,
+    _validate_coordinate_frames,
+    sky_match,
+)
 from .request import MatchRequest, SideOverrides
 from .sources import CatalogueSource
 
@@ -173,7 +186,7 @@ def match_to_output(
                 halo_bands = math.ceil((max_halo_arcsec / 3600.0) / (180.0 / n_dec))
                 for left_zone, left_path in left_zones.items():
                     left_band = left_zone // n_ra
-                    # ponytail: scan every occupied RA cell in the declination halo. This is
+                    # scan every occupied RA cell in the declination halo. This is
                     # exact but can over-read dense bands; upgrade to HEALPix adjacency when
                     # that profiling ceiling is reached.
                     relevant = [
@@ -245,6 +258,7 @@ def match_to_output(
 
 
 def _validate_semantics(req: MatchRequest, src1: CatalogueSource, src2: CatalogueSource) -> None:
+    _validate_coordinate_frames([src1, src2], target_epoch=req.spec.target_epoch)
     if req.id_join:
         raise CrossMatchError(
             "Bounded-memory ID joins are not part of the first local spill tranche."
@@ -262,10 +276,14 @@ def _validate_semantics(req: MatchRequest, src1: CatalogueSource, src2: Catalogu
             "Bounded-memory matching does not yet support priors, extra-distance columns, "
             "or filter expressions."
         )
-    if req.spec.target_epoch is not None or req.spec.pm_prior:
+    if req.spec.pm_prior:
         raise CrossMatchError(
-            "Bounded-memory matching does not yet support proper-motion propagation."
+            "Bounded-memory matching does not yet support a missing-motion prior."
         )
+    if req.spec.target_epoch is not None and (
+        not math.isfinite(req.spec.target_epoch) or req.spec.target_epoch <= 0
+    ):
+        raise CrossMatchError("target_epoch must be a finite positive Julian year.")
     for src in (src1, src2):
         if not src.ra_column or not src.dec_column:
             raise CrossMatchError(f"RA/Dec columns unknown for '{src.name}'.")
@@ -294,6 +312,18 @@ def _required_columns(
     required: list[Optional[str]] = [src.ra_column, src.dec_column]
     if spec.matcher == "skyerr":
         required.extend((src.ra_err_column, src.dec_err_column))
+    if spec.target_epoch is not None:
+        required.extend(
+            (
+                src.epoch_column,
+                src.pm_ra_column,
+                src.pm_dec_column,
+                src.parallax_column,
+                src.radial_velocity_column,
+            )
+        )
+        if spec.matcher == "skyerr" and src.astrometric_covariance_columns:
+            required.extend(src.astrometric_covariance_columns.values())
     selected_set = set(requested) | {name for name in required if name}
     missing = selected_set - set(schema_names)
     if missing:
@@ -339,9 +369,9 @@ def _prepare_inputs(
     spec = req.spec
     matcher = spec.matcher
     if matcher == "skyerr" and not (_has_errors(src1) and _has_errors(src2)):
-        if spec.fallback_policy == "error":
+        if spec.fallback_policy == "error" or spec.target_epoch is not None:
             raise CrossMatchError(
-                "matcher='skyerr' requires positional errors under fallback_policy='error'"
+                "matcher='skyerr' requires positional errors for the requested science"
             )
         logger.warning("skyerr lacks positional errors; bounded-memory matching falls back to sky.")
         spec = dataclasses.replace(spec, matcher="sky")
@@ -352,17 +382,165 @@ def _prepare_inputs(
     lf2 = src2.lazy().select(_required_columns(names2, src2, req.side2, spec))
     _validate_coordinates(lf1, src1)
     _validate_coordinates(lf2, src2)
+    if spec.target_epoch is not None:
+        # Repartition the moved positions, rather than guessing a motion halo.
+        lf1 = _align_epoch(
+            lf1, src1, spec.target_epoch, propagate_covariance=spec.matcher == "skyerr"
+        )
+        lf2 = _align_epoch(
+            lf2, src2, spec.target_epoch, propagate_covariance=spec.matcher == "skyerr"
+        )
     if spec.matcher == "sky":
         return spec, lf1, lf2, float(spec.radius_arcsec)
 
-    lf1 = lf1.with_columns(_sigma_expr(src1, _LEFT_SIGMA))
-    lf2 = lf2.with_columns(_sigma_expr(src2, _RIGHT_SIGMA))
+    lf1 = lf1.with_columns(
+        pl.col(_EPOCH_SIGMA).alias(_LEFT_SIGMA)
+        if spec.target_epoch is not None
+        else _sigma_expr(src1, _LEFT_SIGMA)
+    )
+    lf2 = lf2.with_columns(
+        pl.col(_EPOCH_SIGMA).alias(_RIGHT_SIGMA)
+        if spec.target_epoch is not None
+        else _sigma_expr(src2, _RIGHT_SIGMA)
+    )
     _validate_sigma(lf1, _LEFT_SIGMA, src1)
     _validate_sigma(lf2, _RIGHT_SIGMA, src2)
     max_left = lf1.select(pl.col(_LEFT_SIGMA).max()).collect(engine="streaming").item()
     max_right = lf2.select(pl.col(_RIGHT_SIGMA).max()).collect(engine="streaming").item()
     max_halo = spec.max_error * (float(max_left or 0.0) + float(max_right or 0.0))
     return spec, lf1, lf2, max_halo
+
+
+def _align_epoch(
+    lf: pl.LazyFrame,
+    src: CatalogueSource,
+    epoch: float,
+    *,
+    propagate_covariance: bool = False,
+    pm_prior: bool = False,
+    magnitude_column: Optional[str] = None,
+) -> pl.LazyFrame:
+    """Align batches with measured motion and optional evaluated uncertainty.
+
+    ``skyerr`` uses sqrt(trace(C_position)) from the existing local Jacobian.
+    Five-parameter physical covariance conditions on a declared deterministic
+    radial velocity; uncertain RV is rejected instead of silently dropping its
+    variance. Reference-epoch rows retain their declared positional errors.
+    Explicit ``pm_prior`` supports the existing radial RMS drift model on
+    sides with no measured PM columns; it does not replace invalid measured PM.
+    """
+    if src.frame.lower() != "icrs":
+        raise CrossMatchError("Epoch alignment requires ICRS coordinates.")
+    if not math.isfinite(epoch) or epoch <= 0:
+        raise CrossMatchError("target_epoch must be a finite positive Julian year.")
+    assert src.ra_column and src.dec_column
+    lf = lf.with_columns(pl.col(src.ra_column, src.dec_column).cast(pl.Float64))
+    if propagate_covariance:
+        lf = lf.with_columns(_sigma_expr(src, _EPOCH_SIGMA))
+    if src.epoch_column:
+        reference = pl.col(src.epoch_column).cast(pl.Float64)
+    elif src.epoch is not None:
+        reference = pl.repeat(float(src.epoch), pl.len(), dtype=pl.Float64)
+    else:
+        raise CrossMatchError(f"'{src.name}' needs a known epoch for proper motion alignment.")
+    invalid_epoch = reference.is_null() | ~reference.is_finite() | (reference <= 0)
+    if lf.select(invalid_epoch.sum()).collect(engine="streaming").item():
+        raise CrossMatchError(f"'{src.name}' contains invalid proper motion reference epochs.")
+    moving = reference != epoch
+    prior_only = pm_prior and not (src.pm_ra_column or src.pm_dec_column)
+    if src.pm_ra_column and src.pm_dec_column:
+        pmra = pl.col(src.pm_ra_column).cast(pl.Float64)
+        pmdec = pl.col(src.pm_dec_column).cast(pl.Float64)
+        invalid_motion = moving & (
+            pmra.is_null() | pmdec.is_null() | ~pmra.is_finite() | ~pmdec.is_finite()
+        )
+    else:
+        invalid_motion = moving & pl.lit(not prior_only)
+    if lf.select(invalid_motion.sum()).collect(engine="streaming").item():
+        raise CrossMatchError(
+            f"'{src.name}' needs finite proper motion for rows away from target_epoch; "
+            "supply measured motion or an explicitly stationary model."
+        )
+    if not lf.select(moving.any()).collect(engine="streaming").item():
+        return lf
+
+    def propagate(batch: pl.DataFrame) -> pl.DataFrame:
+        changed = batch.select(moving).to_series().to_numpy()
+        if not changed.any():
+            return batch
+        if prior_only:
+            inflated = _apply_pm_drift_prior(
+                src, src, batch, batch.head(0), epoch, magnitude_column=magnitude_column
+            )[0]
+            sigma = _pos_sigma_arcsec(inflated, src)
+            if sigma is None:
+                raise CrossMatchError(f"'{src.name}' needs positional errors for a motion prior.")
+            return batch.with_columns(pl.Series(_EPOCH_SIGMA, sigma))
+        subset = batch.filter(pl.Series(changed))
+        if propagate_covariance:
+            covariance = _astrometric_covariance_mas(subset, src)
+            if covariance is None:
+                raise CrossMatchError(
+                    f"'{src.name}' needs measured astrometric covariance for target-epoch skyerr."
+                )
+            _, valid_physical, valid_angular = covariance
+            complete = np.zeros(subset.height, dtype=bool)
+            if src.parallax_column and src.radial_velocity_column:
+                parallax = subset[src.parallax_column].to_numpy().astype(float)
+                rv = subset[src.radial_velocity_column].to_numpy().astype(float)
+                complete = np.isfinite(parallax) & (parallax > 0) & np.isfinite(rv)
+            if (
+                complete.any()
+                and src.release_metadata.get("radial_velocity_uncertainty") != "deterministic"
+            ):
+                raise CrossMatchError(
+                    "target-epoch skyerr radial-velocity uncertainty must be explicitly deterministic; five-parameter covariance omits RV uncertainty."
+                )
+            if not np.where(complete, valid_physical, valid_angular).all():
+                raise CrossMatchError(
+                    f"'{src.name}' contains missing or invalid target-epoch astrometric covariance."
+                )
+        moved = _apply_proper_motion(
+            subset,
+            subset.head(0),
+            src,
+            src,
+            epoch,
+            propagate_covariance=propagate_covariance,
+            fallback_policy="error",
+        )[0]
+        columns = []
+        for name in (src.ra_column, src.dec_column):
+            values = batch[name].to_numpy().copy()
+            values[changed] = moved[name].to_numpy()
+            columns.append(pl.Series(name, values))
+        if propagate_covariance:
+            if _PROPAGATED_COV_EE not in moved or _PROPAGATED_COV_NN not in moved:
+                raise CrossMatchError(
+                    "Torchsky target-epoch covariance propagation is unavailable."
+                )
+            east = moved[_PROPAGATED_COV_EE].to_numpy()
+            north = moved[_PROPAGATED_COV_NN].to_numpy()
+            if not (np.isfinite(east) & np.isfinite(north) & (east >= 0) & (north >= 0)).all():
+                raise CrossMatchError("target-epoch positional covariance is invalid.")
+            sigma = batch[_EPOCH_SIGMA].to_numpy().copy()
+            evaluated = np.sqrt(east + north)
+            if src.default_pos_error_arcsec is not None:
+                evaluated = np.maximum(evaluated, src.default_pos_error_arcsec * math.sqrt(2))
+            sigma[changed] = evaluated
+            columns.append(pl.Series(_EPOCH_SIGMA, sigma))
+        return batch.with_columns(columns)
+
+    # This operation preserves row order, schema and identity. Blocking predicate
+    # pushdown ensures every motion row is validated before spatial filtering.
+    return lf.map_batches(
+        propagate,
+        schema=lf.collect_schema(),
+        streamable=True,
+        predicate_pushdown=False,
+        projection_pushdown=False,
+        slice_pushdown=False,
+    )
 
 
 def _validate_coordinates(lf: pl.LazyFrame, src: CatalogueSource) -> None:
@@ -519,6 +697,7 @@ def _match_partition_pair(
         join_type="1and2",
         prior_columns=[],
         batch_size=None,
+        target_epoch=None,  # Positions were already aligned before spatial staging.
     )
     engine = "fast" if req.engine == "auto" else req.engine
     for left_offset, left_len in _slices(left_rows, left_batch_rows):
@@ -711,7 +890,7 @@ def _write_unmatched(
         source = _scan_partition(source_path)
         matched_path = matched_zones.get(zone)
         if matched_path is not None:
-            # ponytail: the anti-join holds IDs for one sky zone; if a single zone
+            # the anti-join holds IDs for one sky zone; if a single zone
             # exceeds RAM, subpartition these markers by original row-ID range.
             matched_ids = _scan_partition(matched_path).select(row_column).unique()
             source = source.join(matched_ids, on=row_column, how="anti")

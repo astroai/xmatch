@@ -14,7 +14,7 @@ For reproducibility and automatic resolution of compiled C/Rust/Fortran dependen
 
 ```bash
 # Clone the repository
-git clone https://github.com/sfabbro/xmatch.git
+git clone https://github.com/astroai/xmatch.git
 cd xmatch
 
 # Install all environments and dependencies

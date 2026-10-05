@@ -63,6 +63,7 @@ _PROPAGATED_COV_EE = "_propagated_cov_ee_arcsec2"
 _PROPAGATED_COV_NN = "_propagated_cov_nn_arcsec2"
 _PROPAGATED_COV_EN = "_propagated_cov_en_arcsec2"
 _PROPAGATED_COV_PREFIX = "_propagated_cov_"
+_EPOCH_SIGMA = "_xmatch_spill_epoch_sigma"
 
 _UNIT_TO_ARCSEC = {"arcsec": 1.0, "mas": 1e-3, "deg": 3600.0, "arcmin": 60.0}
 
@@ -82,7 +83,7 @@ def _first_occurrence_indices(sorted_array: np.ndarray) -> np.ndarray:
     """
     if len(sorted_array) == 0:
         return np.array([], dtype=int)
-    split_points = np.nonzero(sorted_array[1:] != sorted_array[:-1])[0] + 1
+    split_points: np.ndarray = np.nonzero(sorted_array[1:] != sorted_array[:-1])[0] + 1
     return np.concatenate(([0], split_points))
 
 
@@ -125,7 +126,8 @@ class MatchSpec:
     prior_columns: List[str] = field(default_factory=list)
     # Epoch to propagate coordinates to before spatial matching (Julian year).
     # Requires pm_ra_column / pm_dec_column + epoch metadata on the catalogue.
-    # NaN proper motions are treated as zero (no propagation).
+    # Target-epoch skyerr requires measured motion covariance or pm_prior;
+    # unknown motion is an error even with fallback_policy='warn'.
     target_epoch: Optional[float] = None
     # When True, sources that lack measured proper motions get a probabilistic
     # drift prior based on Galactic latitude (and optionally magnitude) instead
@@ -178,6 +180,29 @@ class MatchSpec:
 # --------------------------------------------------------------------------- #
 # polars helpers
 # --------------------------------------------------------------------------- #
+def _validate_coordinate_frames(
+    sources: List[CatalogueSource], *, target_epoch: Optional[float] = None, id_join: bool = False
+) -> None:
+    """Reject comparisons requiring a coordinate transform this matcher lacks."""
+    if id_join:
+        return
+    frames = set()
+    for source in sources:
+        if (
+            not isinstance(source.frame, str)
+            or not source.frame
+            or source.frame != source.frame.strip()
+        ):
+            raise CrossMatchError(f"Catalogue '{source.name}' needs a declared coordinate frame")
+        frames.add(source.frame.lower())
+    if len(frames) > 1:
+        raise CrossMatchError(
+            "Cannot match different coordinate frames; transform inputs to one frame first"
+        )
+    if target_epoch is not None and frames != {"icrs"}:
+        raise CrossMatchError("Target-epoch propagation requires ICRS coordinates")
+
+
 def _gather(df: pl.DataFrame, idx: np.ndarray) -> pl.DataFrame:
     """Return ``df`` rows indexed by *idx* via polars' Arrow-backed path."""
     if len(idx) == 0:
@@ -208,6 +233,10 @@ def _build_result(
     auf_prob: Optional[np.ndarray] = None,
     macauff_prob: Optional[np.ndarray] = None,
 ) -> pl.DataFrame:
+    # Sanitise before renaming so matched and unmatched rows share a schema.
+    prefixes = (_PM_DRIFT_COLUMN, _PROPAGATED_COV_PREFIX, _EPOCH_SIGMA)
+    left = left.drop([c for c in left.columns if c.startswith(prefixes)])
+    right = right.drop([c for c in right.columns if c.startswith(prefixes)])
     right_renamed = _rename_right(right, left.columns, suffix=right_suffix)
 
     matched = _gather(left, left_idx).hstack(_gather(right_renamed, right_idx))
@@ -236,31 +265,6 @@ def _build_result(
         matched = matched.hstack(
             pl.DataFrame({"macauff_prob": np.asarray(macauff_prob, dtype=float)})
         )
-
-    # Drop internal uncertainty-transport columns from output (if present).
-    internal_cols = [
-        c
-        for c in matched.columns
-        if c.startswith(_PM_DRIFT_COLUMN) or c.startswith(_PROPAGATED_COV_PREFIX)
-    ]
-    if internal_cols:
-        matched = matched.drop(internal_cols)
-
-    # Also sanitise left/right so unmatched rows don't leak the column.
-    left = left.drop(
-        [
-            c
-            for c in left.columns
-            if c.startswith(_PM_DRIFT_COLUMN) or c.startswith(_PROPAGATED_COV_PREFIX)
-        ]
-    )
-    right = right.drop(
-        [
-            c
-            for c in right.columns
-            if c.startswith(_PM_DRIFT_COLUMN) or c.startswith(_PROPAGATED_COV_PREFIX)
-        ]
-    )
 
     jt = spec.join_type
     parts = []
@@ -294,7 +298,7 @@ def _has_error_info(src: CatalogueSource) -> bool:
 
 
 def _pos_sigma_arcsec(df: pl.DataFrame, src: CatalogueSource) -> Optional[np.ndarray]:
-    """Per-row positional error radius in arcsec: ``hypot(ra_err, dec_err)``."""
+    """Per-row radial RMS: evaluated epoch covariance or reference errors."""
     factor = _UNIT_TO_ARCSEC.get((src.pos_err_units or "arcsec").lower(), 1.0)
     floor = (
         float(src.default_pos_error_arcsec) * np.sqrt(2)
@@ -306,6 +310,9 @@ def _pos_sigma_arcsec(df: pl.DataFrame, src: CatalogueSource) -> Optional[np.nda
     if _PM_DRIFT_COLUMN in df.columns:
         drift = np.nan_to_num(df[_PM_DRIFT_COLUMN].to_numpy().astype(float), nan=0.0)
 
+    if _EPOCH_SIGMA in df.columns:
+        sigma = df[_EPOCH_SIGMA].to_numpy().astype(float)
+        return np.hypot(sigma, drift) if drift is not None else sigma
     if src.ra_err_column in df.columns and src.dec_err_column in df.columns:
         ra_e = df[src.ra_err_column].to_numpy().astype(float) * factor
         de_e = df[src.dec_err_column].to_numpy().astype(float) * factor
@@ -529,7 +536,7 @@ def _flatten_candidates(
             np.array([], dtype=float),
         )
     right_idx = np.fromiter(itertools.chain.from_iterable(idx_lists), dtype=np.int64, count=total)
-    left_idx = np.repeat(np.arange(len(idx_lists), dtype=np.int64), lens)
+    left_idx: np.ndarray = np.repeat(np.arange(len(idx_lists), dtype=np.int64), lens)
     chords = np.linalg.norm(l_xyz[left_idx] - r_xyz[right_idx], axis=-1)
     return left_idx, right_idx, _chord_to_arcsec(chords)
 
@@ -789,6 +796,10 @@ def _apply_proper_motion(
             admissible = np.hypot(transverse_speed, radial_velocity) < 0.5 * 299_792.458
             rejected = complete & ~admissible
             if np.any(rejected):
+                if fallback_policy == "error":
+                    raise CrossMatchError(
+                        "6D space-motion propagation has physically inconsistent velocity rows."
+                    )
                 logger.warning(
                     "6D space-motion propagation %s: %d physically inconsistent rows "
                     "kept on the angular path",
@@ -989,6 +1000,9 @@ def _apply_pm_drift_prior(
     Returns ``(left, right, left_src, right_src)`` — DataFrames may carry
     a ``_pm_drift_arcsec`` column, sources may have inflated
     ``default_pos_error_arcsec``.
+
+    The empirical dispersion is the existing scalar radial RMS budget, added
+    once to ``hypot(ra_err, dec_err)``; it is not a per-axis covariance model.
     """
 
     def _inflate_side(
@@ -1435,7 +1449,7 @@ def _scipy_match_nd(
         if not np.any(has_match):
             continue
 
-        chunk_left = np.nonzero(has_match)[0].astype(np.int64) + sl_start
+        chunk_left: np.ndarray = np.nonzero(has_match)[0].astype(np.int64) + sl_start
         chunk_right = idx_sp[chunk_left, best_k[has_match]].astype(np.int64)
         chunk_seps = _chord_to_arcsec(
             np.linalg.norm(l_xyz[chunk_left] - r_xyz[chunk_right], axis=-1)
@@ -1705,7 +1719,7 @@ def _engineer_ml_features_and_labels(
 
     n_pairs = left_idx.size
     n_features = 1 + len(available_cols) + 1  # sep + colour_diffs + density
-    X = np.zeros((n_pairs, n_features), dtype=float)
+    X: np.ndarray = np.zeros((n_pairs, n_features), dtype=float)
 
     # Feature 0: normalised separation.
     lsig = _pos_sigma_arcsec(left, left_src)
@@ -1726,7 +1740,7 @@ def _engineer_ml_features_and_labels(
             left[col].to_numpy().astype(float)[left_idx]
             - right[col].to_numpy().astype(float)[right_idx]
         )
-        std = np.nanstd(diff)
+        std = float(np.nanstd(diff))
         if std is None or std == 0 or not np.isfinite(std):
             std = 1.0
         X[:, 1 + k] = np.nan_to_num(diff / std, nan=0.0)
@@ -1746,7 +1760,7 @@ def _engineer_ml_features_and_labels(
     X[:, -1] = np.log1p(density)
 
     # --- pseudo-labels -------------------------------------------------------
-    y_pseudo = np.zeros(n_pairs, dtype=int)
+    y_pseudo: np.ndarray = np.zeros(n_pairs, dtype=int)
     # Primary sort by left_idx, secondary sort by normalised separation (X[:, 0])
     order = np.lexsort((X[:, 0], left_idx))
     sorted_left_idx = left_idx[order]
@@ -1785,7 +1799,7 @@ def _engineer_ml_features_and_labels(
                     l_v = left[col].to_numpy().astype(float)[neg_l_idx]
                     r_v = right[col].to_numpy().astype(float)[neg_r_idx]
                     diff_neg = np.abs(l_v - r_v)
-                    std_neg = np.nanstd(diff_neg)
+                    std_neg = float(np.nanstd(diff_neg))
                     if std_neg is None or std_neg == 0 or not np.isfinite(std_neg):
                         std_neg = 1.0
                     neg_X[:, 1 + k] = np.nan_to_num(diff_neg / std_neg, nan=0.0)
@@ -1969,7 +1983,7 @@ def _ml_rf_score(
             "matcher='ml': scikit-learn not available; "
             "using weighted heuristic (sep + colour diffs)."
         )
-        weights = np.ones(n_features, dtype=float)
+        weights: np.ndarray = np.ones(n_features, dtype=float)
         weights[0] = 2.0  # separation is most important
         probs = 1.0 / (1.0 + np.sum(X[:n_pairs] * weights, axis=1))
         probs = np.clip(probs, 0.0, 1.0)
@@ -2154,7 +2168,7 @@ def _xgb_score(
         logger.info(
             "matcher='xgb': no gradient-boosting library available; using weighted heuristic."
         )
-        weights = np.ones(n_features, dtype=float)
+        weights: np.ndarray = np.ones(n_features, dtype=float)
         weights[0] = 2.0
         probs = np.clip(1.0 / (1.0 + np.sum(X[:n_pairs] * weights, axis=1)), 0.0, 1.0)
 
@@ -3259,6 +3273,7 @@ def sky_match(
     right_suffix: str = _RIGHT_SUFFIX,
 ) -> pl.LazyFrame:
     """Run a positional crossmatch and return a lazy result frame."""
+    _validate_coordinate_frames([left_src, right_src], target_epoch=spec.target_epoch)
     if not left_src.ra_column or not left_src.dec_column:
         raise CrossMatchError(f"RA/Dec columns unknown for '{left_src.name}'.")
     if not right_src.ra_column or not right_src.dec_column:
@@ -3286,9 +3301,11 @@ def sky_match(
         # perturbation method to estimate errors empirically.
         pass
     elif spec.matcher != "sky" and not (_has_error_info(left_src) and _has_error_info(right_src)):
-        if spec.fallback_policy == "error":
+        if spec.fallback_policy == "error" or (
+            spec.matcher == "skyerr" and spec.target_epoch is not None
+        ):
             raise CrossMatchError(
-                f"matcher={spec.matcher!r} requires positional errors under fallback_policy='error'"
+                f"matcher={spec.matcher!r} requires positional errors for the requested science"
             )
         logger.warning(
             "Matcher '%s' needs positional errors on both catalogues; falling back to 'sky'.",
@@ -3300,25 +3317,54 @@ def sky_match(
 
     chosen = engine
     if chosen == "auto":
-        chosen = "stilts" if stilts.stilts_available(stilts_cmd_base) else "fast"
+        chosen = (
+            "fast"
+            if spec.matcher == "skyerr" and spec.target_epoch is not None
+            else "stilts"
+            if stilts.stilts_available(stilts_cmd_base)
+            else "fast"
+        )
+    if chosen == "stilts" and spec.matcher == "skyerr" and spec.target_epoch is not None:
+        raise CrossMatchError(
+            "engine='stilts' cannot consume evaluated target-epoch skyerr uncertainty; "
+            "use an in-process engine."
+        )
 
     # --- proper motion propagation (common to all engines) -----------------
     if spec.target_epoch is not None:
-        if not math.isfinite(float(spec.target_epoch)):
-            raise CrossMatchError("target_epoch must be finite")
-        left_eager = left_lf.collect()
-        right_eager = right_lf.collect()
-        left_eager, right_eager = _apply_proper_motion(
-            left_eager,
-            right_eager,
-            left_src,
-            right_src,
-            float(spec.target_epoch),
-            propagate_covariance=spec.matcher == "skyellipse",
-            fallback_policy=spec.fallback_policy,
-        )
+        target_epoch = float(spec.target_epoch)
+        if not math.isfinite(target_epoch) or target_epoch <= 0:
+            raise CrossMatchError("target_epoch must be finite and positive (Julian year)")
+        if spec.matcher == "skyerr":
+            # One strict covariance path supplies eager search radii and spill halos.
+            from .out_of_core import _align_epoch, _validate_sigma
+
+            def align(lf: pl.LazyFrame, src: CatalogueSource) -> pl.DataFrame:
+                frame = _align_epoch(
+                    lf,
+                    src,
+                    target_epoch,
+                    propagate_covariance=True,
+                    pm_prior=spec.pm_prior,
+                    magnitude_column=spec.pm_prior_magnitude_column,
+                ).collect()
+                _validate_sigma(frame.lazy(), _EPOCH_SIGMA, src)
+                return frame
+
+            left_eager = align(left_lf, left_src)
+            right_eager = align(right_lf, right_src)
+        else:
+            left_eager, right_eager = _apply_proper_motion(
+                left_lf.collect(),
+                right_lf.collect(),
+                left_src,
+                right_src,
+                float(spec.target_epoch),
+                propagate_covariance=spec.matcher == "skyellipse",
+                fallback_policy=spec.fallback_policy,
+            )
         # PM drift prior: inflate errors for sides without measured PMs.
-        if spec.pm_prior:
+        if spec.pm_prior and spec.matcher != "skyerr":
             left_eager, right_eager, left_src, right_src = _apply_pm_drift_prior(
                 left_src,
                 right_src,
@@ -3329,6 +3375,19 @@ def sky_match(
             )
         left_lf = left_eager.lazy()
         right_lf = right_eager.lazy()
+
+    def _collect_side(lf: pl.LazyFrame, src: CatalogueSource, side: str) -> pl.DataFrame:
+        """Materialise one side and validate coordinates before engine dispatch."""
+        from .astro_utils import require_finite_coordinates
+
+        frame = lf.collect()
+        if src.ra_column in frame.columns and src.dec_column in frame.columns and frame.height:
+            require_finite_coordinates(
+                frame[src.ra_column].cast(pl.Float64).to_numpy(),
+                frame[src.dec_column].cast(pl.Float64).to_numpy(),
+                label=f"catalogue '{src.name}' ({side} side)",
+            )
+        return frame
 
     if chosen == "stilts":
         if spec.prior_columns:
@@ -3352,12 +3411,15 @@ def sky_match(
                 "Use engine='fast', 'astropy', or 'zone' for post-match filtering.",
                 spec.filter_expr,
             )
+        # Coordinate errors are input errors, not engine-fallback conditions.
+        left = _collect_side(left_lf, left_src, "left")
+        right = _collect_side(right_lf, right_src, "right")
         try:
             return stilts.stilts_sky_match(
                 left_src,
                 right_src,
-                left_lf.collect(),
-                right_lf.collect(),
+                left,
+                right,
                 spec,
                 stilts_cmd_base=stilts_cmd_base,
                 java_opts=java_opts,
@@ -3371,25 +3433,6 @@ def sky_match(
                 ) from exc
             logger.warning("STILTS match failed (%s); falling back to fast engine.", exc)
             chosen = "fast"
-
-    def _collect_side(lf: pl.LazyFrame, src: CatalogueSource, side: str) -> pl.DataFrame:
-        """Materialise one side and validate its coordinates exactly once.
-
-        Every in-process engine works on collected frames, and a single
-        non-finite latitude used to make ``cdshealpix`` panic with a
-        ``PanicException`` (a ``BaseException``) instead of raising an
-        actionable error.
-        """
-        from .astro_utils import require_finite_coordinates
-
-        frame = lf.collect()
-        if src.ra_column in frame.columns and src.dec_column in frame.columns and frame.height:
-            require_finite_coordinates(
-                frame[src.ra_column].cast(pl.Float64).to_numpy(),
-                frame[src.dec_column].cast(pl.Float64).to_numpy(),
-                label=f"catalogue '{src.name}' ({side} side)",
-            )
-        return frame
 
     if chosen == "astropy":
         left = _collect_side(left_lf, left_src, "left")

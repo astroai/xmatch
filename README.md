@@ -17,9 +17,10 @@ xmatch match catalog1.parquet catalog2.csv -o matches.parquet -r 1.0
 All detailed architectural references, user guides, and roadmaps are organized in the [`docs/`](docs/) directory:
 
 - **[User Guide & Cookbooks (`docs/usage.md`)](docs/usage.md)**: End-to-end recipes covering CLI commands, universal formats, remote archive federation, SOTA matching algorithms, proper motions, out-of-core scaling, and Ray clustering.
-- **[Public API Reference (`docs/api.md`)](docs/api.md)**: Full Python API specifications for `CrossMatch`, `MatchRequest`, `MatchSpec`, engines, storage abstractions, and exception hierarchies.
+- **[Public API Reference (`docs/api.md`)](docs/api.md)**: Full Python API specifications for `CrossMatch`, `MatchRequest`, `MatchSpec`, observation/candidate release helpers, engines, storage abstractions, and exception hierarchies.
 - **[Crossmatch Algorithms & Math (`docs/algorithms.md`)](docs/algorithms.md)**: Comprehensive survey of all 12 implemented algorithms, error covariance modeling, literature citations, and a deep dive into **Astropy vs. SciPy cKDTree**.
-- **[Strategic Roadmap & Release Todos (`docs/roadmap.md`)](docs/roadmap.md)**: Strategic vision toward v1.0, deep Polars integration roadmap, and persistent incremental HATS master unions for sky foundation models.
+- **[Source & Measurement Releases (`docs/observations.md`)](docs/observations.md)**: Lazy, source-preserving measurement ledgers, photometric unit/limit normalization, property evidence, and checksummed Parquet releases.
+- **[Candidate & Association Pipeline (`docs/catalogue-pipeline.md`)](docs/catalogue-pipeline.md)**: End-to-end workflow from pinned survey observation and sparse-candidate releases to per-target association hypotheses.
 - **[Association Contract v1 (`docs/association-v1.md`)](docs/association-v1.md)**: Audit-grade versioned association record specification, release directories, component sidecars, and member equivalence tracking.
 
 ---
@@ -47,8 +48,8 @@ All detailed architectural references, user guides, and roadmaps are organized i
   - Multi-catalogue sequential chains (`crossmatch_multi`).
 - **Local Mirroring & Offline Caching**:
   - `xmatch sync`: Mirror remote TAP and HATS surveys into a durable local HATS cache with keyset paging, rate limiting, and progress checkpoints.
-- **Persistent Full-Sky Master Unions for Sky Models**:
-  - `engine="ray-union"`: Distributed $N$-survey full-outer join producing partitioned HATS directories (`Norder/Dir/Npix.parquet`) to train multimodal astronomical foundation models.
+- **Persistent Full-Sky Master Unions**:
+  - `engine="ray-union"`: Distributed $N$-survey full-outer join producing partitioned HATS directories (`Norder/Dir/Npix.parquet`).
 
 ---
 
@@ -60,7 +61,7 @@ Requires Python $\ge 3.10$.
 
 ```bash
 # Clone the repository
-git clone https://github.com/sfabbro/xmatch.git
+git clone https://github.com/astroai/xmatch.git
 cd xmatch
 
 # Install environment and dependencies
@@ -77,7 +78,7 @@ pixi run preflight-push
 pip install xmatch
 
 # Full installation with all optional accelerators
-pip install "xmatch[hats,ray,torchsky,torchfits]"
+pip install "xmatch[hats,ray,torchsky,torchfits,ml,nway]"
 ```
 
 ---
@@ -131,29 +132,7 @@ bundles = cm.fof_match(
 
 ---
 
-## Benchmark Contract & Engine Promotion
-
-`xmatch` validates spatial engines through a versioned promotion policy:
-
-```bash
-pixi run python scripts/benchmark_contract.py \
-  --left-rows 10000 \
-  --right-rows 100000 \
-  --timed-runs 3 \
-  --engines fast,torchsky \
-  --layouts dense,sparse \
-  --finds best,all \
-  --promotion-engine torchsky \
-  --output benchmark_results/xmatch_engine_matrix.json
-```
-
-- Pinned reports:
-  - [`benchmark_results/xmatch_engine_promotion_10k_100k_macos_arm64.json`](benchmark_results/xmatch_engine_promotion_10k_100k_macos_arm64.json)
-  - [`benchmark_results/xmatch_engine_promotion_10k_100k_torchsky_4113f94_macos_arm64.json`](benchmark_results/xmatch_engine_promotion_10k_100k_torchsky_4113f94_macos_arm64.json)
-- Correctness parity passes in all cases; `engine="fast"` remains the automatic default until memory and wall-time criteria on dense patches are satisfied.
-
----
-
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
+

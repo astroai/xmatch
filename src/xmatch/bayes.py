@@ -109,21 +109,6 @@ def compute_p_match(
     return np.clip(p_match, 0.0, 1.0)
 
 
-def bayes_factor_log10(
-    sep_arcsec: np.ndarray,
-    sigma_left: np.ndarray,
-    sigma_right: np.ndarray,
-    radius_arcsec: float,
-) -> np.ndarray:
-    """Return ``log10 B = log10(p_match / p_background)`` per pair.
-
-    A diagnostic only — :func:`compute_p_match` is the user-facing score.
-    """
-    post = positional_log_likelihood(sep_arcsec, sigma_left, sigma_right)
-    bg = background_log_likelihood(sep_arcsec, radius_arcsec)
-    return (post - bg) / math.log(10.0)
-
-
 # --------------------------------------------------------------------------- #
 # Budavári-correct KDE: fit on unconditional sample, evaluate at matched pairs.
 # --------------------------------------------------------------------------- #

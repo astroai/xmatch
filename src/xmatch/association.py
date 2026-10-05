@@ -569,7 +569,7 @@ def write_association_release(
 
         if target.exists():
             raise FileExistsError(f"association release path already exists: {target}")
-        # ponytail: one local publisher owns a target path; concurrent object-store
+        # one local publisher owns a target path; concurrent object-store
         # publication should use the provider's conditional-create primitive.
         temporary.rename(target)
         return manifest
@@ -837,7 +837,7 @@ def _validated_member_equivalences(
     digest = hashlib.sha256()
     previous_id: str | None = None
     count = 0
-    # ponytail: bijection validation is O(rows) memory; use an external unique
+    # bijection validation is O(rows) memory; use an external unique
     # index when crosswalk releases outgrow one host.
     parent_members: set[AssociationComponentMember] = set()
     current_members: set[AssociationComponentMember] = set()
@@ -1033,7 +1033,7 @@ def write_association_member_equivalence_release(
             os.fsync(handle.fileno())
         if target.exists():
             raise FileExistsError(f"association member equivalence path already exists: {target}")
-        # ponytail: one local publisher owns a target path; object stores need
+        # one local publisher owns a target path; object stores need
         # their native conditional-create primitive for concurrent publication.
         temporary.rename(target)
         return manifest
@@ -1389,7 +1389,7 @@ def _validated_component_memberships(
     current_member_count = 0
     membership_count = 0
     component_count = 0
-    # ponytail: exact partition validation uses O(members) memory; replace this
+    # exact partition validation uses O(members) memory; replace this
     # set with an external unique index when one release outgrows local memory.
     seen_members: set[tuple[str, str]] = set()
 
@@ -1603,7 +1603,7 @@ def write_association_component_release(
         component_count = 0
         membership_count = 0
         previous_component_id: str | None = None
-        # ponytail: exact partition validation uses O(members) memory; replace
+        # exact partition validation uses O(members) memory; replace
         # this set with an external unique index for survey-scale releases.
         seen_members: set[tuple[str, str]] = set()
         memberships_path = temporary / _COMPONENT_MEMBERSHIPS
@@ -1646,7 +1646,7 @@ def write_association_component_release(
                         component_id=component_id,
                         input_release_id=member.input_release_id,
                         member_id=member.member_id,
-                        # ponytail: repeating lineage keeps one canonical stream;
+                        # repeating lineage keeps one canonical stream;
                         # a future schema can split it out if components become huge.
                         parent_component_ids=component.parent_component_ids,
                     )
@@ -1679,7 +1679,7 @@ def write_association_component_release(
 
         if target.exists():
             raise FileExistsError(f"association component release path already exists: {target}")
-        # ponytail: one local publisher owns a target path; concurrent object-store
+        # one local publisher owns a target path; concurrent object-store
         # publication should use the provider's conditional-create primitive.
         temporary.rename(target)
         return manifest
@@ -1717,13 +1717,16 @@ def construct_association_components(
     source_input_release_id: str,
     candidate_input_release_id: str,
     included_decisions: Iterable[AssociationDecision],
+    additional_members: Iterable[AssociationComponentMember] = (),
     parent_component_directory: str | os.PathLike[str] | None = None,
     member_equivalence_directory: str | os.PathLike[str] | None = None,
 ) -> list[AssociationComponent]:
     """Build deterministic connected components from an association release.
 
     Endpoint release IDs and included decisions are required so construction
-    never guesses catalogue namespaces or scientific acceptance policy.
+    never guesses catalogue namespaces or scientific acceptance policy. Supply
+    inventory members to retain isolated sources and sources whose edges were
+    excluded by that policy; connectivity alone does not assert object identity.
     """
     manifest = verify_association_release(association_release_directory)
     endpoint_releases = (
@@ -1759,7 +1762,7 @@ def construct_association_components(
                 current_input_release_ids=manifest.provenance.input_release_ids,
             )
 
-    # ponytail: union-find retains O(nodes) state; survey-scale construction
+    # union-find retains O(nodes) state; survey-scale construction
     # should move this exact contract behind an external graph engine.
     roots: dict[AssociationComponentMember, AssociationComponentMember] = {}
 
@@ -1781,6 +1784,15 @@ def construct_association_components(
                 roots[right_root] = left_root
             else:
                 roots[left_root] = right_root
+
+    for member in additional_members:
+        if not isinstance(member, AssociationComponentMember):
+            raise ValueError("additional_members must contain AssociationComponentMember values")
+        if member.input_release_id not in manifest.provenance.input_release_ids:
+            raise ValueError(
+                "additional member input release is absent from association provenance"
+            )
+        find(member)
 
     for record in iter_association_release(association_release_directory):
         if record.decision not in decisions:
@@ -2387,7 +2399,7 @@ def write_association_component_delta_release(
             os.fsync(handle.fileno())
         if target.exists():
             raise FileExistsError(f"association component delta path already exists: {target}")
-        # ponytail: one local publisher owns a target path; object stores need
+        # one local publisher owns a target path; object stores need
         # their native conditional-create operation for concurrent publication.
         temporary.rename(target)
         return manifest
