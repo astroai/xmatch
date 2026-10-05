@@ -28,7 +28,6 @@ mypy = ">=2.0"
 
 [pypi-dependencies]
 xmatch = { path = ".", editable = true }
-nway = ">=4.7.1"
 # HATS-native Ray union engine: always in the dev env so CI runs the new tests.
 # (Optional extras `hats` / `hats-ray` / `ray` in pyproject.toml stay for pip users.)
 hats = ">=0.7"

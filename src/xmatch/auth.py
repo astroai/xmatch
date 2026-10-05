@@ -29,11 +29,10 @@ class AuthConfig:
             logger.debug("AuthConfig initialized (no authenticated sessions).")
 
     def _load_auth_from_sources(self) -> dict[str, Any]:
-        """Load authentication details from environment and keyring."""
-        logger.debug("Loading authentication details from environment / keyring...")
+        """Load authentication details from environment variables."""
+        logger.debug("Loading authentication details from environment...")
         loaded_auth = {}
 
-        # 1) Environment variables (preferred for CLI/CI usage).
         known_services = ["noao_datalab", "gaia_archive", "vizier", "cadc"]
         for service_name in known_services:
             env_prefix = f"XMATCH_{service_name.upper()}"
@@ -42,28 +41,6 @@ class AuthConfig:
             if username and password:
                 logger.info("Found credentials for '%s' in environment variables.", service_name)
                 loaded_auth[service_name] = _make_basic_auth_session(username, password)
-
-        # 2) Keyring (optional fallback for desktop users).
-        try:
-            import keyring
-        except ImportError:
-            keyring = None  # type: ignore[assignment]
-
-        if keyring is not None:
-            for service_name in known_services:
-                if service_name in loaded_auth:
-                    continue  # env var already provided it
-                try:
-                    username = keyring.get_password(service_name, "username")
-                    password = keyring.get_password(service_name, "password")
-                    if username and password:
-                        logger.info("Found credentials for '%s' in keyring.", service_name)
-                        loaded_auth[service_name] = _make_basic_auth_session(username, password)
-                    else:
-                        logger.debug("No keyring credentials for '%s'.", service_name)
-                except Exception:
-                    # Expected on headless/CI — no working keyring backend.
-                    logger.debug("Keyring unavailable for '%s' (no backend).", service_name)
 
         return loaded_auth
 

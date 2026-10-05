@@ -25,20 +25,8 @@ import pytest
 
 from tests.conftest import BENCH_RESULTS  # shared accumulator
 from xmatch import stilts
-from xmatch.matchers import MatchSpec, _pos_sigma_arcsec, sky_match
+from xmatch.matchers import MatchSpec, sky_match
 from xmatch.sources import CatalogueSource
-
-# --------------------------------------------------------------------------- #
-# Optional nway import (Bayesian multi-catalogue crossmatcher).
-# Install with ``pip install nway`` or ``pixi add --pypi nway``.
-# --------------------------------------------------------------------------- #
-_nway_available = False
-try:
-    import nwaylib  # noqa: F401
-
-    _nway_available = True
-except ImportError:
-    _nway_available = False
 
 # --------------------------------------------------------------------------- #
 # Imports from the real-catalogue test module (tests/ is a package).
@@ -73,8 +61,6 @@ def _available_engines() -> list[str]:
         engines.append("zone")  # falls back to fast if cdshealpix missing
     except ImportError:
         pass
-    if _nway_available:
-        engines.append("nway")
     _known_engines[:] = engines
     return _known_engines
 
@@ -161,85 +147,6 @@ def _raw_astropy_match(
     return float(np.median(times)), n_matches
 
 
-def _nway_match(
-    left_src: CatalogueSource,
-    right_src: CatalogueSource,
-    spec: MatchSpec,
-    *,
-    n_warmup: int = 1,
-    n_timed: int = 3,
-) -> tuple[float, int]:
-    """Run nway's Bayesian multi-catalogue crossmatch and time it.
-
-    Converts polars frames to nway's ``match_tables`` dict format, calls
-    ``nwaylib.nway_match()``, and returns (median_seconds, n_high_prob_matches).
-    The match count is the number of pairs with ``p_any >= 0.5``.
-
-    Requires ``nway`` to be installed (``pip install nway``).
-    """
-    import nwaylib
-
-    left = left_src.lazy().collect()
-    right = right_src.lazy().collect()
-
-    # All cached catalogues use the same 0.5° cone radius.
-    cone_radius_deg = 0.5
-    area_deg2 = np.pi * (cone_radius_deg**2)
-
-    # nway requires per-row positional errors.  Use xmatch's helper;
-    # when unavailable, fall back to a 0.5 arcsec floor.
-    def _nway_error(df, s):
-        sigma = _pos_sigma_arcsec(df, s)
-        if sigma is None:
-            sigma = np.full(df.height, 0.5, dtype=float)
-        return sigma
-
-    # Build match_tables — nway takes a list of catalogue dicts.
-    match_tables = [
-        {
-            "name": left_src.name[:8],
-            "ra": left[left_src.ra_column].to_numpy().astype(float),
-            "dec": left[left_src.dec_column].to_numpy().astype(float),
-            "error": _nway_error(left, left_src),
-            "area": area_deg2,
-            "mags": [],
-            "magnames": [],
-            "maghists": [],
-        },
-        {
-            "name": right_src.name[:8],
-            "ra": right[right_src.ra_column].to_numpy().astype(float),
-            "dec": right[right_src.dec_column].to_numpy().astype(float),
-            "error": _nway_error(right, right_src),
-            "area": area_deg2,
-            "mags": [],
-            "magnames": [],
-            "maghists": [],
-        },
-    ]
-
-    match_radius = spec.radius_arcsec
-
-    for _ in range(n_warmup):
-        nwaylib.nway_match(match_tables, match_radius, prior_completeness=0.9)
-
-    times = []
-    result = None
-    for _ in range(n_timed):
-        t0 = time.perf_counter()
-        result = nwaylib.nway_match(match_tables, match_radius, prior_completeness=0.9)
-        times.append(time.perf_counter() - t0)
-
-    # Count matches with p_any >= 0.5 (nway's high-confidence threshold).
-    # nway names the output column {primary_name}_p_any.
-    n_high_prob = 0
-    if result is not None:
-        p_any_cols = [c for c in result.colnames if c.endswith("_p_any")]
-        if p_any_cols:
-            n_high_prob = int((result[p_any_cols[0]] >= 0.5).sum())
-    return float(np.median(times)), n_high_prob
-
-
 # NOTE: BENCH_RESULTS is imported from tests.conftest as session-scoped shared state.
 # It is safe under sequential pytest execution (the default). Forked/multi-process
 # runners (pytest-xdist, --forked) will each have their own copy; benchmark results
@@ -307,15 +214,8 @@ def test_bench_gaia_self(radius_arcsec: float, find: str, gaia_csv, request):
     spec = MatchSpec(radius_arcsec=radius_arcsec, find=find)
 
     for engine in _resolve_engines(request):
-        if engine == "nway":
-            try:
-                elapsed, n = _nway_match(src, src, spec)
-                _record_raw("Gaia self", spec, "nway", elapsed, n)
-            except Exception:
-                pass
-        else:
-            elapsed, result, left_n, right_n = _time_match(src, src, spec, engine)
-            _record("Gaia self", src, src, engine, elapsed, result, left_n, right_n, spec)
+        elapsed, result, left_n, right_n = _time_match(src, src, spec, engine)
+        _record("Gaia self", src, src, engine, elapsed, result, left_n, right_n, spec)
 
     try:
         elapsed, n = _raw_astropy_match(src, src, spec)
@@ -333,25 +233,18 @@ def test_bench_gaia_x_allwise(radius_arcsec: float, gaia_csv, allwise_csv, reque
     spec = MatchSpec(radius_arcsec=radius_arcsec, find="best")
 
     for engine in _resolve_engines(request):
-        if engine == "nway":
-            try:
-                elapsed, n = _nway_match(left_src, right_src, spec)
-                _record_raw("Gaia x AllWISE", spec, "nway", elapsed, n)
-            except Exception:
-                pass
-        else:
-            elapsed, result, left_n, right_n = _time_match(left_src, right_src, spec, engine)
-            _record(
-                "Gaia x AllWISE",
-                left_src,
-                right_src,
-                engine,
-                elapsed,
-                result,
-                left_n,
-                right_n,
-                spec,
-            )
+        elapsed, result, left_n, right_n = _time_match(left_src, right_src, spec, engine)
+        _record(
+            "Gaia x AllWISE",
+            left_src,
+            right_src,
+            engine,
+            elapsed,
+            result,
+            left_n,
+            right_n,
+            spec,
+        )
 
     try:
         elapsed, n = _raw_astropy_match(left_src, right_src, spec)
@@ -368,17 +261,10 @@ def test_bench_gaia_x_usno(gaia_csv, usno_csv, request):
     spec = MatchSpec(radius_arcsec=2.0, find="best")
 
     for engine in _resolve_engines(request):
-        if engine == "nway":
-            try:
-                elapsed, n = _nway_match(left_src, right_src, spec)
-                _record_raw("Gaia x USNO-B", spec, "nway", elapsed, n)
-            except Exception:
-                pass
-        else:
-            elapsed, result, left_n, right_n = _time_match(left_src, right_src, spec, engine)
-            _record(
-                "Gaia x USNO-B", left_src, right_src, engine, elapsed, result, left_n, right_n, spec
-            )
+        elapsed, result, left_n, right_n = _time_match(left_src, right_src, spec, engine)
+        _record(
+            "Gaia x USNO-B", left_src, right_src, engine, elapsed, result, left_n, right_n, spec
+        )
 
     try:
         elapsed, n = _raw_astropy_match(left_src, right_src, spec)
@@ -394,15 +280,8 @@ def test_bench_allwise_self(allwise_csv, request):
     spec = MatchSpec(radius_arcsec=0.5, find="best")
 
     for engine in _resolve_engines(request):
-        if engine == "nway":
-            try:
-                elapsed, n = _nway_match(src, src, spec)
-                _record_raw("AllWISE self", spec, "nway", elapsed, n)
-            except Exception:
-                pass
-        else:
-            elapsed, result, left_n, right_n = _time_match(src, src, spec, engine)
-            _record("AllWISE self", src, src, engine, elapsed, result, left_n, right_n, spec)
+        elapsed, result, left_n, right_n = _time_match(src, src, spec, engine)
+        _record("AllWISE self", src, src, engine, elapsed, result, left_n, right_n, spec)
 
     try:
         elapsed, n = _raw_astropy_match(src, src, spec)

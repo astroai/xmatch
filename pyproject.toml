@@ -50,15 +50,6 @@ torchsky = ["torchsky>=0.4.0.dev0"]
 ray = ["ray>=2.50", "cdshealpix>=0.8"]
 # Machine-learning and gradient-boosted probabilistic matchers.
 ml = ["scikit-learn", "xgboost", "lightgbm", "joblib"]
-# Bayesian N-way simultaneous crossmatching backend.
-nway = ["nway>=4.7.1"]
-# Optional keyring backends for desktop credential storage.
-keyring_backends = [
-    "keyring>=25.0",
-    "keyrings.cryptfile",
-    "keyrings.osx",
-    "keyrings.alt",
-]
 dev = [
     "pytest>=9.0",
     "ruff>=0.15",

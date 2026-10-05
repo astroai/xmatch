@@ -31,7 +31,7 @@ pixi run preflight-push
 pip install xmatch
 
 # Full scientific stack with all optional extras
-pip install "xmatch[cds,hats,ray,torchsky,torchfits,ml,nway]"
+pip install "xmatch[cds,hats,ray,torchsky,torchfits,ml]"
 ```
 
 #### Optional Dependency Extras
@@ -46,8 +46,6 @@ pip install "xmatch[cds,hats,ray,torchsky,torchfits,ml,nway]"
 | `[torchfits]` | `torchfits` | `[IMPLEMENTED]` | High-speed, Arrow/Polars-native local FITS table reader. |
 | `[torchsky]` | `torchsky` | `[IMPLEMENTED]` | Tensor-native nearest-neighbour spatial engine with coarse HEALPix pruning. |
 | `[ml]` | `scikit-learn`, `xgboost`, `lightgbm`, `joblib` | `[IMPLEMENTED]` | Machine-learning (`matcher="ml"`) and gradient-boosted (`matcher="xgb"`) probabilistic matchers. |
-| `[nway]` | `nway` | `[IMPLEMENTED]` | Bayesian $N$-way simultaneous crossmatching backend. |
-| `[keyring_backends]` | `keyring`, `keyrings.*` | `[IMPLEMENTED]` | Optional desktop keyring backends for authenticated archive sessions. |
 
 ---
 

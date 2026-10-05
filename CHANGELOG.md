@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Updated Python requirement to $\ge 3.13$ (with full Python 3.14 compatibility) and modernized all type annotations to PEP 585 / PEP 604 built-ins.
-- Trimmed core runtime dependencies to `numpy`, `polars`, `pyarrow`, `astropy`, `scipy`, `pyyaml`, and `pyvo`: replaced the `pandas` table fallback with a direct PyArrow/NumPy `Table`/`MaskedColumn` bridge, moved `astroquery` to the optional `xmatch[cds]` extra, and lazy-loaded `requests` and `keyring` for authenticated sessions.
+- Trimmed core runtime dependencies to `numpy`, `polars`, `pyarrow`, `astropy`, `scipy`, `pyyaml`, and `pyvo`: replaced the `pandas` table fallback with a direct PyArrow/NumPy `Table`/`MaskedColumn` bridge, moved `astroquery` to the optional `xmatch[cds]` extra, removed obsolete `keyring`/`nway` extras, and lazy-loaded `requests` for authenticated sessions.
 
 ### Fixed
 

@@ -297,11 +297,8 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-4.1.1-pyh5ded981_0.conda
       - pypi: ./
-      - pypi: https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/2c/58/ca301544e1fa93ed4f80d724bf5b194f6e4b945841c5bfd555878eea9fcb/referencing-0.37.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/35/05/9e0fbbe13d130d1a3d12ce0297c18524d1f99cf82a1a748708b4cdfb9e64/healpy-1.20.1-cp313-cp313-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/4c/93/8823fc4edfd692f53c4e1690276521ba6ee8f477a4b52c8143b4df95fac2/nway-4.7.1-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/63/e0/cec6865dfe88cb48fedd4b20aed6af5158e41092adcbf3e028bcc6ec2108/markupsafe-3.0.4-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl
@@ -312,7 +309,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/99/91/8acff4f5e50511b911bbccb72b8628a49c68ce14148cd9f6431094859a90/annotated_types-0.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9b/d3/13a0d2cdbd323187c111883d4bc1510eba51ba7e1b1574fd441cf0c917e1/mocpy-0.20.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/a0/36/76fab39973ee11e7f9f357c55138197bb01c86f6502cb76487e3b4f42db0/rpds_py-2026.9.1-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/a7/03/921a3d3c75785aca9ebfbfcabfbc3a1be12e2ab5265deb026d55a5a3f83e/tqdm-4.70.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a8/e7/3782d0b5c7b623adc7500ecce11fcfa234ca0b4b4dca5a8f85e6dee94291/nested_pandas-0.7.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/aa/b1/0b504ae34d1b79a6482a0ffcbfd1b103dde02329c11525033e02633f7984/numba-0.68.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/b0/30/c394d37898db9212d1693456cdf363c7e1a097d0b63e10664007f3df3ec1/msgpack-1.2.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
@@ -592,14 +588,12 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zstd-1.5.7-hf451053_7.conda
       - pypi: ./
       - pypi: https://files.pythonhosted.org/packages/05/e6/df7f2c9ebb94760113debbcea2bd3afe5fdab88a4f7bec1b618755517460/msgpack-1.2.3-cp313-cp313-macosx_11_0_arm64.whl
-      - pypi: https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/21/43/6323b1f8b217780454c61304bcd2b38ae4762f50754414124603ccc90bb2/pydantic_core-2.46.5-cp313-cp313-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/2c/58/ca301544e1fa93ed4f80d724bf5b194f6e4b945841c5bfd555878eea9fcb/referencing-0.37.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/32/72/98342feb672507c8f3a69e34b4fa8961f608edba5c1a48a6f47156d92cb5/protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/35/9c/c683d754f2f183c1e8375f846f26f9a75c86889609e036b10e76420cd91d/mocpy-0.20.0-cp313-cp313-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/36/68/02de46b3f764f942bc4c2385dd5ceb0d471131df1f60c63f05634e8bb082/cdshealpix-0.8.1-cp313-cp313-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/4c/93/8823fc4edfd692f53c4e1690276521ba6ee8f477a4b52c8143b4df95fac2/nway-4.7.1-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/57/71/a097d6552f837500fc36e6b23d09cfb9890c3cc47531f9ca64e149799615/rpds_py-2026.9.1-cp313-cp313-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl
@@ -607,10 +601,8 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/75/6f/55bc5837e9fe7a86a5acb553adec901257d709062bfaef7debd4d8cfee12/jproperties-2.1.2-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/83/ae/676feae8e4644a6d7169951a97f61c56f416c73f67bf1761f2461d75cc81/deprecated-3.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/88/78/1c104709950e58ae8d90e7a9d12647d1320e62ce71c126472159410118cd/hats-0.11.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/93/62/2218952cef6e067e645dfb5443e977422d8c8417c0c6a07f834245af537f/healpy-1.20.1.tar.gz
       - pypi: https://files.pythonhosted.org/packages/99/91/8acff4f5e50511b911bbccb72b8628a49c68ce14148cd9f6431094859a90/annotated_types-0.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/4d/42754c94f8f909b9981fd44d28292a93bca6429d93f3e1ae58ac7de9b08b/numba-0.68.0-cp313-cp313-macosx_12_0_arm64.whl
-      - pypi: https://files.pythonhosted.org/packages/a7/03/921a3d3c75785aca9ebfbfcabfbc3a1be12e2ab5265deb026d55a5a3f83e/tqdm-4.70.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a8/e7/3782d0b5c7b623adc7500ecce11fcfa234ca0b4b4dca5a8f85e6dee94291/nested_pandas-0.7.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b1/29/c028a0731e202035f0e2e0bfbf1a3e46ad6c628cbb17f6f1cc9eea5d9ff1/pathlib_abc-0.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b8/1f/1d585b2122bcc9fe1615c0097730baebdef1b80e6acd07fe921ee501576b/llvmlite-0.50.0-cp313-cp313-macosx_12_0_arm64.whl
@@ -7663,11 +7655,6 @@ packages:
   - xgboost ; extra == 'ml'
   - lightgbm ; extra == 'ml'
   - joblib ; extra == 'ml'
-  - nway>=4.7.1 ; extra == 'nway'
-  - keyring>=25.0 ; extra == 'keyring-backends'
-  - keyrings-cryptfile ; extra == 'keyring-backends'
-  - keyrings-osx ; extra == 'keyring-backends'
-  - keyrings-alt ; extra == 'keyring-backends'
   - pytest>=9.0 ; extra == 'dev'
   - ruff>=0.15 ; extra == 'dev'
   - mypy>=2.0 ; extra == 'dev'
@@ -7676,36 +7663,6 @@ packages:
   name: msgpack
   version: 1.2.3
   sha256: db84203b13aecc222f465061397fdd5b53b7ae73d2c95ffc1c8dc5be0153a709
-  requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl
-  name: joblib
-  version: 1.6.0
-  sha256: 3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba
-  requires_dist:
-  - cloudpickle>=3.0
-  - distributed ; extra == 'test'
-  - lz4 ; extra == 'test'
-  - numpy ; extra == 'test'
-  - memory-profiler ; extra == 'test'
-  - pytest ; extra == 'test'
-  - pytest-asyncio ; extra == 'test'
-  - pytest-cov ; extra == 'test'
-  - pytest-run-parallel ; extra == 'test'
-  - pytest-timeout ; extra == 'test'
-  - threadpoolctl ; extra == 'test'
-  - distributed ; extra == 'docs'
-  - lz4 ; extra == 'docs'
-  - numpy ; extra == 'docs'
-  - numpydoc ; extra == 'docs'
-  - matplotlib ; extra == 'docs'
-  - pandas ; extra == 'docs'
-  - psutil ; extra == 'docs'
-  - sphinx ; extra == 'docs'
-  - pydata-sphinx-theme ; extra == 'docs'
-  - sphinx-gallery ; extra == 'docs'
-  - sphinx-copybutton ; extra == 'docs'
-  - sphinx-design ; extra == 'docs'
-  - tqdm ; extra == 'docs'
   requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/21/43/6323b1f8b217780454c61304bcd2b38ae4762f50754414124603ccc90bb2/pydantic_core-2.46.5-cp313-cp313-macosx_11_0_arm64.whl
   name: pydantic-core
@@ -7727,30 +7684,6 @@ packages:
   name: protobuf
   version: 7.36.2
   sha256: cbc70b17ee27e28894c7fee8bb04be1abead49e936bc70eb60052531eee2079e
-  requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/35/05/9e0fbbe13d130d1a3d12ce0297c18524d1f99cf82a1a748708b4cdfb9e64/healpy-1.20.1-cp313-cp313-manylinux_2_28_x86_64.whl
-  name: healpy
-  version: 1.20.1
-  sha256: 4bc6cced86a14868d74df7ca3cb9240715437477bc5e5c087a714679dc7b5119
-  requires_dist:
-  - numpy>=2.0.0
-  - astropy
-  - matplotlib ; extra == 'all'
-  - scipy ; extra == 'all'
-  - pytest ; extra == 'test'
-  - pytest-astropy-header ; extra == 'test'
-  - pytest-cython ; extra == 'test'
-  - pytest-doctestplus ; extra == 'test'
-  - requests ; extra == 'test'
-  - matplotlib ; extra == 'test'
-  - scipy ; extra == 'test'
-  - ipykernel ; extra == 'doc'
-  - matplotlib ; extra == 'doc'
-  - nbsphinx ; extra == 'doc'
-  - numpydoc ; extra == 'doc'
-  - sphinxnotebookgist ; extra == 'doc'
-  - sphinx>=6,<9 ; extra == 'doc'
-  - sphinx-book-theme ; extra == 'doc'
   requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/35/9c/c683d754f2f183c1e8375f846f26f9a75c86889609e036b10e76420cd91d/mocpy-0.20.0-cp313-cp313-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
   name: mocpy
@@ -7808,23 +7741,6 @@ packages:
   requires_dist:
   - referencing>=0.31.0
   requires_python: '>=3.9'
-- pypi: https://files.pythonhosted.org/packages/4c/93/8823fc4edfd692f53c4e1690276521ba6ee8f477a4b52c8143b4df95fac2/nway-4.7.1-py2.py3-none-any.whl
-  name: nway
-  version: 4.7.1
-  sha256: fc740aca5a1fdc7b789ee3f45cf640530fba58bcac129ec0a721a01ef3a454f4
-  requires_dist:
-  - astropy
-  - healpy
-  - joblib
-  - matplotlib
-  - numpy
-  - pandas
-  - scipy
-  - tqdm
-  - sphinx-bootstrap-theme ; extra == 'doc'
-  - sphinxcontrib-bibtex ; extra == 'doc'
-  - pytest ; extra == 'test'
-  requires_python: '>=3.8'
 - pypi: https://files.pythonhosted.org/packages/57/71/a097d6552f837500fc36e6b23d09cfb9890c3cc47531f9ca64e149799615/rpds_py-2026.9.1-cp313-cp313-macosx_11_0_arm64.whl
   name: rpds-py
   version: 2026.9.1
@@ -7930,30 +7846,6 @@ packages:
   - lsst-sphgeom ; (sys_platform == 'darwin' and extra == 'full') or (sys_platform == 'linux' and extra == 'full')
   - matplotlib>=3.10.1 ; extra == 'full'
   requires_python: '>=3.11'
-- pypi: https://files.pythonhosted.org/packages/93/62/2218952cef6e067e645dfb5443e977422d8c8417c0c6a07f834245af537f/healpy-1.20.1.tar.gz
-  name: healpy
-  version: 1.20.1
-  sha256: 000203dafd09f6cb864147b8308661b405a0f8a9dba10bc0842b7ddfb40717fe
-  requires_dist:
-  - numpy>=2.0.0
-  - astropy
-  - matplotlib ; extra == 'all'
-  - scipy ; extra == 'all'
-  - pytest ; extra == 'test'
-  - pytest-astropy-header ; extra == 'test'
-  - pytest-cython ; extra == 'test'
-  - pytest-doctestplus ; extra == 'test'
-  - requests ; extra == 'test'
-  - matplotlib ; extra == 'test'
-  - scipy ; extra == 'test'
-  - ipykernel ; extra == 'doc'
-  - matplotlib ; extra == 'doc'
-  - nbsphinx ; extra == 'doc'
-  - numpydoc ; extra == 'doc'
-  - sphinxnotebookgist ; extra == 'doc'
-  - sphinx>=6,<9 ; extra == 'doc'
-  - sphinx-book-theme ; extra == 'doc'
-  requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/99/91/8acff4f5e50511b911bbccb72b8628a49c68ce14148cd9f6431094859a90/annotated_types-0.8.0-py3-none-any.whl
   name: annotated-types
   version: 0.8.0
@@ -8012,20 +7904,6 @@ packages:
   - llvmlite>=0.50.0.dev0,<0.51
   - numpy>=1.22,<2.6
   requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/a7/03/921a3d3c75785aca9ebfbfcabfbc3a1be12e2ab5265deb026d55a5a3f83e/tqdm-4.70.1-py3-none-any.whl
-  name: tqdm
-  version: 4.70.1
-  sha256: c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
-  requires_dist:
-  - colorama ; sys_platform == 'win32'
-  - requests ; extra == 'discord'
-  - envwrap ; extra == 'discord'
-  - slack-sdk ; extra == 'slack'
-  - envwrap ; extra == 'slack'
-  - requests ; extra == 'telegram'
-  - envwrap ; extra == 'telegram'
-  - ipywidgets>=6 ; extra == 'notebook'
-  requires_python: '>=3.8'
 - pypi: https://files.pythonhosted.org/packages/a8/e7/3782d0b5c7b623adc7500ecce11fcfa234ca0b4b4dca5a8f85e6dee94291/nested_pandas-0.7.2-py3-none-any.whl
   name: nested-pandas
   version: 0.7.2

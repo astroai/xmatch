@@ -78,7 +78,7 @@ pixi run preflight-push
 pip install xmatch
 
 # Full installation with all optional accelerators and remote CDS backends
-pip install "xmatch[cds,hats,ray,torchsky,torchfits,ml,nway]"
+pip install "xmatch[cds,hats,ray,torchsky,torchfits,ml]"
 ```
 
 ---
