@@ -2,7 +2,8 @@
 
 import logging
 import math
-from typing import Any, Callable, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 import polars as pl
 
@@ -22,7 +23,7 @@ def _quote_id(name: str) -> str:
     return ".".join('"' + part.replace('"', '""') + '"' for part in name.split("."))
 
 
-def _select_columns(src: CatalogueSource, requested: Optional[List[str]]) -> str:
+def _select_columns(src: CatalogueSource, requested: list[str] | None) -> str:
     cols = set(requested or src.default_columns or [])
     for essential in (src.ra_column, src.dec_column, src.id_column):
         if essential:
@@ -76,13 +77,13 @@ def _cone_predicate(
 def download_from_tap(
     src: CatalogueSource,
     *,
-    ra: Optional[float] = None,
-    dec: Optional[float] = None,
-    radius_deg: Optional[float] = None,
-    columns: Optional[List[str]] = None,
-    auth_session: Optional[Any] = None,
-    maxrec: Optional[int] = None,
-    progress_cb: Optional[Callable[[str], None]] = None,
+    ra: float | None = None,
+    dec: float | None = None,
+    radius_deg: float | None = None,
+    columns: list[str] | None = None,
+    auth_session: Any | None = None,
+    maxrec: int | None = None,
+    progress_cb: Callable[[str], None] | None = None,
 ) -> pl.DataFrame:
     """Download a (optionally cone-limited) catalogue from a TAP service.
 
@@ -133,8 +134,8 @@ def tap_self_join(
     src2: CatalogueSource,
     spec: MatchSpec,
     *,
-    auth_session: Optional[Any] = None,
-    maxrec: Optional[int] = None,
+    auth_session: Any | None = None,
+    maxrec: int | None = None,
 ) -> pl.DataFrame:
     """Spatial crossmatch of two tables on the *same* TAP service via ADQL."""
     if src1.tap_url != src2.tap_url:

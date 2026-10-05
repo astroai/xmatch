@@ -1,7 +1,8 @@
 """CDS backends: VizieR download and the CDS XMatch service (local vs remote)."""
 
 import logging
-from typing import Any, Callable, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 import polars as pl
 
@@ -18,11 +19,11 @@ _XMATCH_KEY = "__xmatch_row_id__"
 def download_from_cds(
     src: CatalogueSource,
     *,
-    ra: Optional[float] = None,
-    dec: Optional[float] = None,
-    radius_arcsec: Optional[float] = None,
-    columns: Optional[List[str]] = None,
-    progress_cb: Optional["Callable[[str], None]"] = None,
+    ra: float | None = None,
+    dec: float | None = None,
+    radius_arcsec: float | None = None,
+    columns: list[str] | None = None,
+    progress_cb: Callable[[str], None] | None = None,
     **_: Any,
 ) -> pl.DataFrame:
     """Download a VizieR catalogue (cone-limited if a region is given).
@@ -34,7 +35,14 @@ def download_from_cds(
     """
     import astropy.units as u
     from astropy.coordinates import SkyCoord
-    from astroquery.vizier import Vizier
+
+    try:
+        from astroquery.vizier import Vizier
+    except ImportError as exc:
+        raise CrossMatchError(
+            "CDS/VizieR access requires the optional 'astroquery' package. "
+            "Install it with `pip install 'xmatch[cds]'` or `pip install astroquery`."
+        ) from exc
 
     if not src.access_identifier:
         raise CrossMatchError(f"Missing access_identifier for CDS catalogue '{src.name}'.")
@@ -72,7 +80,14 @@ def cds_xmatch_local_remote(
     merge on RA/Dec).
     """
     import astropy.units as u
-    from astroquery.xmatch import XMatch
+
+    try:
+        from astroquery.xmatch import XMatch
+    except ImportError as exc:
+        raise CrossMatchError(
+            "CDS XMatch access requires the optional 'astroquery' package. "
+            "Install it with `pip install 'xmatch[cds]'` or `pip install astroquery`."
+        ) from exc
 
     from .io_utils import polars_to_astropy
 

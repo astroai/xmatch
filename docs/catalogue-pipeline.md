@@ -18,23 +18,44 @@ from xmatch import CrossMatch, write_observation_release, write_candidate_releas
 
 cm = CrossMatch()
 sources = [
-    cm.resolve_source("optical.parquet", {
-        "id_column": "id", "ra_column": "ra", "dec_column": "dec",
-        "release_namespace": "example/optical/release1",
-        "photometry": [{"passband": "example:g:v1", "value_column": "g_flux",
-                        "error_column": "g_error", "unit": "uJy", "method": "psf"}],
-    }),
-    cm.resolve_source("infrared.parquet", {
-        "id_column": "id", "ra_column": "ra", "dec_column": "dec",
-        "release_namespace": "example/infrared/release1",
-    }),
+    cm.resolve_source(
+        "optical.parquet",
+        {
+            "id_column": "id",
+            "ra_column": "ra",
+            "dec_column": "dec",
+            "release_namespace": "example/optical/release1",
+            "photometry": [
+                {
+                    "passband": "example:g:v1",
+                    "value_column": "g_flux",
+                    "error_column": "g_error",
+                    "unit": "uJy",
+                    "method": "psf",
+                }
+            ],
+        },
+    ),
+    cm.resolve_source(
+        "infrared.parquet",
+        {
+            "id_column": "id",
+            "ra_column": "ra",
+            "dec_column": "dec",
+            "release_namespace": "example/infrared/release1",
+        },
+    ),
 ]
 observations = write_observation_release(
-    "releases/observations-1", sources, release_id="example-observations-1",
+    "releases/observations-1",
+    sources,
+    release_id="example-observations-1",
     provenance={"software_version": "local-development", "acquisition": "pinned local inputs"},
 )
 candidates = write_candidate_release(
-    "releases/candidates-1", sources, radius_arcsec=3.,
+    "releases/candidates-1",
+    sources,
+    radius_arcsec=3.0,
     memory_budget_bytes=64 * 1024 * 1024,
     provenance={"observation_release_id": observations["release_id"]},
 )
@@ -81,10 +102,12 @@ sources = pl.scan_parquet("releases/candidates-1/sources.parquet")
 pairs = pl.scan_parquet("releases/candidates-1/candidates.parquet")
 # Supply log weights from an explicit likelihood/prior model. Separation or
 # cosine similarity alone is not a calibrated Bayes factor.
-scored_pairs = pairs.with_columns(pl.lit(0.).alias("log_weight"))  # illustrative equal weights
+scored_pairs = pairs.with_columns(pl.lit(0.0).alias("log_weight"))  # illustrative equal weights
 hypotheses = normalize_candidate_hypotheses(
-    sources, scored_pairs, candidate_namespace="example/infrared/release1",
-    no_match_log_weight=0.,
+    sources,
+    scored_pairs,
+    candidate_namespace="example/infrared/release1",
+    no_match_log_weight=0.0,
 )
 ```
 

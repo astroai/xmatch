@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import polars as pl
 
@@ -25,7 +25,7 @@ from .tap import execute_tap_query, get_tap_service
 logger = logging.getLogger(__name__)
 
 # Known TAP endpoints that we can query without authentication.
-_PUBLIC_TAP_ENDPOINTS: Dict[str, Dict[str, Any]] = {
+_PUBLIC_TAP_ENDPOINTS: dict[str, dict[str, Any]] = {
     "vizier": {
         "url": "http://tapvizier.u-strasbg.fr/TAPVizieR/tap",
         "description": "CDS VizieR TAP service",
@@ -73,7 +73,7 @@ _ID_NAME_HINTS = (
 )
 
 
-def get_public_endpoints() -> Dict[str, Dict[str, Any]]:
+def get_public_endpoints() -> dict[str, dict[str, Any]]:
     """Return known public TAP endpoints."""
     return dict(_PUBLIC_TAP_ENDPOINTS)
 
@@ -81,9 +81,9 @@ def get_public_endpoints() -> Dict[str, Dict[str, Any]]:
 def discover_tables(
     tap_url: str,
     *,
-    schema_filter: Optional[str] = None,
-    name_filter: Optional[str] = None,
-    auth_session: Optional[Any] = None,
+    schema_filter: str | None = None,
+    name_filter: str | None = None,
+    auth_session: Any | None = None,
     timeout_seconds: float = 30.0,
 ) -> pl.DataFrame:
     """Query ``TAP_SCHEMA.tables`` and return a polars DataFrame.
@@ -125,7 +125,7 @@ def discover_tables(
     return astropy_table_to_polars(table)
 
 
-def split_table_id(table_id: str) -> Tuple[Optional[str], str]:
+def split_table_id(table_id: str) -> tuple[str | None, str]:
     """Split a table id into ``(schema_name, table_name)`` for TAP_SCHEMA queries.
 
     * Data Lab / ESA: ``ls_dr10.tractor`` → ``('ls_dr10', 'tractor')``
@@ -155,7 +155,7 @@ def looks_like_table_id(value: str) -> bool:
     return bool(_SCHEMA_TABLE_RE.match(text))
 
 
-def guess_endpoint(table_id: str) -> Optional[str]:
+def guess_endpoint(table_id: str) -> str | None:
     """Guess the public endpoint short-name for a table id."""
     text = table_id.strip().strip('"')
     if "/" in text:
@@ -168,7 +168,7 @@ def guess_endpoint(table_id: str) -> Optional[str]:
     return None
 
 
-def endpoint_archive(endpoint: str) -> Tuple[Optional[str], str, str]:
+def endpoint_archive(endpoint: str) -> tuple[str | None, str, str]:
     """Return ``(archive_name, service_id, tap_url)`` for a public endpoint."""
     key = endpoint.lower().strip()
     info = _PUBLIC_TAP_ENDPOINTS.get(key)
@@ -181,8 +181,8 @@ def discover_columns(
     tap_url: str,
     table_name: str,
     *,
-    schema_name: Optional[str] = None,
-    auth_session: Optional[Any] = None,
+    schema_name: str | None = None,
+    auth_session: Any | None = None,
 ) -> pl.DataFrame:
     """Query ``TAP_SCHEMA.columns`` for a specific table.
 
@@ -242,7 +242,7 @@ def discover_columns(
     return df
 
 
-def detect_radec_columns(cols_df: pl.DataFrame) -> Tuple[Optional[str], Optional[str]]:
+def detect_radec_columns(cols_df: pl.DataFrame) -> tuple[str | None, str | None]:
     """Heuristic detection of RA/Dec columns from TAP_SCHEMA columns result.
 
     Looks at ``column_name`` and ``ucd`` fields to guess which columns hold
@@ -261,8 +261,8 @@ def detect_radec_columns(cols_df: pl.DataFrame) -> Tuple[Optional[str], Optional
 def get_table_schema(
     tap_url: str,
     table_name: str,
-    auth_session: Optional[Any] = None,
-) -> Dict[str, Any]:
+    auth_session: Any | None = None,
+) -> dict[str, Any]:
     """Get full column metadata for a table.
 
     Returns a dict with ``columns`` (DataFrame), ``columns_count`` (int),
@@ -293,7 +293,7 @@ def get_table_schema(
     }
 
 
-def _guess_id_column(columns: List[str]) -> Optional[str]:
+def _guess_id_column(columns: list[str]) -> str | None:
     lower = {c.lower(): c for c in columns}
     for hint in _ID_NAME_HINTS:
         if hint in lower:
@@ -306,15 +306,15 @@ def _guess_id_column(columns: List[str]) -> Optional[str]:
 
 
 def _guess_default_columns(
-    columns: List[str],
+    columns: list[str],
     *,
-    ra: Optional[str],
-    dec: Optional[str],
-    id_col: Optional[str],
+    ra: str | None,
+    dec: str | None,
+    id_col: str | None,
     limit: int = 12,
-) -> List[str]:
+) -> list[str]:
     """Pick a short default column list: coords + id + a few mag/flux columns."""
-    chosen: List[str] = []
+    chosen: list[str] = []
     for c in (id_col, ra, dec):
         if c and c not in chosen:
             chosen.append(c)
@@ -331,13 +331,13 @@ def _guess_default_columns(
 
 def catalogue_entry_from_schema(
     table_id: str,
-    schema: Dict[str, Any],
+    schema: dict[str, Any],
     *,
     archive: str,
     service_id: str = "tap_service",
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-) -> Tuple[str, Dict[str, Any]]:
+    name: str | None = None,
+    description: str | None = None,
+) -> tuple[str, dict[str, Any]]:
     """Build ``(catalogue_name, entry_dict)`` from a :func:`get_table_schema` result."""
     access = schema.get("access_identifier") or table_id.strip().strip('"')
     ra = schema.get("ra_column")
@@ -347,10 +347,10 @@ def catalogue_entry_from_schema(
             f"Could not detect RA/Dec columns for '{access}'. "
             "Pass --ra-column / --dec-column after adopting, or edit the YAML."
         )
-    cols_list: List[str] = list(schema.get("columns_list") or [])
+    cols_list: list[str] = list(schema.get("columns_list") or [])
     id_col = _guess_id_column(cols_list)
     short = name or _default_catalogue_name(access)
-    entry: Dict[str, Any] = {
+    entry: dict[str, Any] = {
         "description": description
         or f"Ad-hoc catalogue {access} (adopted / resolved via TAP_SCHEMA)",
         "archive": archive,

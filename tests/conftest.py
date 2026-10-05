@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
-
 import numpy as np
 import pytest
 
 from .test_real_catalogues import allwise_csv, gaia_csv, usno_csv  # noqa: F401
 
 # Global accumulator for benchmark results, populated by test_benchmarks.py.
-BENCH_RESULTS: List[Dict] = []
+BENCH_RESULTS: list[dict] = []
 
 
 # --------------------------------------------------------------------------- #
@@ -28,15 +26,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 # --------------------------------------------------------------------------- #
 # Pretty-print benchmark table at session end
 # --------------------------------------------------------------------------- #
-def _aggregate(results: List[Dict]) -> Dict:
-    groups: Dict = {}
+def _aggregate(results: list[dict]) -> dict:
+    groups: dict = {}
     for r in results:
         key = (r["scenario"], r["radius"])
         groups.setdefault(key, []).append(r)
     return groups
 
 
-def _sep_max_deviation(results: List[Dict]) -> str:
+def _sep_max_deviation(results: list[dict]) -> str:
     baseline_seps = None
     for r in results:
         if r["engine"] == "astropy" and r.get("result") is not None:
@@ -64,7 +62,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         return
 
     groups = _aggregate(BENCH_RESULTS)
-    astropy_times: Dict = {}
+    astropy_times: dict = {}
     for key, entries in groups.items():
         for e in entries:
             if e["engine"] == "astropy":

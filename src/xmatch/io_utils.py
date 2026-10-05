@@ -8,22 +8,19 @@ TAP/CDS services.
 Polars' storage layer is Apache Arrow, and a polars ``DataFrame`` can be
 materialised as a ``pyarrow.Table`` via ``df.to_arrow()`` with zero copy.
 Wherever possible (e.g. when streaming to a parquet sink) this module takes
-that fast path. Conversions involving astropy ``Table`` go through a
-``pyarrow.Table`` bridge *if* the installed astropy exposes ``Table.to_arrow``
-(introduced in 7.x+) and otherwise fall back to a ``pandas`` round-trip. The
-pandas path keeps everything working today; the Arrow path becomes zero-copy
-once astropy's interface stabilises.
+that fast path. Conversions involving astropy ``Table`` go directly through
+``pyarrow`` and ``numpy`` column buffers without ``pandas``.
 
 Bytes-string columns from VOTable responses (e.g. raw ``bytes`` for ``char``
-TVP fields) are decoded to UTF-8 so polars sees ``pl.Utf8`` instead of
+TVP fields) are decoded to UTF-8 so polars sees ``pl.String`` instead of
 ``pl.Binary``. Multi-D table columns (no polars equivalent) are dropped.
 Masked values become nulls automatically.
 """
 
 import logging
 from pathlib import Path
-from typing import Any, List, Union
 
+import numpy as np
 import polars as pl
 
 from .exceptions import InputError
@@ -35,10 +32,10 @@ SUPPORTED_SUFFIXES = {".parquet", ".csv", ".tsv", ".tab", ".fits", ".fit", ".hat
 # Files that, when present in a directory, identify a HATS / HiPSCat catalogue.
 _HATS_MARKERS = ("properties", "hats.properties", "catalog_info.json", "_metadata")
 
-FrameLike = Union["pl.DataFrame", "pl.LazyFrame"]
+FrameLike = pl.DataFrame | pl.LazyFrame
 
 
-def is_hats_dir(path: Union[str, Path]) -> bool:
+def is_hats_dir(path: str | Path) -> bool:
     """Return True if *path* looks like a HATS / HiPSCat catalogue directory."""
     p = Path(path)
     if not p.is_dir():
@@ -46,33 +43,13 @@ def is_hats_dir(path: Union[str, Path]) -> bool:
     return any((p / marker).exists() for marker in _HATS_MARKERS)
 
 
-def _decode_pandas_bytes_columns(pdf) -> Any:
-    """Decode ``bytes`` columns in a pandas DataFrame to UTF-8 strings.
-
-    Vectorised over column-dtype filtering via ``pdf.dtypes == "object"`` so we
-    skip every non-object column up-front instead of walking the full
-    schema; for each remaining object column a single ``isinstance`` peek
-    on the first non-null value gates the vectorised ``str.decode``.
-
-    Using ``df.columns[df.dtypes == "object"]`` avoids ``select_dtypes``
-    overhead and pandas deprecation warnings; ``to_numpy()[0]`` avoids
-    slow ``.iloc[0]`` lookups inside the loop.
-    """
-    for col in pdf.columns[pdf.dtypes == "object"]:
-        if len(pdf) and isinstance(pdf[col].to_numpy()[0], bytes):
-            pdf[col] = pdf[col].str.decode("utf-8", errors="replace")
-    return pdf
-
-
 def astropy_table_to_polars(table) -> pl.DataFrame:
-    """Convert an astropy ``Table`` to a polars ``DataFrame`` (Arrow if available).
+    """Convert an astropy ``Table`` to a polars ``DataFrame`` via Arrow/NumPy.
 
     Multi-D columns are dropped (no polars equivalent) and ``bytes`` string
     columns are decoded to UTF-8. Masked values become nulls.
-
-    The function tries Apache Arrow for zero-copy round-trips when the installed
-    astropy exposes ``Table.to_arrow`` (7.x+) and falls back to pandas.
     """
+    import pyarrow as pa
 
     keep = [name for name in table.colnames if getattr(table[name], "ndim", 1) == 1]
     dropped = set(table.colnames) - set(keep)
@@ -84,42 +61,38 @@ def astropy_table_to_polars(table) -> pl.DataFrame:
         )
     if not keep:
         return pl.DataFrame()
-    table = table[keep]
 
-    # Fast path: astropy ≥ 7.x with native arrow bridge.
-    if hasattr(table, "to_arrow"):
-        try:
-            import pyarrow as pa
+    pa_cols = {}
+    for name in keep:
+        col = table[name]
+        raw_mask = getattr(col, "mask", None)
+        mask = (
+            np.asarray(raw_mask, dtype=bool)
+            if raw_mask is not None and raw_mask is not np.ma.nomask and np.any(raw_mask)
+            else None
+        )
+        arr = np.asarray(col)
+        if arr.dtype.byteorder not in ("=", "|"):
+            arr = arr.astype(arr.dtype.newbyteorder("="))
+        if arr.dtype.kind == "S":
+            arr = np.strings.decode(arr, "utf-8", errors="replace")
+        elif arr.dtype.kind == "O" and len(arr):
+            first = next((x for x in arr if x is not None and x is not np.ma.masked), None)
+            if isinstance(first, (bytes, bytearray, np.bytes_)):
+                arr = np.array(
+                    [
+                        x.decode("utf-8", errors="replace")
+                        if isinstance(x, (bytes, bytearray, np.bytes_))
+                        else x
+                        for x in arr
+                    ],
+                    dtype=object,
+                )
+        pa_cols[name] = pa.array(arr, mask=mask)
 
-            pa_table = table.to_arrow()
-            if any(pa.types.is_binary(f.type) for f in pa_table.schema):
-                import pyarrow.compute as pc
-
-                new_fields, new_columns = [], []
-                for field, column in zip(pa_table.schema, pa_table.columns, strict=False):
-                    if pa.types.is_binary(field.type):
-                        decoded = pc.fill_null(pc.utf8_decode(column, replace_invalid=True), "")
-                        field = pa.field(field.name, pa.string())
-                        column = decoded
-                    new_fields.append(field)
-                    new_columns.append(column)
-                pa_table = pa.table.from_arrays(new_columns, schema=pa.schema(new_fields))
-            df = pl.from_arrow(pa_table)
-            logger.debug(
-                "Loaded astropy table via Arrow: %d rows, %d columns.",
-                df.height,
-                df.width,
-            )
-            return df
-        except Exception as exc:  # pragma: no cover - depends on astropy version
-            logger.debug("astropy Arrow bridge failed (%s), falling back to pandas.", exc)
-
-    # Fallback path: astropy before 7.x / no native arrow bridge.
-    pdf = table[keep].to_pandas() if keep else table.to_pandas()
-    pdf = _decode_pandas_bytes_columns(pdf)
-    df = pl.from_pandas(pdf)
+    df = pl.DataFrame(pa.table(pa_cols))
     logger.debug(
-        "Loaded astropy table via pandas fallback: %d rows, %d columns.",
+        "Loaded astropy table via Arrow: %d rows, %d columns.",
         df.height,
         df.width,
     )
@@ -129,20 +102,38 @@ def astropy_table_to_polars(table) -> pl.DataFrame:
 def polars_to_astropy(frame: FrameLike):
     """Convert a polars frame (eager or lazy) to an astropy ``Table``.
 
-    Lazy frames are collected first. The function prefers the astropy Arrow
-    bridge when present; otherwise it falls back to pandas.
+    Lazy frames are collected first. Nullable columns are converted to
+    ``MaskedColumn`` instances.
     """
-    from astropy.table import Table
+    from astropy.table import MaskedColumn, Table
 
     if isinstance(frame, pl.LazyFrame):
         frame = frame.collect()
+    if frame.width == 0:
+        return Table()
 
-    if hasattr(Table, "from_arrow"):
-        try:
-            return Table.from_arrow(frame.to_arrow())
-        except Exception as exc:  # pragma: no cover - depends on astropy version
-            logger.debug("astropy Table.from_arrow failed (%s), falling back to pandas.", exc)
-    return Table.from_pandas(frame.to_pandas())
+    cols = {}
+    for s in frame:
+        if s.null_count() > 0:
+            mask = s.is_null().to_numpy()
+            if s.dtype == pl.String:
+                vals = np.asarray(s.fill_null("").to_list(), dtype=str)
+            elif s.dtype == pl.Boolean:
+                vals = s.fill_null(False).to_numpy()
+            elif s.dtype.is_integer():
+                vals = s.fill_null(0).to_numpy()
+            elif s.dtype.is_float():
+                vals = s.fill_null(np.nan).to_numpy()
+            else:
+                vals = np.asarray(s.to_list())
+            cols[s.name] = MaskedColumn(vals, name=s.name, mask=mask)
+        else:
+            if s.dtype == pl.String:
+                vals = np.asarray(s.to_list(), dtype=str)
+            else:
+                vals = s.to_numpy()
+            cols[s.name] = vals
+    return Table(cols)
 
 
 def _read_fits(path: Path) -> pl.DataFrame:
@@ -177,7 +168,7 @@ def _read_fits(path: Path) -> pl.DataFrame:
     raise InputError(f"Could not read a table from FITS file {path}: {last_err}")
 
 
-def scan_frame(path: Union[str, Path]) -> pl.LazyFrame:
+def scan_frame(path: str | Path) -> pl.LazyFrame:
     """Return a ``LazyFrame`` for a local catalogue file.
 
     Parquet and CSV are scanned lazily (projection/predicate push-down). FITS
@@ -197,7 +188,7 @@ def scan_frame(path: Union[str, Path]) -> pl.LazyFrame:
     raise InputError(f"Unsupported file format '{suffix}'. Supported: {sorted(SUPPORTED_SUFFIXES)}")
 
 
-def frame_columns(frame: FrameLike) -> List[str]:
+def frame_columns(frame: FrameLike) -> list[str]:
     """Return column names without materialising data."""
     if isinstance(frame, pl.LazyFrame):
         return frame.collect_schema().names()
@@ -210,7 +201,7 @@ def to_lazy(frame: FrameLike) -> pl.LazyFrame:
 
 def write_hats(
     frame: FrameLike,
-    output_dir: Union[str, Path],
+    output_dir: str | Path,
     ra_column: str = "ra",
     dec_column: str = "dec",
     threshold: int = 100_000,
@@ -329,7 +320,7 @@ def _write_frame_vospace(
 
 def write_frame(
     frame: FrameLike,
-    output_file: Union[str, Path],
+    output_file: str | Path,
     *,
     ra_column: str = "ra",
     dec_column: str = "dec",

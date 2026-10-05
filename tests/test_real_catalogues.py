@@ -34,7 +34,7 @@ import os
 import pathlib
 import tempfile
 import time
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import polars as pl

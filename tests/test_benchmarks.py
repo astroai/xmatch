@@ -18,7 +18,6 @@ Results are printed as a compact terminal table at the end of the suite.
 from __future__ import annotations
 
 import time
-from typing import List
 
 import numpy as np
 import polars as pl
@@ -59,14 +58,14 @@ pytestmark = [pytest.mark.bench, pytest.mark.slow]
 # --------------------------------------------------------------------------- #
 # Engine registry (built on first access to avoid import errors at collect time)
 # --------------------------------------------------------------------------- #
-_known_engines: List[str] = []
+_known_engines: list[str] = []
 
 
-def _available_engines() -> List[str]:
+def _available_engines() -> list[str]:
     """Return engine names available in the current environment."""
     if _known_engines:
         return _known_engines
-    engines: List[str] = ["astropy"]  # always available
+    engines: list[str] = ["astropy"]  # always available
     try:
         import scipy  # noqa: F401
 
@@ -80,7 +79,7 @@ def _available_engines() -> List[str]:
     return _known_engines
 
 
-def _resolve_engines(request: pytest.FixtureRequest) -> List[str]:
+def _resolve_engines(request: pytest.FixtureRequest) -> list[str]:
     """Resolve which engines to test, respecting --run-stilts flag."""
     engines = list(_available_engines())
     if request.config.getoption("run_stilts", False) and stilts.stilts_available():

@@ -11,28 +11,26 @@ ci-local = "pixi run preflight-push && python -m pytest tests/test_astro_utils.p
 test = "python -m pytest"
 
 [dependencies]
-# <3.14: hats / cdshealpix / ray do not all ship cp314 wheels yet.
-python = ">=3.10,<3.14"
+# Development targets Python 3.13 while codebase is 3.13/3.14 compatible.
+python = "3.13.*"
 # hats → numba needs numpy<2.5 on conda-forge
-numpy = ">=1.26,<2.5"
-scipy = ">=1.8"
-pandas = ">=1.3"
-astropy = ">=5.0"
-pyyaml = ">=5.4"
-pyvo = ">=1.4"
-keyring = ">=23.0"
-astroquery = ">=0.4.6"
-pyarrow = ">=7.0"
-polars = ">=1.0"
-ruff = "*"
-pytest = "*"
-mypy = "*"
+numpy = ">=2.4,<2.5"
+scipy = ">=1.18"
+astropy = ">=7.2"
+pyyaml = ">=6.0.3"
+pyvo = ">=1.8"
+astroquery = ">=0.4.11"
+pyarrow = ">=25.0"
+polars = ">=1.40"
+ruff = ">=0.15"
+pytest = ">=9.0"
+mypy = ">=2.0"
 
 [pypi-dependencies]
 xmatch = { path = ".", editable = true }
 nway = ">=4.7.1"
 # HATS-native Ray union engine: always in the dev env so CI runs the new tests.
 # (Optional extras `hats` / `hats-ray` / `ray` in pyproject.toml stay for pip users.)
-hats = "*"
-ray = "*"
-cdshealpix = "*"
+hats = ">=0.7"
+ray = ">=2.50"
+cdshealpix = ">=0.8"

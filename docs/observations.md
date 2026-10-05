@@ -23,35 +23,52 @@ from xmatch.observations import (
 )
 
 source = CrossMatch().resolve_source(
-    pl.DataFrame({
-        "id": [10, 11], "ra": [20.0, 21.0], "dec": [-5.0, -6.0],
-        "g_flux": [-0.2, None], "g_error": [0.1, None],
-        "spec_z": [0.3, None],
-    }),
+    pl.DataFrame(
+        {
+            "id": [10, 11],
+            "ra": [20.0, 21.0],
+            "dec": [-5.0, -6.0],
+            "g_flux": [-0.2, None],
+            "g_error": [0.1, None],
+            "spec_z": [0.3, None],
+        }
+    ),
     {
         "id_column": "id",
         "release_namespace": "my-survey:release-1:main-product",
         "release_metadata": {"citation": "Provide the actual upstream citation"},
-        "photometry": [{
-            "passband": "my-survey:g:curve-1",
-            "value_column": "g_flux", "error_column": "g_error",
-            "unit": "uJy", "method": "psf",
-        }],
-        "property_evidence": [{
-            "property": "redshift.spec", "value_column": "spec_z",
-            "unit": "dimensionless", "category": "inferred_spectroscopy",
-            "method": "my-spectroscopic-pipeline:v1",
-        }],
+        "photometry": [
+            {
+                "passband": "my-survey:g:curve-1",
+                "value_column": "g_flux",
+                "error_column": "g_error",
+                "unit": "uJy",
+                "method": "psf",
+            }
+        ],
+        "property_evidence": [
+            {
+                "property": "redshift.spec",
+                "value_column": "spec_z",
+                "unit": "dimensionless",
+                "category": "inferred_spectroscopy",
+                "method": "my-spectroscopic-pipeline:v1",
+            }
+        ],
     },
 )
 
-inventory = source_inventory(source)                  # LazyFrame
-photometry = normalize_photometry(source)             # LazyFrame
-evidence = normalize_property_evidence(source)        # LazyFrame
+inventory = source_inventory(source)  # LazyFrame
+photometry = normalize_photometry(source)  # LazyFrame
+evidence = normalize_property_evidence(source)  # LazyFrame
 manifest = write_observation_release(
-    "pilot-release", [source], release_id="pilot:1",
-    provenance={"software_version": "record the actual version",
-                "upstream_checksum": "record the actual acquired-input checksum"},
+    "pilot-release",
+    [source],
+    release_id="pilot:1",
+    provenance={
+        "software_version": "record the actual version",
+        "upstream_checksum": "record the actual acquired-input checksum",
+    },
 )
 assert verify_observation_release("pilot-release") == manifest
 ```

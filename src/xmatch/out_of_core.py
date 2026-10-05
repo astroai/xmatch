@@ -7,8 +7,8 @@ import logging
 import math
 import os
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Optional
 
 import numpy as np
 import polars as pl
@@ -309,7 +309,7 @@ def _required_columns(
     spec: MatchSpec,
 ) -> list[str]:
     requested = list(overrides.columns) if overrides.columns else list(schema_names)
-    required: list[Optional[str]] = [src.ra_column, src.dec_column]
+    required: list[str | None] = [src.ra_column, src.dec_column]
     if spec.matcher == "skyerr":
         required.extend((src.ra_err_column, src.dec_err_column))
     if spec.target_epoch is not None:
@@ -418,7 +418,7 @@ def _align_epoch(
     *,
     propagate_covariance: bool = False,
     pm_prior: bool = False,
-    magnitude_column: Optional[str] = None,
+    magnitude_column: str | None = None,
 ) -> pl.LazyFrame:
     """Align batches with measured motion and optional evaluated uncertainty.
 
@@ -883,7 +883,7 @@ def _write_unmatched(
     row_column: str,
     *,
     matched_zone_column: str = _ZONE,
-    rename: Optional[dict[str, str]] = None,
+    rename: dict[str, str] | None = None,
 ) -> None:
     matched_zones = _zone_paths(matched_ids_dir, matched_zone_column)
     for zone, source_path in _zone_paths(source_dir).items():

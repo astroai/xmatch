@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -42,7 +42,7 @@ _TOPCAT_STILTS_CANDIDATES = (
 )
 
 
-def _resolve_base_command(stilts_cmd_base: Optional[str]) -> Optional[List[str]]:
+def _resolve_base_command(stilts_cmd_base: str | None) -> list[str] | None:
     """Return the argv prefix to invoke STILTS, or None if unavailable."""
     if stilts_cmd_base:
         try:
@@ -61,17 +61,17 @@ def _resolve_base_command(stilts_cmd_base: Optional[str]) -> Optional[List[str]]
     return None
 
 
-def stilts_available(stilts_cmd_base: Optional[str] = None) -> bool:
+def stilts_available(stilts_cmd_base: str | None = None) -> bool:
     return _resolve_base_command(stilts_cmd_base) is not None
 
 
 def _build_command(
-    base: List[str],
+    base: list[str],
     task: str,
-    params: Dict[str, Any],
-    java_opts: Optional[str],
-    tmpdir: Optional[str],
-) -> List[str]:
+    params: dict[str, Any],
+    java_opts: str | None,
+    tmpdir: str | None,
+) -> list[str]:
     cmd = list(base)
     if base[0] == "java":
         opts = shlex.split(java_opts) if java_opts else []
@@ -86,11 +86,11 @@ def _build_command(
 
 
 def _run_stilts(
-    base: List[str],
+    base: list[str],
     task: str,
-    params: Dict[str, Any],
-    java_opts: Optional[str] = None,
-    tmpdir: Optional[str] = None,
+    params: dict[str, Any],
+    java_opts: str | None = None,
+    tmpdir: str | None = None,
 ) -> None:
     cmd = _build_command(base, task, params, java_opts, tmpdir)
     logger.debug("Running STILTS: %s", " ".join(shlex.quote(a) for a in cmd))

@@ -12,8 +12,6 @@ identifier that triggered the failure — so the CLI's error handler can offer
 
 from __future__ import annotations
 
-from typing import Optional
-
 
 class CrossMatchError(Exception):
     """Base class for every public xmatch exception.
@@ -23,7 +21,7 @@ class CrossMatchError(Exception):
     error handler can offer "did you mean?" suggestions.
     """
 
-    source: Optional[str] = None
+    source: str | None = None
 
 
 class ConfigError(CrossMatchError):
@@ -39,7 +37,7 @@ class InputError(CrossMatchError):
     known catalogue name space without having to regex-parse the message.
     """
 
-    def __init__(self, message: str, *, source: Optional[str] = None) -> None:
+    def __init__(self, message: str, *, source: str | None = None) -> None:
         super().__init__(message)
         self.source = source
 

@@ -22,7 +22,6 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
-from typing import Tuple
 
 import numpy as np
 
@@ -66,7 +65,7 @@ def _get_ray_pixel_batch():
         r_groups_ref: dict,
         spec,
         chord_max: float,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Process one left HEALPix pixel batch as a Ray task.
 
         ``r_xyz_refs``/``r_groups_ref`` hold *only* this batch's neighbouring
@@ -202,7 +201,7 @@ def ray_zone_match(
     left_src,
     right_src,
     spec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Ray-parallelised HEALPix pixel-batch zone match.
 
     Falls back to :func:`xmatch.matchers._zone_match` when Ray is unavailable

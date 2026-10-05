@@ -26,7 +26,6 @@ import contextlib
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import polars as pl
@@ -51,7 +50,7 @@ def _make_catalogue(
     n_stars: int,
     seed: int = 42,
     density: float = 10.0,
-    phot_cols: Optional[Dict[str, float]] = None,
+    phot_cols: dict[str, float] | None = None,
 ) -> pl.DataFrame:
     """Generate *n_stars* random stars in a square patch (degrees).
 
@@ -86,7 +85,7 @@ def _time_engine(
     spec: MatchSpec,
     n_warmup: int,
     n_timed: int,
-) -> Tuple[float, int]:
+) -> tuple[float, int]:
     """Return ``(median_seconds, n_matches)`` for *engine*."""
     times: list = []
     n_matches = 0
@@ -151,7 +150,7 @@ def main() -> int:
         matchers._ND_CHUNK_SIZE = args.chunk_size
 
     # Parse sizes.
-    sizes: List[int] = []
+    sizes: list[int] = []
     for tok in args.sizes.split(","):
         tok = tok.strip().lower()
         mult = 1
@@ -174,7 +173,7 @@ def main() -> int:
     left_src = right_src = _src()
 
     # Parse extra-cols into dict.
-    phot_cols: Dict[str, float] = {}
+    phot_cols: dict[str, float] = {}
     if args.extra_cols:
         for pair in args.extra_cols.split(","):
             pair = pair.strip()
@@ -187,7 +186,7 @@ def main() -> int:
             else:
                 phot_cols[pair] = 1.0
 
-    nd_spec: Optional[MatchSpec] = None
+    nd_spec: MatchSpec | None = None
     if phot_cols:
         nd_spec = MatchSpec(
             radius_arcsec=args.radius,

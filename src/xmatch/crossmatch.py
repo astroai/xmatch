@@ -18,14 +18,14 @@ Top-level operations:
 
 import difflib
 import logging
-import multiprocessing
 import os
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from itertools import product as cartesian_product
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -57,10 +57,10 @@ from .user_config import bundled_config_path, load_merged_config
 
 logger = logging.getLogger(__name__)
 
-FrameInput = Union[str, Path, pl.DataFrame, pl.LazyFrame]
+FrameInput = str | Path | pl.DataFrame | pl.LazyFrame
 
 
-def _find_default_config_path() -> Optional[Path]:
+def _find_default_config_path() -> Path | None:
     """Prefer bundled package yaml (user overlay is merged separately)."""
     bundled = bundled_config_path()
     if bundled.is_file():
@@ -84,10 +84,10 @@ DEFAULT_RADIUS_ARCSEC = 1.0
 _SIDE_OVERRIDE_KEYS = ("ra_column", "dec_column", "id_column", "frame")
 
 
-def _side_overrides(params: Dict[str, Any], side: int) -> Dict[str, Any]:
+def _side_overrides(params: dict[str, Any], side: int) -> dict[str, Any]:
     """Extract ``--<key>-<side>`` params as ``{key: value}`` for one catalogue."""
     suffix = f"_{side}"
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     for key, value in params.items():
         if (
             key.endswith(suffix)
@@ -99,11 +99,11 @@ def _side_overrides(params: Dict[str, Any], side: int) -> Dict[str, Any]:
 
 
 def _joined_column_name(
-    schema_names: Set[str],
+    schema_names: set[str],
     original: str,
     suffix: str,
-    added: Optional[Set[str]] = None,
-) -> Optional[str]:
+    added: set[str] | None = None,
+) -> str | None:
     """Resolve a right-hand catalogue's column name inside a chained result.
 
     ``_rename_right`` suffixes *only* the columns that collide with the
@@ -146,13 +146,13 @@ def _angsep_deg(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
 
 
 def _cone_filter_frame(
-    frame: "pl.DataFrame",
+    frame: pl.DataFrame,
     ra_col: str,
     dec_col: str,
     ra_deg: float,
     dec_deg: float,
     radius_deg: float,
-) -> "pl.DataFrame":
+) -> pl.DataFrame:
     """Keep rows within ``radius_deg`` of the cone centre (vectorised polars).
 
     The pixel-level cone test in :func:`_try_mirrored_cone` is deliberately
@@ -171,12 +171,12 @@ def _cone_filter_frame(
 
 
 def _try_mirrored_cone(
-    src: "CatalogueSource",
-    columns: Optional[List[str]],
+    src: CatalogueSource,
+    columns: list[str] | None,
     ra: float,
     dec: float,
     radius_deg: float,
-) -> Optional["pl.DataFrame"]:
+) -> pl.DataFrame | None:
     """Serve a cone download from the mirrored HATS cache copy, when present.
 
     Returns a DataFrame when a mirror exists, is on local storage, and holds
@@ -204,8 +204,8 @@ def _try_mirrored_cone(
         partitions = list_hats_pixels(hats_dir)
         if not partitions:
             return None
-        schema: Optional[set] = None
-        first_files: Optional[List[Path]] = None
+        schema: set | None = None
+        first_files: list[Path] | None = None
         for _order, _pix, part_path in partitions:
             files = [part_path] if part_path.is_file() else sorted(part_path.glob("*.parquet"))
             if files:
@@ -220,7 +220,7 @@ def _try_mirrored_cone(
         ra_col, dec_col = _ra_dec_columns(src, hats_dir)
         if ra_col not in schema or dec_col not in schema:
             return None
-        lazy_parts: List["pl.LazyFrame"] = []
+        lazy_parts: list[pl.LazyFrame] = []
         for order, pix, part_path in partitions:
             cen_ra, cen_dec = _pixel_center_deg(order, pix)
             if _angsep_deg(cen_ra, cen_dec, ra, dec) > radius_deg + _pixel_diagonal_deg(order):
@@ -251,7 +251,7 @@ def _try_mirrored_cone(
 class CrossMatch:
     """Configuration holder and crossmatch entry point."""
 
-    def __init__(self, config_file: Optional[Union[str, Path]] = None, **kwargs):
+    def __init__(self, config_file: str | Path | None = None, **kwargs):
         self._explicit_config = config_file is not None
         if config_file is None:
             if DEFAULT_CONFIG_PATH is None:
@@ -273,17 +273,17 @@ class CrossMatch:
         )
         self.stilts_java_opts = kwargs.get("java_opts", self.stilts_config.get("java_opts"))
         self.stilts_tmpdir = kwargs.get("tmpdir", self.stilts_config.get("tmpdir"))
-        self.n_workers = kwargs.get("n_workers", multiprocessing.cpu_count())
+        self.n_workers = kwargs.get("n_workers", os.cpu_count() or 1)
         # Optional default TAP endpoint for ad-hoc table-id resolution.
-        self.default_endpoint: Optional[str] = kwargs.get("endpoint")
+        self.default_endpoint: str | None = kwargs.get("endpoint")
 
         self.auth_config = auth.load_auth_config()
-        self.last_spill_stats: Optional[Dict[str, int]] = None
+        self.last_spill_stats: dict[str, int] | None = None
         self._validate_config()
         logger.info("CrossMatch initialised from %s", self.config_file)
 
     # ------------------------------------------------------------------ config
-    def _load_config(self) -> Dict[str, Any]:
+    def _load_config(self) -> dict[str, Any]:
         if self._explicit_config:
             config, path = load_merged_config(
                 config_file=self.config_file, include_user_overlay=False
@@ -350,7 +350,7 @@ class CrossMatch:
             if target not in self.catalogues_config:
                 raise ConfigError(f"Alias '{alias}' points to unknown catalogue '{target}'.")
 
-    def get_catalogue_config(self, name: str) -> Dict[str, Any]:
+    def get_catalogue_config(self, name: str) -> dict[str, Any]:
         name = self.resolve_name(name)
         if name not in self.catalogues_config:
             exc = CrossMatchError(f"Catalogue '{name}' not found in configuration.")
@@ -379,7 +379,7 @@ class CrossMatch:
     def resolve_name(self, name: str) -> str:
         return self.aliases_config.get(name.lower(), name.lower())
 
-    def find_catalogue_by_access_id(self, table_id: str) -> Optional[str]:
+    def find_catalogue_by_access_id(self, table_id: str) -> str | None:
         """Return catalogue key whose ``access_identifier``/``table_name`` matches *table_id*.
 
         Lets users paste the ACCESS column from ``xmatch list`` and still get the
@@ -397,7 +397,7 @@ class CrossMatch:
                     return name
         return None
 
-    def suggest(self, name: str, *, n: int = 3, cutoff: float = 0.4) -> List[str]:
+    def suggest(self, name: str, *, n: int = 3, cutoff: float = 0.4) -> list[str]:
         """Return catalogue or alias names similar to ``name`` for hinting.
 
         Compares ``name`` against the union of ``catalogues_config`` and
@@ -437,7 +437,7 @@ class CrossMatch:
         return [lower_to_orig[m] for m in matches]
 
     # ----------------------------------------------------------------- sources
-    def resolve_source(self, value: FrameInput, overrides: Dict[str, Any]) -> CatalogueSource:
+    def resolve_source(self, value: FrameInput, overrides: dict[str, Any]) -> CatalogueSource:
         """Build a CatalogueSource from a path/name/frame plus per-side overrides.
 
         Unknown strings that look like TAP/VizieR table ids (e.g. ``II/349/ps1``
@@ -508,7 +508,7 @@ class CrossMatch:
         table_id: str,
         *,
         endpoint: str,
-        overrides: Optional[Dict[str, Any]] = None,
+        overrides: dict[str, Any] | None = None,
     ) -> CatalogueSource:
         """Build a remote :class:`CatalogueSource` from a TAP table id (no YAML write)."""
         overrides = overrides or {}
@@ -607,8 +607,8 @@ class CrossMatch:
         return src
 
     def _resolve_fallback(
-        self, value: Any, *, primary_name: str, primary_access: Optional[str]
-    ) -> Union[str, CatalogueSource]:
+        self, value: Any, *, primary_name: str, primary_access: str | None
+    ) -> str | CatalogueSource:
         """Resolve one ``fallback:`` entry of a catalogue config.
 
         Known catalogue/alias names resolve to their full
@@ -632,7 +632,7 @@ class CrossMatch:
             )
         return self._remote_source(self.get_catalogue_config(resolved), {})
 
-    def _remote_source(self, cfg: Dict[str, Any], overrides) -> CatalogueSource:
+    def _remote_source(self, cfg: dict[str, Any], overrides) -> CatalogueSource:
         src = CatalogueSource(
             name=cfg["_catalogue_name"],
             is_local=False,
@@ -702,12 +702,12 @@ class CrossMatch:
         self,
         catalogue_1_input: FrameInput,
         catalogue_2_input: FrameInput,
-        output_file: Optional[Union[str, Path]] = None,
+        output_file: str | Path | None = None,
         *,
         lazy: bool = False,
-        progress_cb: Optional[Callable[[str], None]] = None,
+        progress_cb: Callable[[str], None] | None = None,
         **params,
-    ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
+    ) -> pl.DataFrame | pl.LazyFrame | None:
         """Run a crossmatch (backward-compatible spread-args entry point).
 
         For new code prefer :meth:`crossmatch_request` with a typed
@@ -739,13 +739,13 @@ class CrossMatch:
 
     def crossmatch_multi(
         self,
-        catalogues: List[FrameInput],
-        output_file: Optional[Union[str, Path]] = None,
+        catalogues: list[FrameInput],
+        output_file: str | Path | None = None,
         *,
         lazy: bool = False,
-        progress_cb: Optional[Callable[[str], None]] = None,
+        progress_cb: Callable[[str], None] | None = None,
         **params: Any,
-    ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
+    ) -> pl.DataFrame | pl.LazyFrame | None:
         """Run an N-catalogue crossmatch using sequential pairwise matching.
 
         Catalogue 1 and 2 are matched first; the result is then matched against
@@ -766,13 +766,13 @@ class CrossMatch:
 
     def union_match(
         self,
-        catalogues: List[FrameInput],
-        output_file: Optional[Union[str, Path]] = None,
+        catalogues: list[FrameInput],
+        output_file: str | Path | None = None,
         *,
         lazy: bool = False,
-        progress_cb: Optional[Callable[[str], None]] = None,
+        progress_cb: Callable[[str], None] | None = None,
         **params: Any,
-    ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
+    ) -> pl.DataFrame | pl.LazyFrame | None:
         """Build a master union catalogue via sequential full outer joins.
 
         Every catalogue's measurements are preserved — unmatched sources from
@@ -870,14 +870,14 @@ class CrossMatch:
 
     def fof_match(
         self,
-        catalogues: List[FrameInput],
-        output_file: Optional[Union[str, Path]] = None,
+        catalogues: list[FrameInput],
+        output_file: str | Path | None = None,
         *,
         radius_arcsec: float = 1.0,
         hats_threshold: int = 100_000,
-        progress_cb: Optional[Callable[[str], None]] = None,
+        progress_cb: Callable[[str], None] | None = None,
         **params: Any,
-    ) -> Optional[pl.DataFrame]:
+    ) -> pl.DataFrame | None:
         """Friends-of-Friends transitive closure across all catalogues.
 
         Matches the first catalogue against every other catalogue pairwise,
@@ -933,7 +933,7 @@ class CrossMatch:
             **{k: v for k, v in params.items() if k != "find"},
         )
 
-        sources: List[CatalogueSource] = []
+        sources: list[CatalogueSource] = []
         sources.append(self.resolve_source(req.cat1, req.side1.as_dict()))
         sources.append(self.resolve_source(req.cat2, req.side2.as_dict()))
         for cat_input in catalogues[2:]:
@@ -1069,9 +1069,9 @@ class CrossMatch:
         primary_cols = list(frames[0].columns)
         # Pre-build per-catalogue column lookup: cat_idx -> {orig_name: output_name}
         all_cols_seen = set(primary_cols)
-        per_cat_cols: Dict[int, Dict[str, str]] = {}
+        per_cat_cols: dict[int, dict[str, str]] = {}
         for j in range(1, n_total):
-            cat_map: Dict[str, str] = {}
+            cat_map: dict[str, str] = {}
             for c in frames[j].columns:
                 if c in all_cols_seen:
                     suffixed = f"{c}_{j + 1}"
@@ -1084,7 +1084,7 @@ class CrossMatch:
         rows: list = []
         for bid in range(n_bundles):
             mask = component == bid
-            cat_members: List[str] = []
+            cat_members: list[str] = []
             total_contributing = 0
 
             # Build merged row values.
@@ -1143,9 +1143,9 @@ class CrossMatch:
     # ------------------------------------------------------------------ #
     def _ray_union_multi(
         self,
-        catalogues: List[FrameInput],
-        output_file: Optional[Union[str, Path]],
-        progress_cb: Optional[Callable[[str], None]] = None,
+        catalogues: list[FrameInput],
+        output_file: str | Path | None,
+        progress_cb: Callable[[str], None] | None = None,
         *,
         union_requested: bool = False,
         **params: Any,
@@ -1287,7 +1287,7 @@ class CrossMatch:
                 # (--ra1/--dec1/--id1 apply to the first catalogue, --ra2/--dec2/--id2
                 # to the second); extras beyond catalogue 2 resolve like the sequential
                 # path — with no overrides.
-                sources: List[CatalogueSource] = []
+                sources: list[CatalogueSource] = []
                 for i, cat in enumerate(catalogues, start=1):
                     overrides = _side_overrides(params, i) if i <= 2 else {}
                     sources.append(self.resolve_source(cat, overrides))
@@ -1366,14 +1366,14 @@ class CrossMatch:
 
     def _multi_match_impl(
         self,
-        catalogues: List[FrameInput],
-        output_file: Optional[Union[str, Path]],
+        catalogues: list[FrameInput],
+        output_file: str | Path | None,
         lazy: bool,
         *,
         union_match: bool = False,
-        progress_cb: Optional[Callable[[str], None]] = None,
+        progress_cb: Callable[[str], None] | None = None,
         **params: Any,
-    ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
+    ) -> pl.DataFrame | pl.LazyFrame | None:
         if len(catalogues) < 2:
             raise CrossMatchError("At least two catalogues are required for crossmatching.")
 
@@ -1439,7 +1439,7 @@ class CrossMatch:
                 )
 
         # Resolve ALL sources up front.
-        sources: List[CatalogueSource] = []
+        sources: list[CatalogueSource] = []
         sources.append(self.resolve_source(req.cat1, req.side1.as_dict()))
         sources.append(self.resolve_source(req.cat2, req.side2.as_dict()))
         for cat_input in catalogues[2:]:
@@ -1621,17 +1621,17 @@ class CrossMatch:
 
     def nway_match(
         self,
-        catalogues: List[FrameInput],
-        output_file: Optional[Union[str, Path]] = None,
+        catalogues: list[FrameInput],
+        output_file: str | Path | None = None,
         *,
         radius_arcsec: float = 1.0,
-        prior_columns: Optional[List[str]] = None,
+        prior_columns: list[str] | None = None,
         max_tuples_per_source: int = 10_000,
         chunk_size: int = 50_000,
         hats_threshold: int = 100_000,
-        progress_cb: Optional[Callable[[str], None]] = None,
+        progress_cb: Callable[[str], None] | None = None,
         **params: Any,
-    ) -> Optional[pl.DataFrame]:
+    ) -> pl.DataFrame | None:
         """Bayesian N-way multi-catalogue crossmatching (Budavári & Szalay 2008).
 
         Matches *catalogues* simultaneously, computing an N-way Bayes factor
@@ -1887,8 +1887,8 @@ class CrossMatch:
         req: MatchRequest,
         *,
         hats_threshold: int = 100_000,
-        progress_cb: Optional[Callable[[str], None]] = None,
-    ) -> Optional[Union[pl.DataFrame, pl.LazyFrame]]:
+        progress_cb: Callable[[str], None] | None = None,
+    ) -> pl.DataFrame | pl.LazyFrame | None:
         """Run a crossmatch from a typed :class:`~xmatch.request.MatchRequest`.
 
         This is the preferred entry point for new code. It gives mypy and IDEs
@@ -1937,7 +1937,7 @@ class CrossMatch:
         req: MatchRequest,
         *,
         right_suffix: str = _RIGHT_SUFFIX,
-        progress_cb: Optional[Callable[[str], None]] = None,
+        progress_cb: Callable[[str], None] | None = None,
     ) -> pl.LazyFrame:
         _validate_coordinate_frames(
             [src1, src2], target_epoch=req.spec.target_epoch, id_join=req.id_join
@@ -2025,7 +2025,7 @@ class CrossMatch:
         src2: CatalogueSource,
         req: MatchRequest,
         *,
-        progress_cb: Optional[Callable[[str], None]] = None,
+        progress_cb: Callable[[str], None] | None = None,
     ) -> pl.LazyFrame:
         local, remote = (src1, src2) if src1.is_local else (src2, src1)
         local_lf = local.lazy()
@@ -2060,7 +2060,7 @@ class CrossMatch:
         src2: CatalogueSource,
         req: MatchRequest,
         *,
-        progress_cb: Optional[Callable[[str], None]] = None,
+        progress_cb: Callable[[str], None] | None = None,
     ) -> pl.LazyFrame:
         if (
             src1.access_method == "tap"
@@ -2088,7 +2088,7 @@ class CrossMatch:
         prefix: str,
         region_from=None,
         local=None,
-        progress_cb: Optional[Callable[[str], None]] = None,
+        progress_cb: Callable[[str], None] | None = None,
     ) -> pl.DataFrame:
         ra = req.ra
         dec = req.dec
@@ -2117,7 +2117,7 @@ class CrossMatch:
         columns = (
             req.side1.columns if prefix == "1" else req.side2.columns if prefix == "2" else None
         )
-        required: List[Optional[str]] = []
+        required: list[str | None] = []
         if req.spec.matcher in {"skyerr", "skyellipse"}:
             required.extend((src.ra_err_column, src.dec_err_column, src.corr_column))
         if req.spec.target_epoch is not None:
@@ -2171,7 +2171,7 @@ class CrossMatch:
 # --------------------------------------------------------------------------- #
 # nway_match helpers (module-level for pickling safety)
 # --------------------------------------------------------------------------- #
-def _build_empty_nway_result(frames: list, n_cats: int) -> "pl.DataFrame":
+def _build_empty_nway_result(frames: list, n_cats: int) -> pl.DataFrame:
     """Return an empty result frame with the correct schema for nway_match."""
     cols = list(frames[0].columns)
     for j in range(1, n_cats):
@@ -2190,8 +2190,8 @@ def _process_nway_chunk(
     cat_dec_names: list,
     sigmas_all: list,
     radius_arcsec: float,
-    prior_columns: Optional[list],
-) -> "pl.DataFrame":
+    prior_columns: list | None,
+) -> pl.DataFrame:
     """Process one chunk of N-way tuples: compute p_match and build frame."""
     # Extract per-catalogue index arrays from the chunk.
     indices_per_cat = [
@@ -2242,6 +2242,6 @@ def _process_nway_chunk(
         seen_columns.update(part.columns)
         result_parts.append(part)
 
-    result = pl.concat(result_parts, how="horizontal")
+    result = pl.concat(result_parts, how="horizontal", strict=True)
     result = result.with_columns(pl.Series(PMATCH_COLUMN, p_match))
     return result

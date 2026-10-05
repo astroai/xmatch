@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import yaml
 
@@ -30,7 +30,7 @@ def legacy_user_config_path() -> Path:
     return Path.home() / ".xmatch" / "xmatch.yaml"
 
 
-def find_user_config_path() -> Optional[Path]:
+def find_user_config_path() -> Path | None:
     """Return the first existing user overlay path, or ``None``."""
     for path in (user_config_path(), legacy_user_config_path()):
         if path.is_file():
@@ -38,12 +38,12 @@ def find_user_config_path() -> Optional[Path]:
     return None
 
 
-def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge *overlay* onto a shallow copy of *base*.
 
     Mapping values are merged; other values replace. Lists replace entirely.
     """
-    out: Dict[str, Any] = dict(base)
+    out: dict[str, Any] = dict(base)
     for key, value in overlay.items():
         if isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = deep_merge(out[key], value)
@@ -52,9 +52,9 @@ def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def load_yaml_mapping(path: Path) -> Dict[str, Any]:
+def load_yaml_mapping(path: Path) -> dict[str, Any]:
     try:
-        with open(path, "r") as fh:
+        with open(path) as fh:
             data = yaml.safe_load(fh)
     except yaml.YAMLError as exc:
         raise ConfigError(f"Error parsing {path}: {exc}") from exc
@@ -67,9 +67,9 @@ def load_yaml_mapping(path: Path) -> Dict[str, Any]:
 
 def load_merged_config(
     *,
-    config_file: Optional[Path] = None,
+    config_file: Path | None = None,
     include_user_overlay: bool = True,
-) -> tuple[Dict[str, Any], Path]:
+) -> tuple[dict[str, Any], Path]:
     """Load config: explicit file alone, else bundled ∪ user ∪ cwd overlays.
 
     Returns ``(config_dict, primary_path)`` where *primary_path* is the
@@ -102,7 +102,7 @@ def load_merged_config(
     return config, primary
 
 
-def format_catalogue_yaml(name: str, entry: Dict[str, Any], *, indent: int = 2) -> str:
+def format_catalogue_yaml(name: str, entry: dict[str, Any], *, indent: int = 2) -> str:
     """Serialize one catalogue entry as an indented YAML block under ``catalogues:``."""
     pad = " " * indent
     # Dump just the entry mapping, then prefix each line.
@@ -119,11 +119,11 @@ def format_catalogue_yaml(name: str, entry: Dict[str, Any], *, indent: int = 2) 
 
 def append_catalogue_to_user_config(
     name: str,
-    entry: Dict[str, Any],
+    entry: dict[str, Any],
     *,
-    path: Optional[Path] = None,
-    alias: Optional[str] = None,
-    archives: Optional[Dict[str, Any]] = None,
+    path: Path | None = None,
+    alias: str | None = None,
+    archives: dict[str, Any] | None = None,
 ) -> Path:
     """Create or update the user YAML with one catalogue (and optional alias).
 

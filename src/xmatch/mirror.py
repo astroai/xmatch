@@ -45,10 +45,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 import polars as pl
 
@@ -69,7 +70,7 @@ _HTTP_BACKOFF_CAP_S = 60.0
 _DEFAULT_MIN_FREE_GB = 10.0
 
 
-def _min_free_gb(explicit: Optional[float]) -> float:
+def _min_free_gb(explicit: float | None) -> float:
     """Resolve the free-space floor: explicit > env > 10 GiB default."""
     if explicit is not None:
         return float(explicit)
@@ -122,7 +123,7 @@ class SyncStats:
     pages: int = 0
     converted: bool = False
 
-    def merge(self, other: "SyncStats") -> None:
+    def merge(self, other: SyncStats) -> None:
         self.bytes_downloaded += other.bytes_downloaded
         self.files_downloaded += other.files_downloaded
         self.files_skipped += other.files_skipped
@@ -141,7 +142,7 @@ def _is_remote_hats(src: CatalogueSource) -> bool:
     )
 
 
-def _rate_host(src: CatalogueSource) -> Optional[str]:
+def _rate_host(src: CatalogueSource) -> str | None:
     if src.access_method == "tap":
         return urllib.parse.urlparse(src.tap_url or "").netloc or None
     ident = src.access_identifier or ""
@@ -191,13 +192,13 @@ def _http_request(
     bucket: TokenBucket,
     *,
     head: bool = False,
-) -> Tuple[Optional[bytes], Optional[int]]:
+) -> tuple[bytes | None, int | None]:
     """GET (or HEAD) ``url`` under the token bucket with 429/503 backoff.
 
     Returns ``(body, content_length)`` (body ``None`` for HEAD).  Raises the
     underlying exception after retries are exhausted.
     """
-    last_exc: Optional[Exception] = None
+    last_exc: Exception | None = None
     for attempt in range(_HTTP_RETRIES):
         bucket.acquire()
         try:
@@ -225,7 +226,7 @@ def _http_request(
     raise last_exc
 
 
-def _http_listing(url: str, bucket: TokenBucket) -> List[str]:
+def _http_listing(url: str, bucket: TokenBucket) -> list[str]:
     """Entry names from an HTML directory listing (``[]`` when unavailable)."""
     try:
         body, _ = _http_request(url, bucket)
@@ -234,7 +235,7 @@ def _http_listing(url: str, bucket: TokenBucket) -> List[str]:
     if not body:
         return []
     text = body.decode("utf-8", errors="replace")
-    names: List[str] = []
+    names: list[str] = []
     for m in re.finditer(r'href="([^"?#]+)"', text):
         name = m.group(1)
         if name in (".", ".."):
@@ -243,7 +244,7 @@ def _http_listing(url: str, bucket: TokenBucket) -> List[str]:
     return names
 
 
-def _http_head(url: str, bucket: TokenBucket) -> Optional[int]:
+def _http_head(url: str, bucket: TokenBucket) -> int | None:
     try:
         _, size = _http_request(url, bucket, head=True)
         return size
@@ -255,8 +256,8 @@ def _http_head(url: str, bucket: TokenBucket) -> Optional[int]:
 # remote HATS listing
 # --------------------------------------------------------------------------- #
 def _remote_hats_listing(
-    src: CatalogueSource, bucket: Optional[TokenBucket] = None
-) -> List[Dict[str, Any]]:
+    src: CatalogueSource, bucket: TokenBucket | None = None
+) -> list[dict[str, Any]]:
     """List ``{rel, size}`` pairs for every HATS file on the remote source.
 
     Prefers ``partition_info.parquet`` (authoritative list + sizes), then an
@@ -280,7 +281,7 @@ def _remote_hats_listing(
             if "file_loc" not in info.columns:
                 continue
             base = "dataset" if info_rel.startswith("dataset/") else ""
-            files: List[Dict[str, Any]] = []
+            files: list[dict[str, Any]] = []
             for row in info.rows(named=True):
                 loc = str(row.get("file_loc", "")).strip()
                 if not loc:
@@ -307,16 +308,16 @@ def _remote_hats_listing(
     return _http_walk_hats(root, bucket)
 
 
-def _as_size(value: Any) -> Optional[int]:
+def _as_size(value: Any) -> int | None:
     try:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
 
 
-def _http_walk_hats(root: str, bucket: TokenBucket) -> List[Dict[str, Any]]:
+def _http_walk_hats(root: str, bucket: TokenBucket) -> list[dict[str, Any]]:
     """Walk HTML listings under ``root``/``dataset`` collecting partition files."""
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for base in ("", "dataset"):
         url = f"{root}/{base}" if base else root
         for name in _http_listing(url, bucket):
@@ -329,16 +330,16 @@ def _http_walk_hats(root: str, bucket: TokenBucket) -> List[Dict[str, Any]]:
     return out
 
 
-def _walk_order_dir(url: str, bucket: TokenBucket, prefix: str) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+def _walk_order_dir(url: str, bucket: TokenBucket, prefix: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for name in _http_listing(url, bucket):
         if name.startswith("Dir="):
             out.extend(_walk_dir(url + "/" + name, bucket, f"{prefix}/{name}"))
     return out
 
 
-def _walk_dir(url: str, bucket: TokenBucket, prefix: str) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+def _walk_dir(url: str, bucket: TokenBucket, prefix: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for name in _http_listing(url, bucket):
         rel = f"{prefix}/{name}" if prefix else name
         if name.lower().endswith(".parquet"):
@@ -352,11 +353,11 @@ def _walk_dir(url: str, bucket: TokenBucket, prefix: str) -> List[Dict[str, Any]
     return out
 
 
-def _vos_hats_listing(ident: str) -> List[Dict[str, Any]]:
+def _vos_hats_listing(ident: str) -> list[dict[str, Any]]:
     storage = open_storage(ident)
-    rels: List[str] = []
+    rels: list[str] = []
     _walk_storage(storage, "", rels)
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for rel in rels:
         if rel.endswith("/"):
             continue
@@ -364,7 +365,7 @@ def _vos_hats_listing(ident: str) -> List[Dict[str, Any]]:
     return out
 
 
-def _walk_storage(storage: Storage, rel: str, acc: List[str], depth: int = 0) -> None:
+def _walk_storage(storage: Storage, rel: str, acc: list[str], depth: int = 0) -> None:
     """Collect every node under ``rel``: files as paths, containers as dirs.
 
     ``storage.list`` entries have no type marker (some vos clients append
@@ -397,7 +398,7 @@ def _walk_storage(storage: Storage, rel: str, acc: List[str], depth: int = 0) ->
 # --------------------------------------------------------------------------- #
 # manifest helpers
 # --------------------------------------------------------------------------- #
-def _read_json(cache: Storage, rel: str) -> Dict[str, Any]:
+def _read_json(cache: Storage, rel: str) -> dict[str, Any]:
     try:
         if not cache.exists(rel):
             return {}
@@ -414,7 +415,7 @@ def _read_json(cache: Storage, rel: str) -> Dict[str, Any]:
         return {}
 
 
-def _write_json(cache: Storage, rel: str, obj: Dict[str, Any]) -> None:
+def _write_json(cache: Storage, rel: str, obj: dict[str, Any]) -> None:
     tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-mf-"))
     local = tmpdir / "manifest.json"
     try:
@@ -482,9 +483,9 @@ def _mirror_remote_hats(
     bucket: TokenBucket,
     force: bool,
     workers: int,
-    progress_cb: Optional[Callable[[str], None]],
+    progress_cb: Callable[[str], None] | None,
     stats: SyncStats,
-    endpoint: Optional[CatalogueSource] = None,
+    endpoint: CatalogueSource | None = None,
 ) -> None:
     """Mirror every remote HATS partition file into ``cache/<name>/<version>``.
 
@@ -499,7 +500,7 @@ def _mirror_remote_hats(
     manifest_rel = f"{prefix}/{_MANIFEST_NAME}"
     manifest = _read_json(cache, manifest_rel)
 
-    def do_fetch(entry: Dict[str, Any]) -> None:
+    def do_fetch(entry: dict[str, Any]) -> None:
         rel = entry["rel"]
         tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-"))
         local_tmp = tmpdir / Path(rel).name
@@ -529,7 +530,7 @@ def _mirror_remote_hats(
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    todo: List[Dict[str, Any]] = []
+    todo: list[dict[str, Any]] = []
     for entry in remote:
         rel = entry["rel"]
         old = manifest.get("files", {}).get(rel)
@@ -588,9 +589,7 @@ def _tap_service(src: CatalogueSource, auth_session: Any):
     return get_tap_service(src.tap_url, auth_session=auth_session)
 
 
-def _tap_run(
-    src: CatalogueSource, service, query: str, maxrec: Optional[int] = None
-) -> pl.DataFrame:
+def _tap_run(src: CatalogueSource, service, query: str, maxrec: int | None = None) -> pl.DataFrame:
     from .io_utils import astropy_table_to_polars
     from .tap import execute_tap_query
 
@@ -600,11 +599,11 @@ def _tap_run(
 def _tap_page_query(
     src: CatalogueSource,
     *,
-    offset: Optional[int] = None,
-    window: Optional[Tuple[Any, Any]] = None,
+    offset: int | None = None,
+    window: tuple[Any, Any] | None = None,
     after_key: Any = None,
-    key: Optional[str] = None,
-    limit: Optional[int] = None,
+    key: str | None = None,
+    limit: int | None = None,
 ) -> str:
     """Build ``SELECT cols FROM tbl AS t [WHERE …] ORDER BY key [LIMIT]``."""
     table_q = _table_ref(src.access_identifier or "", tap_url=src.tap_url or "")
@@ -640,7 +639,7 @@ def _tap_key_query(src: CatalogueSource, *, max_key: bool = False) -> str:
     return f"SELECT t.{_quote_id(key)} FROM {table_q} AS t ORDER BY t.{_quote_id(key)} {direction} LIMIT 1"
 
 
-def _tap_count_query(fetch: CatalogueSource, window: Optional[Tuple[Any, Any]] = None) -> str:
+def _tap_count_query(fetch: CatalogueSource, window: tuple[Any, Any] | None = None) -> str:
     key = fetch.id_column or fetch.ra_column
     table_q = _table_ref(fetch.access_identifier or "", tap_url=fetch.tap_url or "")
     if window is not None and key:
@@ -675,9 +674,9 @@ def _mirror_tap(
     hats_threshold: int,
     estimated_size: int,
     auth_session: Any,
-    progress_cb: Optional[Callable[[str], None]],
+    progress_cb: Callable[[str], None] | None,
     stats: SyncStats,
-    endpoint: Optional[CatalogueSource] = None,
+    endpoint: CatalogueSource | None = None,
 ) -> None:
     """Incrementally mirror a TAP table into ``cache/<name>/tap-<version>``.
 
@@ -724,7 +723,7 @@ def _mirror_tap(
         if not df.height:
             return
         page_rel = f"{raw}/pages/page_{idx:04d}.parquet"
-        entry: Dict[str, Any] = {"rows": df.height, "sha256": _file_sha256(cache, page_rel)}
+        entry: dict[str, Any] = {"rows": df.height, "sha256": _file_sha256(cache, page_rel)}
         if key:
             keys = df[key].to_list()
             entry["first_key"] = keys[0]
@@ -838,7 +837,7 @@ def _mirror_tap(
     )
 
 
-def _manifest_total_rows(manifest: Dict[str, Any]) -> int:
+def _manifest_total_rows(manifest: dict[str, Any]) -> int:
     """Rows implied by the page registry (single source of truth)."""
     total = 0
     for entry in (manifest.get("pages") or {}).values():
@@ -886,9 +885,9 @@ def _write_hats_native(
     dataset = out_dir / "dataset"
     dataset.mkdir(parents=True, exist_ok=True)
 
-    segments: List[Tuple[int, int, pl.DataFrame]] = []
+    segments: list[tuple[int, int, pl.DataFrame]] = []
     if not frame.is_empty():
-        stack: List[Tuple[int, int, pl.DataFrame]] = [(0, 0, frame)]
+        stack: list[tuple[int, int, pl.DataFrame]] = [(0, 0, frame)]
         while stack:
             order, pix, sub = stack.pop()
             if sub.height <= threshold or order >= max_order:
@@ -905,7 +904,7 @@ def _write_hats_native(
                 cpix = k[0]
                 stack.append((order + 1, int(cpix), psub.drop("_mask")))
 
-    info: List[Dict[str, Any]] = []
+    info: list[dict[str, Any]] = []
     for order, pix, sub in segments:
         dirtree = (pix // 10000) * 10000
         rel = f"Norder={order}/Dir={dirtree}/Npix={pix}.parquet"
@@ -1042,7 +1041,7 @@ def _gate_fallback(primary: CatalogueSource, fb: CatalogueSource, label: str) ->
         )
 
 
-def _fallback_candidates(src: CatalogueSource) -> List[CatalogueSource]:
+def _fallback_candidates(src: CatalogueSource) -> list[CatalogueSource]:
     """``[src, *endpoint-replaced fallback copies]`` for the failover walk.
 
     Every candidate keeps the primary's identity (name, columns, cache
@@ -1071,7 +1070,7 @@ def _sync_with_failover(
     hats_threshold: int,
     estimated_size: int,
     auth_session: Any,
-    progress_cb: Optional[Callable[[str], None]],
+    progress_cb: Callable[[str], None] | None,
     stats: SyncStats,
 ) -> None:
     """Mirror ``src``, retrying endpoint-class failures across its fallbacks.
@@ -1145,7 +1144,7 @@ def _sync_with_failover(
 
 def _replicate_tree(src_storage: Storage, dst_storage: Storage, rel: str) -> None:
     """Copy the mirrored tree at ``rel`` (files only) onto ``dst_storage``."""
-    rels: List[str] = []
+    rels: list[str] = []
     _walk_storage(src_storage, rel, rels)
     tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-repl-"))
     try:
@@ -1159,7 +1158,7 @@ def _replicate_tree(src_storage: Storage, dst_storage: Storage, rel: str) -> Non
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _walk_all_files(storage: Storage, rel: str, acc: List[str], depth: int = 0) -> None:
+def _walk_all_files(storage: Storage, rel: str, acc: list[str], depth: int = 0) -> None:
     """Collect every FILE under ``rel`` (no filename filter).
 
     :func:`_walk_storage` keeps only parquet/properties files, which is
@@ -1191,7 +1190,7 @@ def _walk_all_files(storage: Storage, rel: str, acc: List[str], depth: int = 0) 
 def _copy_tree_files(src_storage: Storage, dst_storage: Storage, rel: str) -> None:
     """Copy every file under ``rel`` onto ``dst_storage`` (unfiltered walk;
     see :func:`_walk_all_files`)."""
-    rels: List[str] = []
+    rels: list[str] = []
     _walk_all_files(src_storage, rel, rels)
     tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-tree-"))
     try:
@@ -1203,7 +1202,7 @@ def _copy_tree_files(src_storage: Storage, dst_storage: Storage, rel: str) -> No
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _replicate_to_roots(cache: Storage, src: CatalogueSource, replica_roots: List[str]) -> None:
+def _replicate_to_roots(cache: Storage, src: CatalogueSource, replica_roots: list[str]) -> None:
     """Best-effort copy of a synced mirror tree onto each replica root.
 
     Replicas give the union reader a surviving copy when the primary root's
@@ -1232,18 +1231,18 @@ def _replicate_to_roots(cache: Storage, src: CatalogueSource, replica_roots: Lis
 def sync_catalogue(
     src: CatalogueSource,
     *,
-    cache_root: Optional[str] = None,
-    replica_roots: Optional[List[str]] = None,
+    cache_root: str | None = None,
+    replica_roots: list[str] | None = None,
     rate_limit_rps: float = 1.0,
     workers: int = 8,
     force: bool = False,
-    progress_cb: Optional[Callable[[str], None]] = None,
+    progress_cb: Callable[[str], None] | None = None,
     auth_session: Any = None,
     page_size: int = DEFAULT_PAGE_SIZE,
     hats_threshold: int = 100_000,
-    estimated_size: Optional[int] = None,
-    fresh_after: Optional[float] = None,
-    min_free_gb: Optional[float] = None,
+    estimated_size: int | None = None,
+    fresh_after: float | None = None,
+    min_free_gb: float | None = None,
 ) -> SyncStats:
     """Mirror ``src`` into the cache, incrementally. Returns :class:`SyncStats`.
 
@@ -1320,9 +1319,9 @@ def sync_catalogue(
 
 def locate_mirrored(
     src: CatalogueSource,
-    cache_root: Optional[str] = None,
-    cache_roots: Optional[List[str]] = None,
-) -> Tuple[str, str]:
+    cache_root: str | None = None,
+    cache_roots: list[str] | None = None,
+) -> tuple[str, str]:
     """Return ``(storage_root, rel)`` of the mirrored HATS copy of ``src``.
 
     ``cache_roots`` (primary first) probes each root in order and returns the
@@ -1365,17 +1364,17 @@ def locate_mirrored(
 def ensure_mirrored(
     src: CatalogueSource,
     *,
-    cache_root: Optional[str] = None,
-    replica_roots: Optional[List[str]] = None,
+    cache_root: str | None = None,
+    replica_roots: list[str] | None = None,
     rate_limit_rps: float = 1.0,
     workers: int = 8,
     force: bool = False,
-    progress_cb: Optional[Callable[[str], None]] = None,
+    progress_cb: Callable[[str], None] | None = None,
     auth_session: Any = None,
     hats_threshold: int = 100_000,
-    estimated_size: Optional[int] = None,
-    fresh_after: Optional[float] = None,
-    min_free_gb: Optional[float] = None,
+    estimated_size: int | None = None,
+    fresh_after: float | None = None,
+    min_free_gb: float | None = None,
 ) -> CatalogueSource:
     """Mirror a remote source and return a source pointing at the local HATS copy.
 

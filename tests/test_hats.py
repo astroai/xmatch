@@ -108,10 +108,8 @@ def _make_fake_catalog():
 
 
 def _make_fake_result_df():
-    """Return a minimal pandas DataFrame mimicking an LSDB crossmatch result."""
-    import pandas as pd
-
-    return pd.DataFrame(
+    """Return a minimal DataFrame mimicking an LSDB crossmatch result."""
+    return pl.DataFrame(
         {
             "ra": [10.0, 20.0],
             "dec": [5.0, 6.0],
@@ -203,11 +201,9 @@ def test_hats_crossmatch_passes_n_neighbors_all(fake_lsdb):
 def test_hats_crossmatch_find_all_multi_row_rename(fake_lsdb):
     """find='all' with multiple matches per left row → _dist_arcsec renamed to
     sep_arcsec correctly on every row, and row count exceeds left input count."""
-    import pandas as pd
-
     # 2 left stars: star-A matches 2 right stars, star-B matches 1.
     cat_multi = mock.MagicMock()
-    cat_multi.crossmatch.return_value.compute.return_value = pd.DataFrame(
+    cat_multi.crossmatch.return_value.compute.return_value = pl.DataFrame(
         {
             "ra": [10.0, 10.0, 20.0],  # left star-A (×2), star-B
             "dec": [5.0, 5.0, 6.0],
@@ -313,10 +309,8 @@ def test_hats_crossmatch_warns_on_missing_dist_arcsec(fake_lsdb, caplog):
     )
 
     # Override fake_lsdb.read_hats to return a catalog without _dist_arcsec.
-    import pandas as pd
-
     cat_no_dist = mock.MagicMock()
-    cat_no_dist.crossmatch.return_value.compute.return_value = pd.DataFrame(
+    cat_no_dist.crossmatch.return_value.compute.return_value = pl.DataFrame(
         {
             "ra": [10.0],
             "dec": [5.0],

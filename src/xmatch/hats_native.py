@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any
 
 import polars as pl
 
@@ -50,8 +51,8 @@ def _hats_root(src: CatalogueSource) -> Path:
     return root
 
 
-def _read_properties(root: Path) -> Dict[str, str]:
-    props: Dict[str, str] = {}
+def _read_properties(root: Path) -> dict[str, str]:
+    props: dict[str, str] = {}
     for name in ("properties", "hats.properties"):
         p = root / name
         if not p.exists():
@@ -64,7 +65,7 @@ def _read_properties(root: Path) -> Dict[str, str]:
     return props
 
 
-def _ra_dec_columns(src: CatalogueSource, root: Path) -> Tuple[str, str]:
+def _ra_dec_columns(src: CatalogueSource, root: Path) -> tuple[str, str]:
     ra = src.ra_column
     dec = src.dec_column
     if ra and dec:
@@ -75,11 +76,11 @@ def _ra_dec_columns(src: CatalogueSource, root: Path) -> Tuple[str, str]:
     return ra, dec
 
 
-def list_hats_pixels(root: Path) -> List[Tuple[int, int, Path]]:
+def list_hats_pixels(root: Path) -> list[tuple[int, int, Path]]:
     """Return ``(order, pixel, path)`` for each Npix partition under root."""
     dataset = root / "dataset"
     base = dataset if dataset.exists() else root
-    found: List[Tuple[int, int, Path]] = []
+    found: list[tuple[int, int, Path]] = []
     for npix_dir in sorted(base.glob("Norder=*/Dir=*/Npix=*")):
         if npix_dir.is_dir():
             try:
@@ -126,7 +127,7 @@ def load_hats_all(src: CatalogueSource) -> pl.DataFrame:
     return pl.concat(frames, how="diagonal_relaxed")
 
 
-def _healpix_neighbors(order: int, center_pix: int, *, radius_arcsec: float = 0.0) -> List[int]:
+def _healpix_neighbors(order: int, center_pix: int, *, radius_arcsec: float = 0.0) -> list[int]:
     """Return nested HEALPix pixels covering a cap around ``center_pix``."""
     pix = int(center_pix)
     nside = 2 ** int(order)
@@ -187,7 +188,7 @@ def margin_pixels(
     center_pix: int,
     radius_arcsec: float,
     right_pixels: Sequence[int],
-) -> List[int]:
+) -> list[int]:
     """Right pixels for a left pixel match: covering of the match cap.
 
     Intersection with ``right_pixels`` is O(cover size), not O(N_right).
@@ -265,7 +266,7 @@ def _pixel_task_payload(
     order: int,
     pix: int,
     left_path: str,
-    right_index: Dict[int, str],
+    right_index: dict[int, str],
     right_hats: bool,
     right_payload,
     src1: CatalogueSource,
@@ -273,7 +274,7 @@ def _pixel_task_payload(
     spec: MatchSpec,
     right_suffix: str,
     engine: str = "fast",
-) -> Optional[pl.DataFrame]:
+) -> pl.DataFrame | None:
     left_df = _load_pixel_path(Path(left_path))
     if left_df.is_empty():
         return None
@@ -294,8 +295,8 @@ def hats_native_crossmatch(
     spec: MatchSpec,
     *,
     engine: str = "fast",
-    local_lf1: Optional[pl.LazyFrame] = None,
-    local_lf2: Optional[pl.LazyFrame] = None,
+    local_lf1: pl.LazyFrame | None = None,
+    local_lf2: pl.LazyFrame | None = None,
     right_suffix: str = "_2",
 ) -> pl.DataFrame:
     """Crossmatch with real matchers; HATS sides read as parquet pixels."""
@@ -325,7 +326,7 @@ def hats_native_crossmatch(
     if not left_pixels:
         return pl.DataFrame()
 
-    right_index: Dict[int, Path] = {}
+    right_index: dict[int, Path] = {}
     right_all = None
     if right_hats:
         right_root = _hats_root(src2)
@@ -334,7 +335,7 @@ def hats_native_crossmatch(
     else:
         right_all = (local_lf2 or src2.lazy()).collect()
 
-    results: List[pl.DataFrame] = []
+    results: list[pl.DataFrame] = []
     right_idx_str = {k: str(v) for k, v in right_index.items()}
 
     if eng == "ray":
@@ -343,7 +344,7 @@ def hats_native_crossmatch(
 
             if not ray_mod.is_initialized():
                 ray_mod.init(ignore_reinit_error=True)
-            remote_fn = ray_mod.remote(_pixel_task_payload)
+            remote_fn: Any = ray_mod.remote(_pixel_task_payload)
             futures = [
                 remote_fn.remote(
                     order,

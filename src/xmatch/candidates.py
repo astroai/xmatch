@@ -15,8 +15,8 @@ import math
 import os
 import shutil
 import tempfile
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Iterable, Sequence
 
 import polars as pl
 

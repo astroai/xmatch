@@ -24,13 +24,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import polars as pl
 
 from .matchers import MatchSpec
 
-FrameInput = Union[str, Path, pl.DataFrame, pl.LazyFrame]
+FrameInput = str | Path | pl.DataFrame | pl.LazyFrame
 
 
 @dataclass
@@ -41,63 +41,63 @@ class SideOverrides:
     detection or the YAML config defaults.
     """
 
-    ra_column: Optional[str] = None
+    ra_column: str | None = None
     """Right-ascension column name on this side."""
 
-    dec_column: Optional[str] = None
+    dec_column: str | None = None
     """Declination column name on this side."""
 
-    id_column: Optional[str] = None
+    id_column: str | None = None
     """Identifier column name on this side."""
 
-    ra_err_column: Optional[str] = None
+    ra_err_column: str | None = None
     """Right-ascension uncertainty column for local ``skyerr`` matching."""
 
-    dec_err_column: Optional[str] = None
+    dec_err_column: str | None = None
     """Declination uncertainty column for local ``skyerr`` matching."""
 
-    corr_column: Optional[str] = None
+    corr_column: str | None = None
     """RA/Dec uncertainty correlation column for ``skyellipse`` matching."""
 
-    astrometric_covariance_columns: Optional[Dict[str, str]] = None
+    astrometric_covariance_columns: dict[str, str] | None = None
     """Canonical Gaia-style five-parameter error/correlation column mapping."""
 
-    pos_err_units: Optional[str] = None
+    pos_err_units: str | None = None
     """Units for local positional-error columns (arcsec, mas, arcmin, or deg)."""
 
-    default_pos_error_arcsec: Optional[float] = None
+    default_pos_error_arcsec: float | None = None
     """Fallback one-axis positional error for local rows, in arcseconds."""
 
-    epoch: Optional[float] = None
+    epoch: float | None = None
     """Catalogue-level Julian-year epoch."""
 
-    epoch_column: Optional[str] = None
+    epoch_column: str | None = None
     """Per-row Julian-year epoch column."""
 
-    pm_ra_column: Optional[str] = None
+    pm_ra_column: str | None = None
     """Cosine-weighted right-ascension proper-motion column, in mas/yr."""
 
-    pm_dec_column: Optional[str] = None
+    pm_dec_column: str | None = None
     """Declination proper-motion column, in mas/yr."""
 
-    parallax_column: Optional[str] = None
+    parallax_column: str | None = None
     """Parallax column, in mas, for complete space-motion propagation."""
 
-    radial_velocity_column: Optional[str] = None
+    radial_velocity_column: str | None = None
     """Barycentric radial-velocity column, in km/s."""
 
-    columns: Optional[List[str]] = None
+    columns: list[str] | None = None
     """Columns to select on this side (defaults to ``CatalogueSource.default_columns``)."""
 
-    endpoint: Optional[str] = None
+    endpoint: str | None = None
     """TAP endpoint short-name for ad-hoc table-id resolution (vizier, noirlab, …)."""
 
-    frame: Optional[str] = None
+    frame: str | None = None
     """Declared coordinate frame; mixed-frame matching requires prior conversion."""
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         """Return a dict suitable for ``resolve_source(…, overrides=…)``."""
-        d: Dict[str, Any] = {}
+        d: dict[str, Any] = {}
         for field_name in (
             "ra_column",
             "dec_column",
@@ -142,19 +142,19 @@ class MatchRequest:
     """Match criteria (radius, matcher, join type, find mode, Bayes priors)."""
 
     # ------------------------------------------------------------------ output
-    output_file: Optional[Union[str, Path]] = None
+    output_file: str | Path | None = None
     """If set, stream results to this file (``.parquet`` / ``.csv`` / ``.fits``)."""
 
     lazy: bool = False
     """Return a ``pl.LazyFrame`` instead of collecting eagerly."""
 
-    memory_budget_bytes: Optional[int] = None
+    memory_budget_bytes: int | None = None
     """Enable bounded-memory local matching when projected inputs exceed this many bytes."""
 
-    scratch_dir: Optional[Union[str, Path]] = None
+    scratch_dir: str | Path | None = None
     """Parent directory for temporary partitioned Parquet datasets."""
 
-    partition_order: Union[str, int] = "auto"
+    partition_order: str | int = "auto"
     """Sky-zone order used by bounded-memory matching, or ``"auto"``."""
 
     # ---------------------------------------------------------------- matching
@@ -166,10 +166,10 @@ class MatchRequest:
     id_join: bool = False
     """Switch from sky-matching to a pure polars relational ID join."""
 
-    id_column_1: Optional[str] = None
+    id_column_1: str | None = None
     """ID column on catalogue 1 (for ``id_join=True``)."""
 
-    id_column_2: Optional[str] = None
+    id_column_2: str | None = None
     """ID column on catalogue 2 (for ``id_join=True``)."""
 
     # ---------------------------------------------------------- column overrides
@@ -180,13 +180,13 @@ class MatchRequest:
     """Per-catalogue overrides for the second catalogue."""
 
     # ---------------------------------------------------------- remote region
-    ra: Optional[float] = None
+    ra: float | None = None
     """Region centre RA (deg) for remote downloads."""
 
-    dec: Optional[float] = None
+    dec: float | None = None
     """Region centre Dec (deg) for remote downloads."""
 
-    radius_deg: Optional[float] = None
+    radius_deg: float | None = None
     """Region radius (deg) for remote downloads."""
 
     # --------------------------------------------------------------- Bayesian
@@ -199,18 +199,18 @@ class MatchRequest:
         cls,
         cat1: FrameInput,
         cat2: FrameInput,
-        output_file: Optional[Union[str, Path]] = None,
+        output_file: str | Path | None = None,
         *,
         lazy: bool = False,
         **params: Any,
-    ) -> "MatchRequest":
+    ) -> MatchRequest:
         """Build a ``MatchRequest`` from the legacy ``**params`` dict.
 
         Used internally by :meth:`CrossMatch.crossmatch` so the old spread-args
         API keeps working while the internals migrate to typed dataclasses.
         """
-        prior: List[str] = list(params.get("prior_columns") or [])
-        extra_distance: Dict[str, float] = dict(params.get("extra_distance_cols") or {})
+        prior: list[str] = list(params.get("prior_columns") or [])
+        extra_distance: dict[str, float] = dict(params.get("extra_distance_cols") or {})
         # Normalise extra_distance_cols values to float (may arrive as str/int).
         if extra_distance:
             extra_distance = {str(k): float(v) for k, v in extra_distance.items()}
@@ -295,7 +295,7 @@ class MatchRequest:
         )
 
 
-def _parse_columns(value: Any) -> Optional[List[str]]:
+def _parse_columns(value: Any) -> list[str] | None:
     """Normalise a ``columns_*`` parameter into ``List[str] | None``."""
     if value is None:
         return None

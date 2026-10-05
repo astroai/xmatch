@@ -2,7 +2,8 @@
 
 import logging
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from .exceptions import TapError
 
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 _service_cache: dict = {}
 
 
-def get_tap_service(tap_url: str, auth_session: Optional[Any] = None):
+def get_tap_service(tap_url: str, auth_session: Any | None = None):
     """Return a (cached) pyvo TAPService for *tap_url*."""
     import pyvo
 
@@ -33,7 +34,7 @@ _POLL_TIMEOUT_SECONDS = 6 * 3600.0
 
 
 def _poll_job(
-    job: Any, progress_cb: Optional[Callable[[str], None]], *, interval: float = 0.5
+    job: Any, progress_cb: Callable[[str], None] | None, *, interval: float = 0.5
 ) -> None:
     """Poll ``job.phase`` on the main thread, surface transitions to the spinner.
 
@@ -68,9 +69,9 @@ def _poll_job(
 def execute_tap_query(
     tap_service,
     query: str,
-    maxrec: Optional[int] = None,
+    maxrec: int | None = None,
     *,
-    progress_cb: Optional[Callable[[str], None]] = None,
+    progress_cb: Callable[[str], None] | None = None,
 ):
     """Execute an ADQL query (async) and return the result as an astropy Table.
 

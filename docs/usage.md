@@ -72,8 +72,8 @@ df = cm.crossmatch(
     "optical.parquet",
     "infrared.csv",
     radius_arcsec=1.5,
-    engine="fast",          # SciPy cKDTree on 3D unit sphere
-    join_type="1and2",      # Inner join
+    engine="fast",  # SciPy cKDTree on 3D unit sphere
+    join_type="1and2",  # Inner join
 )
 
 print(f"Matched {len(df)} pairs. Output columns include: {df.columns[:5]}")
@@ -142,7 +142,11 @@ lazy_result = cm.crossmatch(
 )
 
 # Chain Polars expressions before collecting
-filtered = lazy_result.filter(pl.col("sep_arcsec") < 0.5).select(["ra", "dec", "phot_g_mean_mag"]).collect()
+filtered = (
+    lazy_result.filter(pl.col("sep_arcsec") < 0.5)
+    .select(["ra", "dec", "phot_g_mean_mag"])
+    .collect()
+)
 ```
 
 ---
@@ -463,8 +467,7 @@ master = pl.scan_parquet("/arc/projects/hats/master_union_v1.hats/dataset/*/*/*.
 
 # Extract aligned multi-band photometry for model training
 features = (
-    master
-    .filter(pl.col("phot_g_mean_mag").is_not_null() & pl.col("w1mpro").is_not_null())
+    master.filter(pl.col("phot_g_mean_mag").is_not_null() & pl.col("w1mpro").is_not_null())
     .select(["ra", "dec", "phot_g_mean_mag", "phot_bp_mean_mag", "w1mpro", "w2mpro", "j_m", "h_m"])
     .collect(streaming=True)
 )
@@ -486,8 +489,8 @@ cm = CrossMatch()
 
 # 1. Evaluate 2D Mahalanobis covariance error ellipses + Likelihood Ratio
 spec = MatchSpec(
-    radius_arcsec=4.0,           # Conservative search bound
-    matcher="macauff",           # AUF empirical wings + flux likelihood ratio
+    radius_arcsec=4.0,  # Conservative search bound
+    matcher="macauff",  # AUF empirical wings + flux likelihood ratio
     macauff_flux_columns=["mag_r", "mag_i", "w1_mag"],
     find="best",
 )
@@ -497,10 +500,12 @@ req = MatchRequest(
     cat2="des_dr2_optical.parquet",
     spec=spec,
     side1=SideOverrides(
-        ra_column="ra_radio", dec_column="dec_radio",
+        ra_column="ra_radio",
+        dec_column="dec_radio",
     ),
     side2=SideOverrides(
-        ra_column="ra_des", dec_column="dec_des",
+        ra_column="ra_des",
+        dec_column="dec_des",
     ),
 )
 
@@ -520,8 +525,8 @@ spec = MatchSpec(
     radius_arcsec=5.0,
     matcher="skyerr",
     max_error=4.0,
-    target_epoch=2016.0,                  # Propagate Gaia to common 2016 epoch
-    pm_prior=True,                        # Activate Wilson (2023) PM drift prior
+    target_epoch=2016.0,  # Propagate Gaia to common 2016 epoch
+    pm_prior=True,  # Activate Wilson (2023) PM drift prior
     pm_prior_magnitude_column="phot_g_mean_mag",  # Distance proxy: brighter = faster PM
     find="best",
 )

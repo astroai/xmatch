@@ -8,9 +8,11 @@ Local sources can produce a :class:`polars.LazyFrame` directly; remote sources
 are materialised by the relevant backend (TAP/CDS/HATS) during execution.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import polars as pl
 
@@ -39,57 +41,57 @@ ASTROMETRIC_COVARIANCE_KEYS = (
 class CatalogueSource:
     name: str
     is_local: bool
-    ra_column: Optional[str] = None
-    dec_column: Optional[str] = None
-    id_column: Optional[str] = None
+    ra_column: str | None = None
+    dec_column: str | None = None
+    id_column: str | None = None
 
     # Positional error metadata (for skyerr / skyellipse).
-    ra_err_column: Optional[str] = None
-    dec_err_column: Optional[str] = None
-    corr_column: Optional[str] = None
-    astrometric_covariance_columns: Optional[Dict[str, str]] = None
+    ra_err_column: str | None = None
+    dec_err_column: str | None = None
+    corr_column: str | None = None
+    astrometric_covariance_columns: dict[str, str] | None = None
     pos_err_units: str = "arcsec"
-    default_pos_error_arcsec: Optional[float] = None
+    default_pos_error_arcsec: float | None = None
 
     # Epoch / proper-motion metadata.
-    epoch: Optional[float] = None
-    epoch_column: Optional[str] = None
-    pm_ra_column: Optional[str] = None
-    pm_dec_column: Optional[str] = None
-    parallax_column: Optional[str] = None
-    radial_velocity_column: Optional[str] = None
+    epoch: float | None = None
+    epoch_column: str | None = None
+    pm_ra_column: str | None = None
+    pm_dec_column: str | None = None
+    parallax_column: str | None = None
+    radial_velocity_column: str | None = None
     frame: str = "icrs"
 
     # Remote access metadata.
-    access_method: Optional[str] = None  # None | "tap" | "cds_xmatch" | "hats"
-    archive: Optional[str] = None
-    access_identifier: Optional[str] = None
-    tap_url: Optional[str] = None
-    default_columns: Optional[List[str]] = None
+    access_method: str | None = None  # None | "tap" | "cds_xmatch" | "hats"
+    archive: str | None = None
+    access_identifier: str | None = None
+    tap_url: str | None = None
+    default_columns: list[str] | None = None
 
     # Mirror location inside the xmatch cache root (set by ensure_mirrored).
-    hats_cache_rel: Optional[str] = None
+    hats_cache_rel: str | None = None
 
     # Cache root that actually holds the mirrored copy at ``hats_cache_rel``
     # (a replica root when the primary copy is gone; set by _mirrored_source).
-    hats_cache_root: Optional[str] = None
+    hats_cache_root: str | None = None
 
     # Alternate endpoints for the same data (mirror archives / mirrored
     # copies other data centres keep).  Entries are resolved CatalogueSource
     # objects (same-schema copies in xmatch.yaml) or raw http(s)/vos: HATS
     # URLs for remote-HATS sources.  Used by the sync failover walk.
-    fallbacks: List[Union[str, "CatalogueSource"]] = field(default_factory=list)
+    fallbacks: list[str | CatalogueSource] = field(default_factory=list)
 
     # Local payload (exactly one is set for local sources).
-    path: Optional[Path] = None
-    _frame: Optional[pl.LazyFrame] = field(default=None, repr=False)
+    path: Path | None = None
+    _frame: pl.LazyFrame | None = field(default=None, repr=False)
 
     # Explicit upstream release/measurement metadata. Append fields to preserve
     # existing positional constructors; never infer survey conventions.
-    release_namespace: Optional[str] = None
-    release_metadata: Dict[str, Any] = field(default_factory=dict)
-    photometry: List[Dict[str, Any]] = field(default_factory=list)
-    property_evidence: List[Dict[str, Any]] = field(default_factory=list)
+    release_namespace: str | None = None
+    release_metadata: dict[str, Any] = field(default_factory=dict)
+    photometry: list[dict[str, Any]] = field(default_factory=list)
+    property_evidence: list[dict[str, Any]] = field(default_factory=list)
 
     def lazy(self) -> pl.LazyFrame:
         """Return the catalogue as a LazyFrame (local sources only)."""
@@ -99,7 +101,7 @@ class CatalogueSource:
             return io_utils.scan_frame(self.path)
         raise ValueError(f"Source '{self.name}' is not local; cannot produce a frame directly.")
 
-    def with_frame(self, frame: pl.LazyFrame) -> "CatalogueSource":
+    def with_frame(self, frame: pl.LazyFrame) -> CatalogueSource:
         """Return a copy of this source backed by an in-memory frame (post-download)."""
         import copy
 
@@ -109,7 +111,7 @@ class CatalogueSource:
         clone.is_local = True
         return clone
 
-    def columns(self) -> List[str]:
+    def columns(self) -> list[str]:
         if self.is_local:
             return io_utils.frame_columns(self.lazy())
         return list(self.default_columns or [])

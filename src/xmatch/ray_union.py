@@ -54,9 +54,10 @@ import os
 import shutil
 import tempfile
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -76,11 +77,11 @@ _HUB_BLOCK = 50_000  # centre rows per distance batch
 _STATE_NAME = "resume.state"
 _FIXED_COLS = {"sep_arcsec", "_src_cats"}
 
-_LAST_PLAN: Optional["UnionPlan"] = None
+_LAST_PLAN: UnionPlan | None = None
 """Most recently built :class:`UnionPlan` (inspected by tests / ``doctor``)."""
 
 
-def last_plan() -> Optional["UnionPlan"]:
+def last_plan() -> UnionPlan | None:
     """Return the most recently built union plan (``None`` before any run)."""
     return _LAST_PLAN
 
@@ -108,10 +109,10 @@ class CataloguePlan:
     rel: str  # HATS root rel inside that storage
     ra: str  # final (output) RA column name
     dec: str  # final (output) Dec column name
-    partitions: List[PartitionPlan] = field(default_factory=list)
-    cols: List[str] = field(default_factory=list)  # original column names
-    final_cols: List[str] = field(default_factory=list)  # after _k suffixing
-    dtypes: Dict[str, str] = field(default_factory=dict)  # final col -> polars dtype str
+    partitions: list[PartitionPlan] = field(default_factory=list)
+    cols: list[str] = field(default_factory=list)  # original column names
+    final_cols: list[str] = field(default_factory=list)  # after _k suffixing
+    dtypes: dict[str, str] = field(default_factory=dict)  # final col -> polars dtype str
 
 
 @dataclass
@@ -119,7 +120,7 @@ class ChunkPlan:
     key: str  # e.g. 'c0-00000' (centre catalogue + partition index)
     center: int  # catalogue index of the centre
     center_idx: int  # partition index inside the centre catalogue
-    cand_idx: Dict[int, List[int]] = field(default_factory=dict)
+    cand_idx: dict[int, list[int]] = field(default_factory=dict)
     est_rows: int = 0  # pool estimate (rows) for the memory guard
 
 
@@ -127,21 +128,21 @@ class ChunkPlan:
 class RestPlan:
     cat: int  # catalogue index
     part_idx: int  # partition index (never covered by an earlier cone)
-    cand_idx: Dict[int, List[int]] = field(default_factory=dict)
+    cand_idx: dict[int, list[int]] = field(default_factory=dict)
     # partner catalogues k > cat whose partitions intersect the cone around
     # this partition's pixel: the only places a rest row can have a mate.
 
 
 @dataclass
 class UnionPlan:
-    catalogues: List[CataloguePlan]
+    catalogues: list[CataloguePlan]
     sep_arcsec: float
     delta_arcsec: float
     max_tuples: int
-    col_names: List[str]  # final output column order (incl. sep_arcsec/_src_cats)
+    col_names: list[str]  # final output column order (incl. sep_arcsec/_src_cats)
     out_dir: str
-    chunks: List[ChunkPlan] = field(default_factory=list)
-    rest: List[RestPlan] = field(default_factory=list)
+    chunks: list[ChunkPlan] = field(default_factory=list)
+    rest: list[RestPlan] = field(default_factory=list)
     rest_keys: set = field(default_factory=set)  # {(cat, part_idx)} of rest runs
 
 
@@ -170,13 +171,13 @@ def _pixel_diagonal_deg(order: int, pix: int = 0) -> float:
     return float(np.degrees(np.max(np.arccos(np.clip(dots, -1.0, 1.0)))))
 
 
-def _pixel_center_deg(order: int, pix: int) -> Tuple[float, float]:
+def _pixel_center_deg(order: int, pix: int) -> tuple[float, float]:
     cds = _cdshealpix()
     lon, lat = cds.healpix_to_lonlat(np.asarray([pix], dtype=np.int64), int(order))
     return float(np.degrees(np.asarray(lon.value)[0])), float(np.degrees(np.asarray(lat.value)[0]))
 
 
-def _cone_pixels(order: int, pix: int, radius_deg: float, depth: int) -> List[Tuple[int, int]]:
+def _cone_pixels(order: int, pix: int, radius_deg: float, depth: int) -> list[tuple[int, int]]:
     """Covering pixels at ``depth`` for a cone of ``radius_deg``.
 
     :func:`cdshealpix.cone_search` returns a *parent* pixel (shallower than
@@ -195,7 +196,7 @@ def _cone_pixels(order: int, pix: int, radius_deg: float, depth: int) -> List[Tu
         float(radius_deg) * u.deg,
         depth,
     )
-    out: List[Tuple[int, int]] = []
+    out: list[tuple[int, int]] = []
     for ipx, d in zip(np.asarray(ipix).tolist(), np.asarray(depths).tolist(), strict=True):
         dif = depth - int(d)
         if dif <= 0:
@@ -210,7 +211,7 @@ def _cone_pixels(order: int, pix: int, radius_deg: float, depth: int) -> List[Tu
 # --------------------------------------------------------------------------- #
 # plan builder
 # --------------------------------------------------------------------------- #
-def _footer_row_count(storage: Storage, rel: str) -> Optional[int]:
+def _footer_row_count(storage: Storage, rel: str) -> int | None:
     """Parquet footer row count (None when unavailable, e.g. remote)."""
     if isinstance(storage, LocalStorage):
         try:
@@ -223,7 +224,7 @@ def _footer_row_count(storage: Storage, rel: str) -> Optional[int]:
     return None
 
 
-def _catalogue_root(src: CatalogueSource, cache_root: Optional[str]) -> Tuple[str, str]:
+def _catalogue_root(src: CatalogueSource, cache_root: str | None) -> tuple[str, str]:
     """(storage root URI, HATS rel) for a local HATS catalogue.
 
     Mirrored sources (``hats_cache_rel`` set) live under a cache root —
@@ -241,13 +242,13 @@ def _catalogue_root(src: CatalogueSource, cache_root: Optional[str]) -> Tuple[st
     return str(src.path or src.access_identifier or ""), ""
 
 
-def _list_partitions(rel: str, storage: Storage) -> List[PartitionPlan]:
+def _list_partitions(rel: str, storage: Storage) -> list[PartitionPlan]:
     """Locate the standard HATS layout: ``Norder=*/Dir=*/Npix=*.parquet``.
 
     Supports both ``<root>/Norder=…`` (flat) and ``<root>/dataset/Norder=…``
     (the layout `hats` tools write) top-level arrangements.
     """
-    out: List[PartitionPlan] = []
+    out: list[PartitionPlan] = []
 
     def walk_order(order_name: str, order_rel: str) -> None:
         if not order_name.startswith("Norder="):
@@ -267,7 +268,7 @@ def _list_partitions(rel: str, storage: Storage) -> List[PartitionPlan]:
                 out.append(PartitionPlan(order=order, pix=pix, rel=f"{dir_rel}/{pix_name}"))
 
     root_entries = sorted(storage.list(rel) if rel else storage.list(""))
-    bases: List[str] = []
+    bases: list[str] = []
     if any(e.startswith("Norder=") for e in root_entries):
         bases = [rel] if rel else [""]
     elif "dataset" in root_entries:
@@ -291,7 +292,7 @@ def _hats_dir(pix: int) -> int:
     return (int(pix) // 10_000) * 10_000
 
 
-def _catalogue_schema(storage: Storage, rel: str) -> Dict[str, str]:
+def _catalogue_schema(storage: Storage, rel: str) -> dict[str, str]:
     """Column name -> polars dtype name ('{}' when unknown)."""
     try:
         return {c: str(t) for c, t in storage.parquet_schema(rel).items()}
@@ -307,9 +308,9 @@ def _est_rows(part: PartitionPlan, storage: Storage, fallback: int) -> int:
     return part.est_rows
 
 
-def _c_map(cur_cand: List[Dict[int, List[int]]]) -> Dict[int, List[int]]:
+def _c_map(cur_cand: list[dict[int, list[int]]]) -> dict[int, list[int]]:
     """Union of per-centre-partition candidate lists (deduped, sorted)."""
-    sink: Dict[int, List[int]] = {}
+    sink: dict[int, list[int]] = {}
     for d in cur_cand:
         for k, v in d.items():
             for i in v:
@@ -318,7 +319,7 @@ def _c_map(cur_cand: List[Dict[int, List[int]]]) -> Dict[int, List[int]]:
     return {k: sorted(v) for k, v in sink.items()}
 
 
-def _lookup_partition(pix_to_idx: Dict[Tuple[int, int], int], od: int, px: int) -> Optional[int]:
+def _lookup_partition(pix_to_idx: dict[tuple[int, int], int], od: int, px: int) -> int | None:
     if (od, px) in pix_to_idx:
         return pix_to_idx[(od, px)]
     for j in range(od - 1, -1, -1):
@@ -328,7 +329,7 @@ def _lookup_partition(pix_to_idx: Dict[Tuple[int, int], int], od: int, px: int) 
     return None
 
 
-def _partition_index(cat: CataloguePlan) -> Dict[Tuple[int, int], int]:
+def _partition_index(cat: CataloguePlan) -> dict[tuple[int, int], int]:
     """``(order, pixel) -> partition position`` for one catalogue.
 
     Built once per catalogue: rebuilding it inside :func:`_cone_candidate_idx`
@@ -342,11 +343,11 @@ def _cone_candidate_idx(
     catalogues: Sequence[CataloguePlan],
     depths: Sequence[int],
     cone_radius: float,
-    centre: Optional[int] = None,
-    pix_index: Optional[Sequence[Dict[Tuple[int, int], int]]] = None,
-) -> Dict[int, List[int]]:
+    centre: int | None = None,
+    pix_index: Sequence[dict[tuple[int, int], int]] | None = None,
+) -> dict[int, list[int]]:
     """Partitions of each other catalogue intersecting the cone around ``part``."""
-    cand: Dict[int, List[int]] = {}
+    cand: dict[int, list[int]] = {}
     for j, other in enumerate(catalogues):
         if j == centre:
             continue
@@ -372,7 +373,7 @@ def build_union_plan(
     chunk_memory_gb: float,
     max_tuples: int,
     out_dir: str,
-    cache_root: Optional[str] = None,
+    cache_root: str | None = None,
 ) -> UnionPlan:
     """Return a :class:`UnionPlan`; every source must be a local HATS dir."""
     if not sources:
@@ -383,9 +384,9 @@ def build_union_plan(
     task_rows = max(1, int(task_rows))
     chunk_memory_gb = max(0.1, float(chunk_memory_gb))
 
-    catalogues: List[CataloguePlan] = []
+    catalogues: list[CataloguePlan] = []
     used: set[str] = set(_FIXED_COLS)
-    all_cols: List[str] = []
+    all_cols: list[str] = []
     max_delta = 0.0
 
     for ci, src in enumerate(sources):
@@ -415,7 +416,7 @@ def build_union_plan(
                 len(parts),
             )
         parts.sort(key=lambda p: (p.order, p.pix))
-        _diag_cache: Dict[int, float] = {}
+        _diag_cache: dict[int, float] = {}
         for part in parts:
             _est_rows(part, storage, hats_threshold)
             diag = _diag_cache.get(part.order)
@@ -438,7 +439,7 @@ def build_union_plan(
                 f"({root!r}/{parts[0].rel!r}); the union plan needs each catalogue's "
                 "column list before it starts. Check the cache copy is readable."
             )
-        final_cols: List[str] = []
+        final_cols: list[str] = []
         for col in cols:
             while col in used:
                 col = f"{col}_{ci + 1}"
@@ -446,7 +447,7 @@ def build_union_plan(
             final_cols.append(col)
         all_cols.extend(final_cols)
 
-        dtypes: Dict[str, str] = {
+        dtypes: dict[str, str] = {
             final: str(schema[orig]) for orig, final in zip(cols, final_cols, strict=True)
         }
 
@@ -474,8 +475,8 @@ def build_union_plan(
     cone_radius = 2.0 * (sep_deg + max_delta)
     depths = [max((p.order for p in c.partitions), default=0) for c in catalogues]
 
-    chunks: List[ChunkPlan] = []
-    covered: List[List[int]] = [[] for _ in catalogues]
+    chunks: list[ChunkPlan] = []
+    covered: list[list[int]] = [[] for _ in catalogues]
     # Open each catalogue's storage once and build each pixel->partition index
     # once: both used to be rebuilt inside the per-partition (O(P)) loops.
     storages = [open_storage(cat.root) for cat in catalogues]
@@ -518,7 +519,7 @@ def build_union_plan(
                 )
             )
 
-    rest: List[RestPlan] = []
+    rest: list[RestPlan] = []
     for ci in range(1, len(catalogues)):
         covered_set = set(covered[ci])
         for pi in range(len(catalogues[ci].partitions)):
@@ -612,14 +613,14 @@ def _block_combos(
     centre_ra: np.ndarray,
     centre_dec: np.ndarray,
     centre_row: np.ndarray,  # global centre row ids (same length)
-    pools: Sequence[Tuple[np.ndarray, np.ndarray]],
+    pools: Sequence[tuple[np.ndarray, np.ndarray]],
     sep_chord: float,
     max_tuples: int,
     centre_label: int,
     cat_labels: Sequence[int],
     centre_cat: int = 0,
     drop_singles: bool = False,
-) -> Tuple[Dict[int, np.ndarray], np.ndarray, List[str], np.ndarray]:
+) -> tuple[dict[int, np.ndarray], np.ndarray, list[str], np.ndarray]:
     """Enumerate star-shaped row sets for one block of centre rows.
 
     ``pools[k]`` holds (ra, dec) of candidate rows of catalogue ``k``.
@@ -643,18 +644,18 @@ def _block_combos(
     sep_chord = float(sep_chord)
     h_xyz = matchers._radec_to_xyz(centre_ra, centre_dec)
 
-    trees: List[Optional[Any]] = []
+    trees: list[Any | None] = []
     for k in range(n_partner):
         ra, dec = pools[k]
         trees.append(cKDTree(matchers._radec_to_xyz(ra, dec)) if len(ra) else None)
 
-    cat_sel: Dict[int, List[int]] = {k: [] for k in range(n_partner)}
-    centre_out: List[int] = []
-    sep_out: List[float] = []
-    src_out: List[str] = []
+    cat_sel: dict[int, list[int]] = {k: [] for k in range(n_partner)}
+    centre_out: list[int] = []
+    sep_out: list[float] = []
+    src_out: list[str] = []
 
     for bi in range(len(centre_ra)):
-        nbrs: List[Tuple[np.ndarray, np.ndarray]] = []  # (sorted idx, sep)
+        nbrs: list[tuple[np.ndarray, np.ndarray]] = []  # (sorted idx, sep)
         for k in range(n_partner):
             tree = trees[k]
             if tree is None:
@@ -682,7 +683,7 @@ def _block_combos(
             continue
 
         # ---- combos: (candidate | null) per partner --------------------------
-        lists: List[np.ndarray] = []
+        lists: list[np.ndarray] = []
         for k in range(n_partner):
             idx_k = nbrs[k][0]
             lists.append(
@@ -693,8 +694,8 @@ def _block_combos(
         total = int(np.prod([len(each) for each in lists]))
 
         def sep_of(
-            combo: Tuple[int, ...], nbrs: List[Tuple[np.ndarray, np.ndarray]] = nbrs
-        ) -> Optional[float]:
+            combo: tuple[int, ...], nbrs: list[tuple[np.ndarray, np.ndarray]] = nbrs
+        ) -> float | None:
             vals = []
             for k in range(n_partner):
                 if combo[k] >= 0:
@@ -702,8 +703,8 @@ def _block_combos(
                     vals.append(float(nbrs[k][1][pos]))
             return min(vals) if vals else None  # None = centre-only row
 
-        always: List[Tuple[int, ...]] = []
-        heap: List[Tuple[float, Tuple[int, ...]]] = []  # (-sep, combo)
+        always: list[tuple[int, ...]] = []
+        heap: list[tuple[float, tuple[int, ...]]] = []  # (-sep, combo)
         if total <= max_tuples:
             for combo in itertools.product(*[each.tolist() for each in lists]):
                 if all(c < 0 for c in combo):
@@ -719,7 +720,7 @@ def _block_combos(
                 if sep is None:
                     continue
                 always.append(combo)
-            ordered: List[Tuple[int, ...]] = always
+            ordered: list[tuple[int, ...]] = always
         else:
             # Product exceeds max_tuples: keep the max_tuples combos with the
             # smallest sep.  Sort each partner's neighbours by separation and
@@ -731,8 +732,8 @@ def _block_combos(
             # so sep_of/cat_sel downstream need no conversion.  A row here
             # has mates (total > 1), so no centre-only combo can survive —
             # `always` stays empty and the single falls to the oracle rules.
-            perm_k: List[Optional[np.ndarray]] = []
-            sorted_lists: List[np.ndarray] = []
+            perm_k: list[np.ndarray | None] = []
+            sorted_lists: list[np.ndarray] = []
             for k in range(n_partner):
                 idx_k = nbrs[k][0]
                 if idx_k.size:
@@ -804,10 +805,10 @@ def _assemble_block(
     plan: UnionPlan,
     centre: int,
     centre_frame: pl.DataFrame,
-    cat_frames: Dict[int, pl.DataFrame],
-    cat_sel: Dict[int, np.ndarray],
+    cat_frames: dict[int, pl.DataFrame],
+    cat_sel: dict[int, np.ndarray],
     seps: np.ndarray,
-    srcs: List[str],
+    srcs: list[str],
     centre_ids: np.ndarray,
 ) -> pl.DataFrame:
     """Horizontal slice of the output rows for one combination batch.
@@ -817,7 +818,7 @@ def _assemble_block(
     part of the row set.
     """
     m = len(seps)
-    tables: List[pl.DataFrame] = []
+    tables: list[pl.DataFrame] = []
     for k in range(len(plan.catalogues)):
         if k == centre:
             tables.append(_gather_rows(centre_frame, centre_ids))
@@ -829,14 +830,14 @@ def _assemble_block(
             tables.append(_gather_rows(frame, idx))
     tables.append(pl.Series("sep_arcsec", seps, dtype=pl.Float64).to_frame())
     tables.append(pl.Series("_src_cats", srcs, dtype=pl.String).to_frame())
-    return pl.concat(tables, how="horizontal")
+    return pl.concat(tables, how="horizontal", strict=True)
 
 
 def _empty_named(col_names: Sequence[str]) -> pl.DataFrame:
     return pl.DataFrame({c: pl.Series(c, [], dtype=pl.Null) for c in col_names})
 
 
-def _run_chunk(plan: UnionPlan, chunk: ChunkPlan) -> Dict[str, Any]:
+def _run_chunk(plan: UnionPlan, chunk: ChunkPlan) -> dict[str, Any]:
     """Execute one chunk: rows radiating from its centre partition."""
     centre = plan.catalogues[chunk.center]
     centre_frame = _cat_frame(centre, [chunk.center_idx])
@@ -845,9 +846,9 @@ def _run_chunk(plan: UnionPlan, chunk: ChunkPlan) -> Dict[str, Any]:
     centre_dec = centre_frame[centre.dec].to_numpy() if n else np.zeros(0, dtype=float)
 
     partner_globals = sorted(chunk.cand_idx)
-    cat_frames: Dict[int, pl.DataFrame] = {}
-    pools: List[Tuple[np.ndarray, np.ndarray]] = []
-    labels: List[int] = []
+    cat_frames: dict[int, pl.DataFrame] = {}
+    pools: list[tuple[np.ndarray, np.ndarray]] = []
+    labels: list[int] = []
     for k in partner_globals:
         cat = plan.catalogues[k]
         frame = _cat_frame(cat, chunk.cand_idx[k])
@@ -862,7 +863,7 @@ def _run_chunk(plan: UnionPlan, chunk: ChunkPlan) -> Dict[str, Any]:
 
     sep_chord = matchers._arcsec_to_chord(float(plan.sep_arcsec))
     drop_singles = (chunk.center, chunk.center_idx) in plan.rest_keys
-    blocks: List[pl.DataFrame] = []
+    blocks: list[pl.DataFrame] = []
     for b0 in range(0, n, _HUB_BLOCK):
         b1 = min(b0 + _HUB_BLOCK, n)
         cat_sel, seps, srcs, centre_ids = _block_combos(
@@ -905,7 +906,7 @@ def _atomic_write_parquet(table: pl.DataFrame, dest: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def _run_rest(plan: UnionPlan, rest: RestPlan) -> Dict[str, Any]:
+def _run_rest(plan: UnionPlan, rest: RestPlan) -> dict[str, Any]:
     """Rows of a catalogue partition no earlier cone covers: single-``k`` rows.
 
     Every row is emitted inside the *hub's* partition that contains it (the
@@ -929,7 +930,7 @@ def _run_rest(plan: UnionPlan, rest: RestPlan) -> Dict[str, Any]:
     dec_full = frame[cat.dec].to_numpy() if m else np.zeros(0, dtype=float)
 
     partner_globals = sorted(rest.cand_idx)
-    pools: List[Tuple[np.ndarray, np.ndarray]] = []
+    pools: list[tuple[np.ndarray, np.ndarray]] = []
     for k in partner_globals:
         other = plan.catalogues[k]
         pf = _cat_frame(other, rest.cand_idx[k])
@@ -977,9 +978,9 @@ def _run_rest(plan: UnionPlan, rest: RestPlan) -> Dict[str, Any]:
 def _rest_hub_keys(
     frame: pl.DataFrame,
     cat: CataloguePlan,
-    hub_parts: List[PartitionPlan],
+    hub_parts: list[PartitionPlan],
     max_hub_order: int,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Per-row ``(hub partition index, outside pixel)`` for rest rows.
 
     ``outside pixel`` = the row's pixel at ``max_hub_order`` when no hub
@@ -1015,7 +1016,7 @@ def _chunk_task_factory() -> Any:
     import ray  # noqa: PLC0415
 
     @ray.remote(num_cpus=1.0)
-    def chunk_task(plan: UnionPlan, chunk: ChunkPlan) -> Dict[str, Any]:
+    def chunk_task(plan: UnionPlan, chunk: ChunkPlan) -> dict[str, Any]:
         return _run_chunk(plan, chunk)
 
     return chunk_task
@@ -1025,7 +1026,7 @@ def _rest_task_factory() -> Any:
     import ray  # noqa: PLC0415
 
     @ray.remote(num_cpus=1.0)
-    def rest_task(plan: UnionPlan, rest: RestPlan) -> Dict[str, Any]:
+    def rest_task(plan: UnionPlan, rest: RestPlan) -> dict[str, Any]:
         return _run_rest(plan, rest)
 
     return rest_task
@@ -1034,14 +1035,14 @@ def _rest_task_factory() -> Any:
 # --------------------------------------------------------------------------- #
 # output assembly
 # --------------------------------------------------------------------------- #
-def _read_hats_properties(storage: Storage, rel: str) -> Dict[str, str]:
+def _read_hats_properties(storage: Storage, rel: str) -> dict[str, str]:
     """Parse the ``key=value`` lines of ``<rel>/properties`` (or hats.properties).
 
     Storage-agnostic (mirror inputs are local dirs or ``vos:`` roots — HTTP
     sources are materialised into the cache before the plan builds).  Any
     read failure returns ``{}``: the HATS spec defaults apply.
     """
-    props: Dict[str, str] = {}
+    props: dict[str, str] = {}
     for name in ("properties", "hats.properties"):
         full = f"{rel}/{name}" if rel else name
         try:
@@ -1071,9 +1072,9 @@ def _read_hats_properties(storage: Storage, rel: str) -> Dict[str, str]:
     return props
 
 
-def _read_hub_props(plan: UnionPlan) -> Dict[str, str]:
+def _read_hub_props(plan: UnionPlan) -> dict[str, str]:
     hub = plan.catalogues[0]
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     try:
         storage = open_storage(hub.root)
         if isinstance(storage, LocalStorage):
@@ -1094,7 +1095,7 @@ def _read_hub_props(plan: UnionPlan) -> Dict[str, str]:
     return out
 
 
-def _props_text(props: Dict[str, str]) -> str:
+def _props_text(props: dict[str, str]) -> str:
     props.setdefault("dataproduct_type", "object")
     return "".join(f"{k}={props[k]}\n" for k in sorted(props))
 
@@ -1132,14 +1133,14 @@ def _atomic_write_text(text: str, dest: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def _assemble(plan: UnionPlan) -> Dict[str, Any]:
+def _assemble(plan: UnionPlan) -> dict[str, Any]:
     """Turn the per-chunk parquets into a HATS catalogue at ``plan.out_dir``."""
     out = Path(plan.out_dir)
     dataset = out / "dataset"
     dataset.mkdir(parents=True, exist_ok=True)
     # Insertion-ordered set: a list made the membership test below a linear
     # scan, i.e. O(P^2) for a full-sky output (P ~ 10^5-10^6 pixels).
-    seen: Dict[Path, None] = {}
+    seen: dict[Path, None] = {}
 
     def add_partition(part: PartitionPlan, src: Path, keep: bool = True) -> None:
         relf = f"Norder={part.order}/Dir={_hats_dir(part.pix)}/Npix={part.pix}.parquet"
@@ -1223,7 +1224,7 @@ def _assemble(plan: UnionPlan) -> Dict[str, Any]:
                 tmp.unlink(missing_ok=True)
 
     if seen:
-        info: List[Dict[str, Any]] = []
+        info: list[dict[str, Any]] = []
         total_rows = 0
         for dest in seen:
             order = int(dest.parent.parent.name.removeprefix("Norder="))
@@ -1298,11 +1299,11 @@ def ray_union_match(
     sep_arcsec: float,
     output_file: str,
     hats_threshold: int = 100_000,
-    task_rows: Optional[int] = None,
-    chunk_memory_gb: Optional[float] = None,
-    max_tuples: Optional[int] = None,
-    cache_root: Optional[str] = None,
-    progress_cb: Optional[Callable[[str], None]] = None,
+    task_rows: int | None = None,
+    chunk_memory_gb: float | None = None,
+    max_tuples: int | None = None,
+    cache_root: str | None = None,
+    progress_cb: Callable[[str], None] | None = None,
 ) -> None:
     """Distributed N-way full-outer join over mirrored HATS catalogues.
 

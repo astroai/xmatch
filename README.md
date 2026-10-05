@@ -55,7 +55,7 @@ All detailed architectural references, user guides, and roadmaps are organized i
 
 ## Installation
 
-Requires Python $\ge 3.10$.
+Requires Python $\ge 3.13$ (Python 3.13 and 3.14 supported).
 
 ### Recommended: Pixi
 
@@ -77,8 +77,8 @@ pixi run preflight-push
 # Core package
 pip install xmatch
 
-# Full installation with all optional accelerators
-pip install "xmatch[hats,ray,torchsky,torchfits,ml,nway]"
+# Full installation with all optional accelerators and remote CDS backends
+pip install "xmatch[cds,hats,ray,torchsky,torchfits,ml,nway]"
 ```
 
 ---

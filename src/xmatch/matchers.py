@@ -45,11 +45,9 @@ import itertools
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import polars as pl
-from astropy.coordinates import Latitude, Longitude
 
 from .exceptions import CrossMatchError
 from .sources import ASTROMETRIC_COVARIANCE_KEYS, CatalogueSource
@@ -97,7 +95,7 @@ class MatchSpec:
     # Magnitude column for Likelihood Ratio matcher (Sutherland & Saunders 1992).
     # Used to estimate the true-counterpart magnitude distribution q(m) and
     # background surface density n(m).  Required when matcher="lr".
-    lr_magnitude_column: Optional[str] = None
+    lr_magnitude_column: str | None = None
     # Prior Q factor for Likelihood Ratio matcher: probability that a
     # primary source has a detectable counterpart in the secondary catalogue.
     # Default 0.8 is a safe empirical value (Sutherland & Saunders 1992);
@@ -106,29 +104,29 @@ class MatchSpec:
     # Photometric columns for the Random Forest ML matcher (matcher="ml").
     # Color differences |mag_L - mag_R| on these columns become features
     # alongside separation and local density.  Requires scikit-learn.
-    ml_color_columns: List[str] = field(default_factory=list)
+    ml_color_columns: list[str] = field(default_factory=list)
     # Path to save/load a pre-trained Random Forest model (joblib format).
     # When set and the file exists, the model is loaded and used for scoring
     # without re-training.  When set and the file does not exist, the model
     # is trained on-the-fly and saved to this path for future reuse.
-    ml_model_path: Optional[str] = None
+    ml_model_path: str | None = None
     # Path to save/load a pre-trained XGBoost model (joblib format).
     # Mirrors ml_model_path for the XGBoost matcher (matcher="xgb").
-    xgb_model_path: Optional[str] = None
+    xgb_model_path: str | None = None
     # Flux/magnitude columns for the macauff matcher (matcher="macauff").
     # Magnitude differences on these columns are combined with the AUF
     # positional probability to produce improved match scores.
-    macauff_flux_columns: List[str] = field(default_factory=list)
+    macauff_flux_columns: list[str] = field(default_factory=list)
     join_type: str = "1and2"
     find: str = "best"  # "best" | "all"
     # Bayesian-prior columns. When non-empty AND the catalogues carry those
     # columns, a ``p_match`` column is appended to the matched result.
-    prior_columns: List[str] = field(default_factory=list)
+    prior_columns: list[str] = field(default_factory=list)
     # Epoch to propagate coordinates to before spatial matching (Julian year).
     # Requires pm_ra_column / pm_dec_column + epoch metadata on the catalogue.
     # Target-epoch skyerr requires measured motion covariance or pm_prior;
     # unknown motion is an error even with fallback_policy='warn'.
-    target_epoch: Optional[float] = None
+    target_epoch: float | None = None
     # When True, sources that lack measured proper motions get a probabilistic
     # drift prior based on Galactic latitude (and optionally magnitude) instead
     # of being treated as stationary.  The drift uncertainty is added in
@@ -139,25 +137,25 @@ class MatchSpec:
     # PM dispersion via a distance-proxy scale factor (brighter stars are
     # statistically closer → larger proper motion).  ``σ_μ`` is multiplied by
     # ``10^{-0.2 (mag - 15)}``, clipped to [0.3, 3.0].
-    pm_prior_magnitude_column: Optional[str] = None
+    pm_prior_magnitude_column: str | None = None
     # Optional polars expression string applied as a boolean post-filter on
     # the matched pairs BEFORE reducing find="all" → find="best".  Column
     # names from the left side are used as-is; right-side columns gain a
     # ``_2`` suffix (e.g. ``abs(mag_g - mag_g_2) < 0.5``).
-    filter_expr: Optional[str] = None
+    filter_expr: str | None = None
     # Extra columns for N-dimensional cKDTree matching, mapping column name
     # to a dimensionless weight.  Columns are z-score normalized across the
     # union of both catalogues and appended to the 3-D Cartesian unit-sphere
     # embedding.  The spatial ``radius_arcsec`` is still enforced as a hard
     # bound; among candidates within that bound the nearest in N-d feature
     # space is chosen.
-    extra_distance_cols: Dict[str, float] = field(default_factory=dict)
+    extra_distance_cols: dict[str, float] = field(default_factory=dict)
     # Maximum number of left HEALPix pixel groups to process in one batch.
     # When set, the zone engine processes pixel groups in chunks, freeing
     # intermediate results between batches (out-of-core friendly).  Defaults
     # to ``None`` (process all pixels in one pass).  Only effective with
     # ``engine="zone"`` and ``cdshealpix`` installed.
-    batch_size: Optional[int] = None
+    batch_size: int | None = None
     # ``warn`` preserves legacy fallback behavior; ``error`` is required for
     # scientific promotion when an engine cannot honor the requested semantics.
     fallback_policy: str = "warn"
@@ -181,7 +179,7 @@ class MatchSpec:
 # polars helpers
 # --------------------------------------------------------------------------- #
 def _validate_coordinate_frames(
-    sources: List[CatalogueSource], *, target_epoch: Optional[float] = None, id_join: bool = False
+    sources: list[CatalogueSource], *, target_epoch: float | None = None, id_join: bool = False
 ) -> None:
     """Reject comparisons requiring a coordinate transform this matcher lacks."""
     if id_join:
@@ -224,14 +222,14 @@ def _build_result(
     right_idx: np.ndarray,
     seps: np.ndarray,
     spec: MatchSpec,
-    p_match: Optional[np.ndarray] = None,
+    p_match: np.ndarray | None = None,
     right_suffix: str = _RIGHT_SUFFIX,
-    lr: Optional[np.ndarray] = None,
-    reliability: Optional[np.ndarray] = None,
-    ml_score: Optional[np.ndarray] = None,
-    xgb_score: Optional[np.ndarray] = None,
-    auf_prob: Optional[np.ndarray] = None,
-    macauff_prob: Optional[np.ndarray] = None,
+    lr: np.ndarray | None = None,
+    reliability: np.ndarray | None = None,
+    ml_score: np.ndarray | None = None,
+    xgb_score: np.ndarray | None = None,
+    auf_prob: np.ndarray | None = None,
+    macauff_prob: np.ndarray | None = None,
 ) -> pl.DataFrame:
     # Sanitise before renaming so matched and unmatched rows share a schema.
     prefixes = (_PM_DRIFT_COLUMN, _PROPAGATED_COV_PREFIX, _EPOCH_SIGMA)
@@ -297,7 +295,7 @@ def _has_error_info(src: CatalogueSource) -> bool:
     )
 
 
-def _pos_sigma_arcsec(df: pl.DataFrame, src: CatalogueSource) -> Optional[np.ndarray]:
+def _pos_sigma_arcsec(df: pl.DataFrame, src: CatalogueSource) -> np.ndarray | None:
     """Per-row radial RMS: evaluated epoch covariance or reference errors."""
     factor = _UNIT_TO_ARCSEC.get((src.pos_err_units or "arcsec").lower(), 1.0)
     floor = (
@@ -337,7 +335,7 @@ def _pos_sigma_arcsec(df: pl.DataFrame, src: CatalogueSource) -> Optional[np.nda
 def _pos_covariance(
     df: pl.DataFrame,
     src: CatalogueSource,
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     """Per-row positional covariance parameters for skyellipse.
 
     Returns ``(sigma_sq_ra, sigma_sq_dec, rho)`` arrays:
@@ -432,8 +430,8 @@ def _pos_covariance(
 
 
 def _skyellipse_search_chord_max(
-    cov_l: Tuple[np.ndarray, np.ndarray, np.ndarray],
-    cov_r: Tuple[np.ndarray, np.ndarray, np.ndarray],
+    cov_l: tuple[np.ndarray, np.ndarray, np.ndarray],
+    cov_r: tuple[np.ndarray, np.ndarray, np.ndarray],
     max_error: float,
 ) -> float:
     """Maximum chord distance for skyellipse spatial pre-filter.
@@ -516,10 +514,10 @@ def _arcsec_to_chord(arcsec: float) -> float:
 
 
 def _flatten_candidates(
-    idx_lists: List[np.ndarray],
+    idx_lists: list[np.ndarray],
     l_xyz: np.ndarray,
     r_xyz: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Flatten ``cKDTree.query_ball_point`` per-left lists into pair arrays.
 
     Returns ``(left_idx, right_idx, sep_arcsec)``; empty arrays when no
@@ -555,6 +553,8 @@ def _pixellate(hp_module, ra_deg, dec_deg, depth: int, *, label: str) -> np.ndar
 
         require_finite_coordinates(ra_deg, dec_deg, label=label)
     try:
+        from astropy.coordinates import Latitude, Longitude
+
         return np.asarray(
             hp_module.lonlat_to_healpix(
                 Longitude(np.radians(np.asarray(ra_deg, dtype=float)), unit="rad"),
@@ -574,7 +574,7 @@ def _best_per_primary(
     right_idx: np.ndarray,
     seps: np.ndarray,
     scores: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Keep the lowest-*scores* candidate per primary row (deterministic ties).
 
     Ties on *scores* fall back to the smallest separation, then the smallest
@@ -598,7 +598,7 @@ def _skyerr_pair_filter(
     max_error: float,
     *,
     find: str,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Apply the per-row N-sigma criterion to candidate pairs.
 
     ``skyerr`` matches a pair iff ``sep <= max_error * (sigma_l + sigma_r)``.
@@ -634,7 +634,7 @@ def _skyerr_pair_filter(
 def _astrometric_covariance_mas(
     df: pl.DataFrame,
     src: CatalogueSource,
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     """Build Gaia-style five-parameter covariances in Torchsky order.
 
     The returned covariance order is ``(alpha*, delta, pmra, pmdec,
@@ -718,7 +718,7 @@ def _apply_proper_motion(
     *,
     propagate_covariance: bool = False,
     fallback_policy: str = "warn",
-) -> Tuple[pl.DataFrame, pl.DataFrame]:
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Propagate coordinates to ``target_epoch`` using per-row PM + epoch.
 
     Mutates *left* and/or *right* in-place when both PM columns and epoch
@@ -977,8 +977,8 @@ def _apply_pm_drift_prior(
     left: pl.DataFrame,
     right: pl.DataFrame,
     target_epoch: float,
-    magnitude_column: Optional[str] = None,
-) -> Tuple[pl.DataFrame, pl.DataFrame, CatalogueSource, CatalogueSource]:
+    magnitude_column: str | None = None,
+) -> tuple[pl.DataFrame, pl.DataFrame, CatalogueSource, CatalogueSource]:
     """Inflate positional errors for sources lacking measured proper motions.
 
     When a catalogue has epoch information but no PM columns, the Wilson (2023)
@@ -1007,7 +1007,7 @@ def _apply_pm_drift_prior(
 
     def _inflate_side(
         src: CatalogueSource, df: pl.DataFrame, label: str
-    ) -> Tuple[pl.DataFrame, CatalogueSource]:
+    ) -> tuple[pl.DataFrame, CatalogueSource]:
         # Skip if this side already has measured PM columns.
         has_pm = bool(
             src.pm_ra_column
@@ -1102,9 +1102,9 @@ def _build_nd_features(
     ra_deg: np.ndarray,
     dec_deg: np.ndarray,
     df: pl.DataFrame,
-    extra_cols: Dict[str, float],
-    union_mean: Optional[Dict[str, Tuple[float, float]]] = None,
-) -> Tuple[np.ndarray, Optional[Dict[str, Tuple[float, float]]]]:
+    extra_cols: dict[str, float],
+    union_mean: dict[str, tuple[float, float]] | None = None,
+) -> tuple[np.ndarray, dict[str, tuple[float, float]] | None]:
     """Build N-d feature array: [x, y, z] + z-score normalised columns.
 
     Returns ``(features, stats)`` where *stats* maps column name to
@@ -1117,7 +1117,7 @@ def _build_nd_features(
         return xyz, None
 
     extra_parts: list = []
-    stats: Dict[str, Tuple[float, float]] = {}
+    stats: dict[str, tuple[float, float]] = {}
     for col, weight in extra_cols.items():
         if col not in df.columns:
             logger.warning("Extra distance column '%s' missing; skipping.", col)
@@ -1147,7 +1147,7 @@ def _apply_match_filter(
     right_idx: np.ndarray,
     seps: np.ndarray,
     filter_expr: str,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Post-filter matched pairs with a polars SQL WHERE clause.
 
     The *filter_expr* string is evaluated as ``SELECT * FROM tmp WHERE
@@ -1202,7 +1202,7 @@ def _scipy_match(
     left_src: CatalogueSource,
     right_src: CatalogueSource,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     from scipy.spatial import cKDTree
 
@@ -1388,7 +1388,7 @@ def _scipy_match_nd(
     right: pl.DataFrame,
     chord_max: float,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """N-dimensional cKDTree match for find="best" (vectorised + chunked).
 
     1. Query spatial cKDTree for up to *k_candidates* neighbours within
@@ -1479,7 +1479,7 @@ def _likelihood_ratio_scoring(
     right_idx: np.ndarray,
     seps: np.ndarray,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Score candidate pairs with the Sutherland & Saunders (1992) Likelihood
     Ratio and return (left_idx, right_idx, seps, lr, reliability).
 
@@ -1677,7 +1677,7 @@ def _engineer_ml_features_and_labels(
     spec: MatchSpec,
     matcher_name: str,
     add_synthetic_negatives: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, int, int, List[str], np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, int, int, list[str], np.ndarray]:
     """Engineer ML features and pseudo-labels shared by ``matcher='ml'`` and ``matcher='xgb'``.
 
     Builds feature matrix *X* with columns:
@@ -1703,7 +1703,7 @@ def _engineer_ml_features_and_labels(
     """
     from scipy.spatial import cKDTree
 
-    empty_result: Tuple[np.ndarray, np.ndarray, int, int, List[str], np.ndarray] = (
+    empty_result: tuple[np.ndarray, np.ndarray, int, int, list[str], np.ndarray] = (
         np.zeros((0, 1), dtype=float),
         np.zeros(0, dtype=int),
         0,
@@ -1829,7 +1829,7 @@ def _ml_rf_score(
     right_idx: np.ndarray,
     seps: np.ndarray,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Score candidate pairs with a Random Forest classifier and return
     (left_idx, right_idx, seps, ml_score) for the best candidate per primary.
 
@@ -2007,7 +2007,7 @@ def _xgb_score(
     right_idx: np.ndarray,
     seps: np.ndarray,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Score candidates with an XGBoost classifier (or LightGBM fallback).
 
     Uses the same feature engineering as ``_ml_rf_score`` (separation/error,
@@ -2281,7 +2281,7 @@ def _auf_score(
     right_idx: np.ndarray,
     seps: np.ndarray,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Score candidate pairs with the AUF match probability and return
     (left_idx, right_idx, seps, auf_prob).
 
@@ -2357,7 +2357,7 @@ def _macauff_score(
     right_idx: np.ndarray,
     seps: np.ndarray,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Score candidates with the macauff algorithm (AUF positional probability ×
     flux likelihood ratios) and return ``(left_idx, right_idx, seps, macauff_prob)``.
 
@@ -2516,7 +2516,7 @@ def _pick_best_per_primary(
     right_idx: np.ndarray,
     seps: np.ndarray,
     scores: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Pick the highest-scoring candidate per primary source.
 
     Returns ``(left_idx, right_idx, seps, scores)`` filtered to one entry
@@ -2541,7 +2541,7 @@ def _ml_fallback_best_by_sep(
     right_idx: np.ndarray,
     seps: np.ndarray,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Fallback: pick the spatially-nearest candidate per primary source."""
     # Vectorized O(N log N) optimization replacing O(N^2) boolean mask loop
     order = np.lexsort((seps, left_idx))
@@ -2591,7 +2591,7 @@ def _torchsky_match(
     left_src: CatalogueSource,
     right_src: CatalogueSource,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run Torchsky's catalog matcher for ``sky`` and ``skyerr``."""
     import numpy as np
 
@@ -2693,7 +2693,7 @@ def _cone_search_pixels(
     parents are expanded to all children at the requested depth — callers get
     a flat set of same-depth pixels like the pre-0.8 ``cone_search_lonlat``.
     """
-    from astropy.coordinates import Angle  # noqa: PLC0415
+    from astropy.coordinates import Angle, Latitude, Longitude
 
     ipix, depths, _ = hp_module.cone_search(
         Longitude(lon_rad, unit="rad"),
@@ -2701,7 +2701,7 @@ def _cone_search_pixels(
         Angle(radius_rad, unit="rad"),
         np.uint8(depth),
     )
-    out: List[int] = []
+    out: list[int] = []
     for ipx, d in zip(np.asarray(ipix).tolist(), np.asarray(depths).tolist(), strict=True):
         dif = depth - int(d)
         if dif <= 0:
@@ -2718,7 +2718,7 @@ def _zone_match(
     left_src: CatalogueSource,
     right_src: CatalogueSource,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """HEALPix zone cone-match (LSDB-orthogonal, lightweight).
 
     When ``cdshealpix`` is importable we shard both sides into HEALPix pixels
@@ -2759,7 +2759,7 @@ def _zone_match_healpix(
     left_src: CatalogueSource,
     right_src: CatalogueSource,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     import cdshealpix as hp
     from scipy.spatial import cKDTree
@@ -2813,7 +2813,7 @@ def _zone_match_healpix(
     unique_pix = r_sorted_pix[r_unique_indices]
     r_splits = np.split(r_sort_idx, r_unique_indices[1:])
     r_groups = {int(k): v for k, v in zip(unique_pix, r_splits, strict=False)}
-    tree_cache: dict[int, "cKDTree"] = {}
+    tree_cache: dict[int, cKDTree] = {}
     xyz_cache: dict[int, np.ndarray] = {}
     for pix in unique_pix:
         idx = r_groups[int(pix)]
@@ -3020,7 +3020,7 @@ def _astropy_match(
     left_src: CatalogueSource,
     right_src: CatalogueSource,
     spec: MatchSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     import astropy.units as u
     from astropy.coordinates import SkyCoord, search_around_sky
 
@@ -3194,7 +3194,7 @@ def _bayesian_qualify(
     left_src: CatalogueSource,
     right_src: CatalogueSource,
     spec: MatchSpec,
-) -> Optional[np.ndarray]:
+) -> np.ndarray | None:
     """Compute a ``p_match`` column on the matched pairs.
 
     Returns ``None`` (no p_match) if either:
@@ -3267,9 +3267,9 @@ def sky_match(
     spec: MatchSpec,
     *,
     engine: str = "auto",
-    stilts_cmd_base: Optional[str] = None,
-    java_opts: Optional[str] = None,
-    tmpdir: Optional[str] = None,
+    stilts_cmd_base: str | None = None,
+    java_opts: str | None = None,
+    tmpdir: str | None = None,
     right_suffix: str = _RIGHT_SUFFIX,
 ) -> pl.LazyFrame:
     """Run a positional crossmatch and return a lazy result frame."""
@@ -3465,8 +3465,8 @@ def sky_match(
         raise CrossMatchError(f"Unknown engine '{chosen}'.")
 
     # --- Likelihood Ratio scoring (post-engine) ----------------------------
-    lr_arr: Optional[np.ndarray] = None
-    reliability_arr: Optional[np.ndarray] = None
+    lr_arr: np.ndarray | None = None
+    reliability_arr: np.ndarray | None = None
     if spec.matcher == "lr" and l_idx.size > 0:
         l_idx, r_idx, seps, lr_arr, reliability_arr = _likelihood_ratio_scoring(
             left,
@@ -3480,7 +3480,7 @@ def sky_match(
         )
 
     # --- ML Random Forest scoring (post-engine) ---------------------------
-    ml_score_arr: Optional[np.ndarray] = None
+    ml_score_arr: np.ndarray | None = None
     if spec.matcher == "ml" and l_idx.size > 0:
         l_idx, r_idx, seps, ml_score_arr = _ml_rf_score(
             left,
@@ -3494,7 +3494,7 @@ def sky_match(
         )
 
     # --- XGBoost scoring (post-engine) -----------------------------------
-    xgb_score_arr: Optional[np.ndarray] = None
+    xgb_score_arr: np.ndarray | None = None
     if spec.matcher == "xgb" and l_idx.size > 0:
         l_idx, r_idx, seps, xgb_score_arr = _xgb_score(
             left,
@@ -3508,7 +3508,7 @@ def sky_match(
         )
 
     # --- AUF match probability scoring (post-engine) ----------------------
-    auf_prob_arr: Optional[np.ndarray] = None
+    auf_prob_arr: np.ndarray | None = None
     if spec.matcher == "auf" and l_idx.size > 0:
         l_idx, r_idx, seps, auf_prob_arr = _auf_score(
             left,
@@ -3522,7 +3522,7 @@ def sky_match(
         )
 
     # --- macauff scoring (post-engine) -----------------------------------
-    macauff_prob_arr: Optional[np.ndarray] = None
+    macauff_prob_arr: np.ndarray | None = None
     if spec.matcher == "macauff" and l_idx.size > 0:
         l_idx, r_idx, seps, macauff_prob_arr = _macauff_score(
             left,

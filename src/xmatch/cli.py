@@ -34,8 +34,9 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import polars as pl
@@ -108,7 +109,7 @@ class Console:
     YELLOW = "\033[33m"
     RED = "\033[31m"
 
-    def __init__(self, *, enabled: Optional[bool] = None) -> None:
+    def __init__(self, *, enabled: bool | None = None) -> None:
         if enabled is None:
             # Honour https://no-color.org/ (presence/any value disables) plus
             # the project-specific XMATCH_NO_COLOR.  Falls back to a TTY
@@ -196,7 +197,7 @@ class Progress:
         self.enabled = enabled
         self._status = ""
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._start_ts = 0.0
 
     @property
@@ -209,7 +210,7 @@ class Progress:
         if self.enabled:
             self._status = status
 
-    def __enter__(self) -> "Progress":
+    def __enter__(self) -> Progress:
         if not self.enabled:
             return self
         self._start_ts = time.monotonic()
@@ -481,8 +482,8 @@ _FALLBACK_ENDPOINTS: tuple[str, ...] = (
 
 
 def _collect_completion_names(
-    cm: Optional["CrossMatch"],
-) -> tuple[List[str], List[str]]:
+    cm: CrossMatch | None,
+) -> tuple[list[str], list[str]]:
     """Return ``(catalogues, endpoints)`` lists for shell-tab completion.
 
     ``catalogues`` is the union of catalogue names, aliases, and public
@@ -2029,7 +2030,7 @@ def handle_search(cm: CrossMatch, pattern: str, console: Console) -> int:
 
 
 def handle_discover(
-    cm: CrossMatch, endpoint: str, schema_table: Optional[str], console: Console
+    cm: CrossMatch, endpoint: str, schema_table: str | None, console: Console
 ) -> int:
     url = _resolve_discovery_endpoint(endpoint, cm)
     if not url:
@@ -2140,8 +2141,8 @@ def handle_adopt(
     table: str,
     console: Console,
     *,
-    catalogue_name: Optional[str] = None,
-    alias: Optional[str] = None,
+    catalogue_name: str | None = None,
+    alias: str | None = None,
     dry_run: bool = False,
 ) -> int:
     """Probe *table* on *endpoint* and append it to the user config overlay."""
@@ -2240,7 +2241,7 @@ def handle_adopt(
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _resolve_output_path(output_file: Optional[str]) -> Optional[str]:
+def _resolve_output_path(output_file: str | None) -> str | None:
     """Resolve a bare relative output name against the platform output root.
 
     On AstroAI/CANFAR sessions (shared ``/arc``) bare names like
@@ -2281,7 +2282,7 @@ def _execute_match(args, cm: CrossMatch, console: Console) -> int:
     with progress:
         progress.update("preparing inputs")
         if args.fof_match:
-            result: Optional[Union[pl.DataFrame, pl.LazyFrame]] = cm.fof_match(
+            result: pl.DataFrame | pl.LazyFrame | None = cm.fof_match(
                 args.catalogues,
                 output_file=args.output_file,
                 radius_arcsec=params.pop("radius_arcsec", 1.0),
@@ -2489,7 +2490,7 @@ def _run_completion(argv: Sequence[str]) -> int:
     args = parser.parse_args(list(argv))
     setup_logging(args.verbose)
     console = _make_console(no_color=bool(getattr(args, "no_color", False)))
-    cm: Optional[CrossMatch] = None
+    cm: CrossMatch | None = None
     try:
         cm = CrossMatch(config_file=args.config_file)
     except Exception as exc:  # noqa: BLE001
@@ -2563,7 +2564,7 @@ def _run_no_pos_subcommand(argv: Sequence[str], name: str) -> int:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _split_subcommand(argv: Sequence[str]) -> tuple[Optional[str], List[str]]:
+def _split_subcommand(argv: Sequence[str]) -> tuple[str | None, list[str]]:
     """Locate the first subcommand keyword in ``argv`` and split it off.
 
     Returns ``(keyword, remaining)`` where ``remaining`` is ``argv`` with
@@ -2586,7 +2587,7 @@ def _split_subcommand(argv: Sequence[str]) -> tuple[Optional[str], List[str]]:
     return None, list(argv)
 
 
-def _load_bundled_config() -> tuple[Path, Dict[str, Any]]:
+def _load_bundled_config() -> tuple[Path, dict[str, Any]]:
     """Load the bundled ``xmatch.yaml`` that ships with the package.
 
     This is the *baseline* used by :func:`_run_doctor` to detect drift in the
@@ -2594,13 +2595,11 @@ def _load_bundled_config() -> tuple[Path, Dict[str, Any]]:
     lookup works whether the package was installed (wheel / sdist / pixi
     env), is loaded straight from a checkout, or is symlinked into a venv.
     """
-    try:
-        from importlib.resources import files
-    except ImportError:  # pragma: no cover — Python < 3.9 fallback
-        from importlib_resources import files  # type: ignore
+    from importlib.resources import files
+
     bundled_path = Path(str(files("xmatch") / "xmatch.yaml"))
     try:
-        with open(bundled_path, "r") as fh:
+        with open(bundled_path) as fh:
             data = yaml.safe_load(fh)
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(f"Could not read bundled xmatch.yaml: {exc}") from exc
@@ -2644,7 +2643,7 @@ def _compare_field(bundled_value: Any, user_value: Any) -> bool:
     return b == u
 
 
-def _diff_field_lists(bundled_val: Any, user_val: Any) -> tuple[List[Any], List[Any]]:
+def _diff_field_lists(bundled_val: Any, user_val: Any) -> tuple[list[Any], list[Any]]:
     """Return ``(bundled_added, user_extra)`` as ordered lists.
 
     Used for lists such as ``default_columns`` — we report symmetric diff
@@ -2658,7 +2657,7 @@ def _diff_field_lists(bundled_val: Any, user_val: Any) -> tuple[List[Any], List[
     return bundled_added, user_extra
 
 
-def _diff_configs(bundled: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
+def _diff_configs(bundled: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
     """Compare the bundled baseline against the user's active config.
 
     Returns a report dict with four top-level arrays:
@@ -2675,7 +2674,7 @@ def _diff_configs(bundled: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, An
     The report is purely structural — no formatting or exit-code logic lives
     here so the same data can drive both human and ``--json`` output.
     """
-    report: Dict[str, Any] = {
+    report: dict[str, Any] = {
         "outdated_fields": [],
         "informational_fields": [],
         "missing_in_user": [],
@@ -2783,7 +2782,7 @@ def _diff_configs(bundled: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, An
     return report
 
 
-def _doctor_exit_code(report: Dict[str, Any], *, strict: bool = False) -> int:
+def _doctor_exit_code(report: dict[str, Any], *, strict: bool = False) -> int:
     """Map a drift report to an exit code per the policy in the docstring."""
     if report["outdated_fields"]:
         return 1
@@ -2793,10 +2792,10 @@ def _doctor_exit_code(report: Dict[str, Any], *, strict: bool = False) -> int:
 
 
 def _emit_doctor_human(
-    report: Dict[str, Any],
+    report: dict[str, Any],
     *,
     console: Console,
-    active_path: Optional[Path],
+    active_path: Path | None,
     bundled_path: Path,
     strict: bool,
     quiet: bool,
@@ -2903,9 +2902,9 @@ def _emit_doctor_human(
 
 
 def _emit_doctor_json(
-    report: Dict[str, Any],
+    report: dict[str, Any],
     *,
-    active_path: Optional[Path],
+    active_path: Path | None,
     bundled_path: Path,
     strict: bool,
 ) -> int:
@@ -2967,14 +2966,14 @@ def _run_doctor(argv: Sequence[str]) -> int:
     # shared with every other subcommand.  Falling back to the bundled
     # config here would be misleading — the user just asked "how does my
     # config differ?" and the answer is "there is no user config".
-    user_path: Optional[Path] = None
-    user_cfg: Dict[str, Any] = {}
+    user_path: Path | None = None
+    user_cfg: dict[str, Any] = {}
     try:
         cm = CrossMatch(config_file=args.config_file)
         user_path = cm.config_file
         # Re-load raw YAML so we keep the user's field form (we want to
         # report what the user actually wrote, not the merged view).
-        with open(user_path, "r") as fh:
+        with open(user_path) as fh:
             user_cfg = yaml.safe_load(fh) or {}
     except (ConfigError, OSError, yaml.YAMLError) as exc:
         console.error(f"Error: could not load active config: {exc}")
@@ -3001,7 +3000,7 @@ def _run_doctor(argv: Sequence[str]) -> int:
     )
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``xmatch`` console script and ``python -m xmatch``.
 
     Dispatch rules (in order):

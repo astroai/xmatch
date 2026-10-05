@@ -77,7 +77,7 @@ def test_mirrored_source_preserves_measurement_and_motion_metadata(tmp_path):
 
 
 @pytest.fixture()
-def tap_server() -> "Iterator[FakeTAPServer]":
+def tap_server() -> Iterator[FakeTAPServer]:
     srv = FakeTAPServer(make_rows(200))
     yield srv
     srv.shutdown()

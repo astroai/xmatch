@@ -20,8 +20,9 @@ import re
 import threading
 import urllib.parse
 import uuid
+from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, Sequence
+from typing import Any
 
 _VOT = """<?xml version="1.0"?>
 <VOTABLE version="1.4">
@@ -55,7 +56,7 @@ def _field_xml(col: str, value: Any) -> str:
     return f'<FIELD name="{col}" datatype="{dtype}"/>'
 
 
-def _votable(cols: Sequence[str], rows: Sequence[Dict[str, Any]]) -> str:
+def _votable(cols: Sequence[str], rows: Sequence[dict[str, Any]]) -> str:
     first = rows[0] if rows else None
     fields = "".join(_field_xml(c, first.get(c) if first else 0) for c in cols)
     lines = [
@@ -100,7 +101,7 @@ def _compare(value: Any, op: str, target: Any) -> bool:
     return left < right
 
 
-def make_rows(n: int, *, ra0: float = 10.0, dec0: float = -5.0) -> List[Dict[str, Any]]:
+def make_rows(n: int, *, ra0: float = 10.0, dec0: float = -5.0) -> list[dict[str, Any]]:
     """Deterministic ``(id, ra, dec)`` rows ~0.001 deg apart (id-sorted)."""
     rows = []
     for i in range(n):
@@ -118,13 +119,13 @@ class FakeTAPServer:
     """One mutable table served over the UWS async protocol on 127.0.0.1."""
 
     def __init__(
-        self, rows: Sequence[Dict[str, Any]], cols: Sequence[str] = ("id", "ra", "dec")
+        self, rows: Sequence[dict[str, Any]], cols: Sequence[str] = ("id", "ra", "dec")
     ) -> None:
         self.cols = list(cols)
         self.key = "id"
-        self.rows: List[Dict[str, Any]] = [dict(r) for r in rows]
-        self.queries: List[str] = []
-        self.jobs: Dict[str, Dict[str, Any]] = {}
+        self.rows: list[dict[str, Any]] = [dict(r) for r in rows]
+        self.queries: list[str] = []
+        self.jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), self._handler_cls())
         self.port = self.httpd.server_address[1]
@@ -135,7 +136,7 @@ class FakeTAPServer:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}/tap"
 
-    def update(self, rows: Sequence[Dict[str, Any]]) -> None:
+    def update(self, rows: Sequence[dict[str, Any]]) -> None:
         """Replace the whole table (simulates a remote mutation)."""
         with self._lock:
             self.rows = [dict(r) for r in rows]
@@ -149,14 +150,14 @@ class FakeTAPServer:
         self._thread.join(timeout=5)
 
     # ------------------------------------------------------------------ SQL
-    def _run(self, query: str) -> List[Dict[str, Any]]:
+    def _run(self, query: str) -> list[dict[str, Any]]:
         count_m = re.match(r"\s*SELECT\s+COUNT\(\*\)(?:\s+AS\s+\w+)?", query, re.IGNORECASE)
         if count_m:
             matched = self._collect_rows(query)
             return [{"n": len(matched)}]
         return self._collect_rows(query)
 
-    def _collect_rows(self, query: str) -> List[Dict[str, Any]]:
+    def _collect_rows(self, query: str) -> list[dict[str, Any]]:
         with self._lock:
             rows = list(self.rows)
         m = re.search(r"ORDER BY\s+\S*\.?\"?(\w+)\"?\s*(ASC|DESC)?", query, re.IGNORECASE)

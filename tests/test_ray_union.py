@@ -12,7 +12,6 @@ from __future__ import annotations
 import importlib.util
 import math
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import numpy as np
 import polars as pl
@@ -55,7 +54,7 @@ def _sep_arcsec(r1, r2) -> float:
 
 def _oracle_union3(
     a: pl.DataFrame, b: pl.DataFrame, c: pl.DataFrame, sep_arcsec: float
-) -> List[Tuple[str, Tuple[str, ...], float]]:
+) -> list[tuple[str, tuple[str, ...], float]]:
     """Sequential 3-way full-outer union: row sets radiate from the
     lowest-indexed catalogue present.
 
@@ -71,7 +70,7 @@ def _oracle_union3(
     b_rows = b.to_dicts()
     c_rows = c.to_dicts()
 
-    def mates(row, others: List[dict], sep: float) -> List[Tuple[dict, float]]:
+    def mates(row, others: list[dict], sep: float) -> list[tuple[dict, float]]:
         out = []
         for o in others:
             s = _sep_arcsec(row, o)
@@ -80,7 +79,7 @@ def _oracle_union3(
         return out
 
     nan = float("nan")
-    results: List[Tuple[str, Tuple[str, ...], float]] = []
+    results: list[tuple[str, tuple[str, ...], float]] = []
     for ar in a_rows:
         bm = mates(ar, b_rows, sep_arcsec)
         cm = mates(ar, c_rows, sep_arcsec)
@@ -110,15 +109,15 @@ def _oracle_union3(
     return sorted(results)
 
 
-def _ray_rows3(df: pl.DataFrame) -> List[Tuple[str, Tuple[str, ...], float]]:
-    def canonical(row) -> Tuple[str, Tuple[str, ...], float]:
+def _ray_rows3(df: pl.DataFrame) -> list[tuple[str, tuple[str, ...], float]]:
+    def canonical(row) -> tuple[str, tuple[str, ...], float]:
         ids = tuple(v for v in (row.get("id"), row.get("id_2"), row.get("id_3")) if v is not None)
         return (row["_src_cats"], ids, float(row["sep_arcsec"]))
 
     return sorted(canonical(r) for r in df.to_dicts())
 
 
-def _assert_matches_oracle(got: List[Tuple[str, Tuple[str, ...], float]], want: List) -> None:
+def _assert_matches_oracle(got: list[tuple[str, tuple[str, ...], float]], want: list) -> None:
     assert len(got) == len(want), (len(got), len(want))
     for g, w in zip(got, want, strict=True):
         assert g[0] == w[0], (g, w)
@@ -231,7 +230,7 @@ def test_ray_union_3catalogue_vs_oracle(tmp_path: Path) -> None:
 
 def _oracle_union(
     a: pl.DataFrame, b: pl.DataFrame, sep_arcsec: float
-) -> List[Tuple[str, Tuple[str, ...], float]]:
+) -> list[tuple[str, tuple[str, ...], float]]:
     """Every output row as ``(_src_cats, (ids,), sep_arcsec)``.
 
     Semantics mirrored from the sequential-union oracle (and the module
@@ -244,10 +243,10 @@ def _oracle_union(
     """
     a_rows = a.to_dicts()
     b_rows = b.to_dicts()
-    results: List[Tuple[str, Tuple[str, ...], Optional[float]]] = []
+    results: list[tuple[str, tuple[str, ...], float | None]] = []
     covered_b: set[int] = set()
 
-    def emit(ids: Tuple[Optional[str], Optional[str]], sep: Optional[float]) -> None:
+    def emit(ids: tuple[str | None, str | None], sep: float | None) -> None:
         src = "+".join(str(k + 1) for k, v in enumerate(ids) if v is not None)
         results.append(
             (src, tuple(v for v in ids if v is not None), sep if sep is not None else float("nan"))
@@ -309,7 +308,7 @@ def test_ray_union_matches_brute_force_oracle(tmp_path: Path) -> None:
     assert sorted(df["_src_cats"].unique().to_list()) == ["1", "1+2", "2"]
     oracle = _oracle_union(a, b, 30.0)
 
-    def canonical(row) -> Tuple[str, Tuple[str, ...], float]:
+    def canonical(row) -> tuple[str, tuple[str, ...], float]:
         ids = tuple(v for v in (row.get("id"), row.get("id_2")) if v is not None)
         return (row["_src_cats"], ids, float(row["sep_arcsec"]))
 
@@ -486,7 +485,7 @@ def test_rest_partition_rows_emitted_once(tmp_path: Path) -> None:
     df = _read_output(out)
     oracle = _oracle_union(a, b, 5.0)
 
-    def canonical(row) -> Tuple[str, Tuple[str, ...], float]:
+    def canonical(row) -> tuple[str, tuple[str, ...], float]:
         ids = tuple(v for v in (row.get("id"), row.get("id_2")) if v is not None)
         return (row["_src_cats"], ids, float(row["sep_arcsec"]))
 
@@ -628,7 +627,7 @@ def test_driver_progress_state_and_run_log(tmp_path: Path) -> None:
         ),
     )
     out = tmp_path / "driver.hats"
-    msgs: List[str] = []
+    msgs: list[str] = []
     cm = CrossMatch()
     cm.union_match(
         [a.path, b.path],
@@ -822,7 +821,7 @@ def test_union_ring_input_converted(tmp_path: Path) -> None:
     df = _read_output(out)
     oracle = _oracle_union(a, b, 60.0)
 
-    def canonical(row) -> Tuple[str, Tuple[str, ...], float]:
+    def canonical(row) -> tuple[str, tuple[str, ...], float]:
         ids = tuple(v for v in (row.get("id"), row.get("id_2")) if v is not None)
         return (row["_src_cats"], ids, float(row["sep_arcsec"]))
 
@@ -842,7 +841,7 @@ def test_ray_init_falls_back_local_on_connection_error(tmp_path: Path, monkeypat
     import ray
 
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
-    calls: List[dict] = []
+    calls: list[dict] = []
     real_init = ray.init
 
     def fake_init(**kw) -> None:

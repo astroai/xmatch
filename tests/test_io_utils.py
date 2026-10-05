@@ -108,11 +108,7 @@ def test_astropy_table_roundtrip(sample):
 
 
 def test_arrow_roundtrip_preserves_schema(sample):
-    """Polars <-> astropy round-trip preserves schema via io_utils helpers.
-
-    Works on every astropy version: helpers go via Arrow when 7.x+ exposes
-    ``Table.to_arrow`` and via pandas otherwise.
-    """
+    """Polars <-> astropy round-trip preserves schema via io_utils helpers."""
     table = io_utils.polars_to_astropy(sample)
     back = io_utils.astropy_table_to_polars(table)
     assert back.columns == sample.columns
@@ -130,75 +126,49 @@ def test_bytes_columns_decode_to_utf8():
     assert df["src"].to_list() == ["GDR3", "Gaia"]
 
 
-def test_decode_pandas_bytes_columns_skips_non_object_columns():
-    """Vectorised byte-column decode skips non-object columns up-front."""
-    import pandas as pd
+def test_astropy_table_to_polars_handles_masked_and_object_bytes():
+    """Masked numeric/string/bytes columns and object-bytes columns convert cleanly."""
+    import numpy as np
+    from astropy.table import MaskedColumn, Table
 
-    pdf = pd.DataFrame(
+    table = Table(
         {
-            "id": [1, 2, 3],  # int64 — skipped
-            "mag": [10.5, 12.0, 14.2],  # float64 — skipped
-            "src": [b"GDR3", b"Gaia", b"DESI"],  # object bytes — decoded
-            "label": ["alpha", "beta", "gamma"],  # object str — left alone
-            "epoch": pd.to_datetime(
-                ["2020-01-01", "2020-01-02", "2020-01-03"]
-            ),  # datetime — skipped
+            "id": MaskedColumn([1, 2, 3], mask=[False, True, False]),
+            "mag": MaskedColumn([10.5, 12.0, 14.2], mask=[False, False, True]),
+            "src": MaskedColumn([b"GDR3", b"Gaia", b"DESI"], mask=[False, True, False]),
+            "obj_bytes": np.array([b"alpha\xff", b"beta", b"gamma"], dtype=object),
+            "big_endian": np.array([1.5, 2.5, 3.5], dtype=">f8"),
         }
     )
-    out = io_utils._decode_pandas_bytes_columns(pdf.copy())
-    assert out["src"].tolist() == ["GDR3", "Gaia", "DESI"]
-    assert out["label"].tolist() == ["alpha", "beta", "gamma"]
-    # Non-object columns must be unchanged.
-    assert out["id"].dtype == pdf["id"].dtype
-    assert out["mag"].dtype == pdf["mag"].dtype
-    assert out["epoch"].dtype == pdf["epoch"].dtype
+    out = io_utils.astropy_table_to_polars(table)
+    assert out["id"].to_list() == [1, None, 3]
+    assert out["mag"].to_list() == [10.5, 12.0, None]
+    assert out["src"].to_list() == ["GDR3", None, "DESI"]
+    assert out["obj_bytes"].to_list() == ["alpha\ufffd", "beta", "gamma"]
+    assert out["big_endian"].to_list() == [1.5, 2.5, 3.5]
 
 
-def test_decode_pandas_bytes_columns_empty_dataframe():
-    """Empty DataFrame with object columns does not raise."""
-    import pandas as pd
+def test_polars_to_astropy_nullable_columns():
+    """Nullable Polars columns become MaskedColumn in Astropy Table."""
+    from astropy.table import MaskedColumn
 
-    pdf = pd.DataFrame({"src": pd.Series([], dtype=object)})
-    out = io_utils._decode_pandas_bytes_columns(pdf)
-    assert out["src"].tolist() == []
-
-
-def test_decode_pandas_bytes_columns_all_non_bytes_objects():
-    """Object columns that contain only strings skip decode cleanly."""
-    import pandas as pd
-
-    pdf = pd.DataFrame({"label": ["a", "b", "c"], "name": ["x", "y", "z"]})
-    out = io_utils._decode_pandas_bytes_columns(pdf.copy())
-    assert out["label"].tolist() == ["a", "b", "c"]
-    assert out["name"].tolist() == ["x", "y", "z"]
-
-
-def test_decode_pandas_bytes_columns_skips_string_dtype():
-    """``exclude='str'`` skips pandas ``StringDtype`` columns cleanly.
-
-    Pins the contract introduced by the pandas 4 migration fix: a column
-    with dtype ``string`` (modern ``pd.StringDtype``) never carries bytes,
-    so it is filtered out up-front and ``_decode_pandas_bytes_columns``
-    leaves it untouched.
-
-    Regression guard: a future pandas that narrows or widens what
-    ``select_dtypes(exclude='str')`` matches will trip this test instead
-    of silently decoding (or silently breaking) ``StringDtype`` columns.
-    """
-    import pandas as pd
-
-    pdf = pd.DataFrame(
+    df = pl.DataFrame(
         {
-            "src": [b"GDR3", b"Gaia"],  # object bytes — decoded
-            "tag": pd.array(["x", "y"], dtype="string"),  # str — skipped
-            "label": ["a", "b"],  # object str — left alone
+            "id": [1, None],
+            "mag": [10.5, None],
+            "name": ["GDR3", None],
+            "flag": [True, None],
         }
     )
-    out = io_utils._decode_pandas_bytes_columns(pdf.copy())
-    assert out["src"].tolist() == ["GDR3", "Gaia"]
-    assert out["tag"].tolist() == ["x", "y"]  # untouched
-    assert str(out["tag"].dtype) == "string"
-    assert out["label"].tolist() == ["a", "b"]
+    table = io_utils.polars_to_astropy(df)
+    for col in ("id", "mag", "name", "flag"):
+        assert isinstance(table[col], MaskedColumn)
+        assert list(table[col].mask) == [False, True]
+    back = io_utils.astropy_table_to_polars(table)
+    assert back["id"].to_list() == [1, None]
+    assert back["mag"].to_list() == [10.5, None]
+    assert back["name"].to_list() == ["GDR3", None]
+    assert back["flag"].to_list() == [True, None]
 
 
 def test_multi_d_columns_are_dropped():

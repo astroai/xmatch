@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -39,7 +39,7 @@ _DEC_PATTERNS = [
 ]
 
 
-def find_coord_columns(columns: Sequence[str]) -> Tuple[Optional[str], Optional[str]]:
+def find_coord_columns(columns: Sequence[str]) -> tuple[str | None, str | None]:
     """Best-effort detection of RA/Dec columns from a list of column names.
 
     Matching is case-insensitive and tolerant of separators (``RA (deg)`` →
@@ -49,7 +49,7 @@ def find_coord_columns(columns: Sequence[str]) -> Tuple[Optional[str], Optional[
     def normalise(name: str) -> str:
         return "".join(ch for ch in name.lower() if ch.isalnum())
 
-    norm_map: Dict[str, str] = {}
+    norm_map: dict[str, str] = {}
     for original in columns:
         norm_map.setdefault(normalise(original), original)
 
@@ -102,7 +102,7 @@ def require_finite_coordinates(ra, dec, *, label: str) -> None:
         )
 
 
-def sky_extent(ra: np.ndarray, dec: np.ndarray) -> Optional[Dict[str, float]]:
+def sky_extent(ra: np.ndarray, dec: np.ndarray) -> dict[str, float] | None:
     """Return the center and radius (degrees) of a cone covering all points.
 
     Uses a unit-vector mean so it is correct across the RA=0/360 boundary and
@@ -150,7 +150,7 @@ def propagate_proper_motion(
     pm_dec: np.ndarray,
     source_epoch: np.ndarray,
     target_epoch: float,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Propagate ICRS coordinates to ``target_epoch`` (Julian year).
 
     Proper motions are in mas/yr (``pm_ra_cosdec`` already includes cos(Dec)).
@@ -207,7 +207,7 @@ def propagate_proper_motion_with_jacobian(
     pm_dec: np.ndarray,
     source_epoch: np.ndarray,
     target_epoch: float,
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     """Return Torchsky angular positions and local 2x4 Jacobians if available."""
     torchsky_propagate = _load_torchsky_propagate_proper_motion_with_jacobian()
     if torchsky_propagate is None:
@@ -241,7 +241,7 @@ def propagate_space_motion(
     radial_velocity: np.ndarray,
     source_epoch: np.ndarray,
     target_epoch: float,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Propagate complete finite ICRS states to a common Julian-year epoch.
 
     Parallax is in mas and radial velocity in km/s. Callers must route missing
@@ -304,7 +304,7 @@ def propagate_space_motion_with_jacobian(
     radial_velocity: np.ndarray,
     source_epoch: np.ndarray,
     target_epoch: float,
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     """Return Torchsky-propagated positions and local 6D Jacobians.
 
     ``None`` means the installed Torchsky does not yet provide the Jacobian
@@ -354,7 +354,7 @@ def _as_numpy(value) -> np.ndarray:
     return np.asarray(value, dtype=float)
 
 
-def coord_arrays(frame, ra_col: str, dec_col: str) -> Tuple[np.ndarray, np.ndarray]:
+def coord_arrays(frame, ra_col: str, dec_col: str) -> tuple[np.ndarray, np.ndarray]:
     """Extract RA/Dec numpy arrays from a polars frame (lazy or eager)."""
     import polars as pl
 
@@ -367,7 +367,7 @@ def sky_extent_from_frame(
     frame,
     ra_col: str,
     dec_col: str,
-) -> Optional[Dict[str, float]]:
+) -> dict[str, float] | None:
     """Compute the bounding cone of a polars frame without materialising RA/Dec.
 
     Expresses the great-circle mean and max-separation entirely as polars

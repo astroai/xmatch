@@ -20,13 +20,13 @@ target machine.
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import logging
 import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Union
 
 import polars as pl
 
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 class Storage:
     """Protocol for a durable catalogue store (POSIX dir or VOSpace root)."""
 
-    root: "Union[str, Path]"
+    root: str | Path
 
     def exists(self, rel: str) -> bool:  # pragma: no cover - protocol
         raise NotImplementedError
@@ -47,14 +47,14 @@ class Storage:
         """Size in bytes of ``rel``; ``-1`` when unknown/unavailable."""
         raise NotImplementedError
 
-    def list(self, rel: str) -> List[str]:  # pragma: no cover - protocol
+    def list(self, rel: str) -> builtins.list[str]:  # pragma: no cover - protocol
         """Entry names directly under ``rel`` (files and dirs)."""
         raise NotImplementedError
 
     def read_parquet(self, rel: str) -> pl.DataFrame:  # pragma: no cover - protocol
         raise NotImplementedError
 
-    def parquet_schema(self, rel: str) -> "dict[str, object]":  # pragma: no cover - protocol
+    def parquet_schema(self, rel: str) -> dict[str, object]:  # pragma: no cover - protocol
         """Column name -> polars dtype for the parquet file at ``rel``.
 
         Used by the union plan builder, which must know every catalogue's
@@ -105,7 +105,7 @@ class LocalStorage(Storage):
 
     root: Path
 
-    def __init__(self, root: Union[str, Path]) -> None:
+    def __init__(self, root: str | Path) -> None:
         self.root = Path(os.path.expandvars(str(root))).expanduser()
         if not self.root.exists():
             self.root.mkdir(parents=True, exist_ok=True)
@@ -126,7 +126,7 @@ class LocalStorage(Storage):
         except OSError:
             return -1
 
-    def list(self, rel: str) -> List[str]:
+    def list(self, rel: str) -> builtins.list[str]:
         p = self._path(rel)
         if not p.is_dir():
             return []
@@ -135,7 +135,7 @@ class LocalStorage(Storage):
     def read_parquet(self, rel: str) -> pl.DataFrame:
         return pl.read_parquet(self._path(rel))
 
-    def parquet_schema(self, rel: str) -> "dict[str, object]":
+    def parquet_schema(self, rel: str) -> dict[str, object]:
         return dict(pl.read_parquet_schema(self._path(rel)))
 
     def write_parquet(self, df: pl.DataFrame, rel: str) -> None:
@@ -197,7 +197,7 @@ class VOSpaceStorage(Storage):
         if not isinstance(root, str) or not root.startswith("vos:"):
             raise ConfigError(f"VOSpaceStorage root must be a 'vos:' URI, got {root!r}")
         self.root = root.rstrip("/")
-        self._binary: Optional[str] = shutil.which("vos")
+        self._binary: str | None = shutil.which("vos")
         self._client = None  # python-vos client when no binary
         if self._binary is None:
             try:
@@ -213,7 +213,7 @@ class VOSpaceStorage(Storage):
         self._ensure_root()
 
     # ------------------------------------------------------------------ CLI
-    def _argv(self, cmd: str, *args: str) -> List[str]:
+    def _argv(self, cmd: str, *args: str) -> builtins.list[str]:
         """Build the ``vos`` CLI argv for ``cmd`` (centralised for adaptation)."""
 
         def uri(rel: str) -> str:
@@ -235,7 +235,7 @@ class VOSpaceStorage(Storage):
             return ["vos", "vrm", uri(args[0] if args else "")]
         raise ValueError(f"unknown vos command {cmd!r}")
 
-    def _run(self, argv: List[str]) -> "subprocess.CompletedProcess[str]":
+    def _run(self, argv: builtins.list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             argv,
             capture_output=True,
@@ -300,7 +300,7 @@ class VOSpaceStorage(Storage):
         except Exception:
             return -1
 
-    def list(self, rel: str) -> List[str]:
+    def list(self, rel: str) -> builtins.list[str]:
         """Entry names directly under ``rel`` (non-recursive; dirs w/o trailing slash)."""
         if self._binary is not None:
             proc = self._run(self._argv("list", rel))
@@ -331,7 +331,7 @@ class VOSpaceStorage(Storage):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def parquet_schema(self, rel: str) -> "dict[str, object]":
+    def parquet_schema(self, rel: str) -> dict[str, object]:
         """Stage the partition in and read its footer (one transfer, not two)."""
         import tempfile
 
@@ -427,14 +427,14 @@ class VOSpaceStorage(Storage):
             self._client.delete(self._uri(rel))  # type: ignore[union-attr]
 
 
-def open_storage(root: Union[str, Path]) -> Storage:
+def open_storage(root: str | Path) -> Storage:
     """Open a :class:`Storage` for ``root`` (``vos:`` URI → VOSpace, else local dir)."""
     if isinstance(root, str) and root.startswith("vos:"):
         return VOSpaceStorage(root)
     return LocalStorage(root)
 
 
-def platform_arc_root() -> Optional[str]:
+def platform_arc_root() -> str | None:
     """``/arc`` when running on an AstroAI/CANFAR session, else ``None``.
 
     Every platform pod mounts the shared ``/arc`` volume; laptops never
@@ -459,7 +459,7 @@ def default_cache_root() -> str:
     return str(Path.home() / ".cache" / "xmatch")
 
 
-def default_output_root() -> Optional[str]:
+def default_output_root() -> str | None:
     """Root for crossmatch outputs.
 
     ``XMATCH_OUTPUT_ROOT`` wins (empty string disables); on
@@ -476,7 +476,7 @@ def default_output_root() -> Optional[str]:
     return None
 
 
-def all_cache_roots(cache_cfg: Optional[dict] = None) -> List[str]:
+def all_cache_roots(cache_cfg: dict | None = None) -> list[str]:
     """Ordered, deduplicated cache roots: primary first, then replicas.
 
     Primary = ``$XMATCH_CACHE_ROOT`` → ``cache_cfg["root"]`` →
@@ -496,7 +496,7 @@ def all_cache_roots(cache_cfg: Optional[dict] = None) -> List[str]:
     return roots
 
 
-def assert_headroom(path: Union[str, Path], min_free_gb: float, label: str) -> None:
+def assert_headroom(path: str | Path, min_free_gb: float, label: str) -> None:
     """Fail fast when ``path``'s filesystem has less than ``min_free_gb`` GiB free.
 
     Runs before any day-scale mirror/union starts so a multi-day run cannot

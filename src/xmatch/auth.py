@@ -1,29 +1,25 @@
 import logging
 import os
-from typing import Any, Dict, Optional
-
-import requests  # HTTP sessions are used for authenticated TAP endpoints.
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Check keyring availability once at module load.
-# Per-service failures are handled at DEBUG level in _load_auth_from_sources().
-_HAS_KEYRING = False
-try:
-    import keyring  # noqa: F401
 
-    _HAS_KEYRING = True
-except ImportError:
-    pass
+def _make_basic_auth_session(username: str, password: str) -> Any:
+    import requests
+
+    session = requests.Session()
+    session.auth = requests.auth.HTTPBasicAuth(username, password)
+    return session
 
 
 class AuthConfig:
     """Manages authentication configurations for different services."""
 
-    def __init__(self, auth_details: Optional[Dict[str, Any]] = None):
+    def __init__(self, auth_details: dict[str, Any] | None = None):
         if auth_details is None:
             auth_details = self._load_auth_from_sources()
-        self._auth_sessions: Dict[str, Any] = auth_details if auth_details else {}
+        self._auth_sessions: dict[str, Any] = auth_details if auth_details else {}
         if self._auth_sessions:
             logger.info(
                 "AuthConfig initialized with sessions for: %s",
@@ -32,7 +28,7 @@ class AuthConfig:
         else:
             logger.debug("AuthConfig initialized (no authenticated sessions).")
 
-    def _load_auth_from_sources(self) -> Dict[str, Any]:
+    def _load_auth_from_sources(self) -> dict[str, Any]:
         """Load authentication details from environment and keyring."""
         logger.debug("Loading authentication details from environment / keyring...")
         loaded_auth = {}
@@ -45,14 +41,15 @@ class AuthConfig:
             password = os.environ.get(f"{env_prefix}_PASSWORD")
             if username and password:
                 logger.info("Found credentials for '%s' in environment variables.", service_name)
-                session = requests.Session()
-                session.auth = requests.auth.HTTPBasicAuth(username, password)
-                loaded_auth[service_name] = session
+                loaded_auth[service_name] = _make_basic_auth_session(username, password)
 
-        # 2) Keyring (fallback for desktop users).
-        if _HAS_KEYRING:
+        # 2) Keyring (optional fallback for desktop users).
+        try:
             import keyring
+        except ImportError:
+            keyring = None  # type: ignore[assignment]
 
+        if keyring is not None:
             for service_name in known_services:
                 if service_name in loaded_auth:
                     continue  # env var already provided it
@@ -61,9 +58,7 @@ class AuthConfig:
                     password = keyring.get_password(service_name, "password")
                     if username and password:
                         logger.info("Found credentials for '%s' in keyring.", service_name)
-                        session = requests.Session()
-                        session.auth = requests.auth.HTTPBasicAuth(username, password)
-                        loaded_auth[service_name] = session
+                        loaded_auth[service_name] = _make_basic_auth_session(username, password)
                     else:
                         logger.debug("No keyring credentials for '%s'.", service_name)
                 except Exception:
@@ -72,7 +67,7 @@ class AuthConfig:
 
         return loaded_auth
 
-    def get_auth_session(self, service_name: str) -> Optional[Any]:
+    def get_auth_session(self, service_name: str) -> Any | None:
         """Return the authenticated session for *service_name*, or None."""
         session = self._auth_sessions.get(service_name)
         if session:

@@ -8,10 +8,11 @@ import math
 import os
 import shutil
 import tempfile
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any
 
 ASSOCIATION_SCHEMA_VERSION = "xmatch.association.v1"
 ASSOCIATION_RELEASE_SCHEMA_VERSION = "xmatch.association.release.v1"
@@ -128,7 +129,7 @@ class AssociationProvenance:
         _sha256(self.parameters_sha256, "parameters_sha256")
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationProvenance":
+    def from_mapping(cls, data: Mapping[str, Any]) -> AssociationProvenance:
         _exact_keys(
             data,
             {"input_release_ids", "software_version", "parameters_sha256"},
@@ -226,7 +227,7 @@ class AssociationRecord:
         return f"{ASSOCIATION_SCHEMA_VERSION}:{hashlib.sha256(payload).hexdigest()}"
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationRecord":
+    def from_mapping(cls, data: Mapping[str, Any]) -> AssociationRecord:
         _exact_keys(
             data,
             {
@@ -370,7 +371,7 @@ class AssociationReleaseManifest:
             raise ValueError("release_id does not match the release identity")
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationReleaseManifest":
+    def from_mapping(cls, data: Mapping[str, Any]) -> AssociationReleaseManifest:
         _exact_keys(
             data,
             {
@@ -590,7 +591,7 @@ class AssociationComponentMember:
         _text(self.member_id, "member_id")
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationComponentMember":
+    def from_mapping(cls, data: Mapping[str, Any]) -> AssociationComponentMember:
         _exact_keys(data, {"input_release_id", "member_id"}, "association component member")
         return cls(data["input_release_id"], data["member_id"])
 
@@ -658,7 +659,7 @@ class AssociationMemberEquivalence:
         )
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationMemberEquivalence":
+    def from_mapping(cls, data: Mapping[str, Any]) -> AssociationMemberEquivalence:
         _exact_keys(
             data,
             {
@@ -773,7 +774,7 @@ class AssociationMemberEquivalenceReleaseManifest:
             )
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationMemberEquivalenceReleaseManifest":
+    def from_mapping(cls, data: Mapping[str, Any]) -> AssociationMemberEquivalenceReleaseManifest:
         _exact_keys(
             data,
             {
@@ -1173,7 +1174,7 @@ class AssociationComponentMembership:
         object.__setattr__(self, "parent_component_ids", parents)
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationComponentMembership":
+    def from_mapping(cls, data: Mapping[str, Any]) -> AssociationComponentMembership:
         _exact_keys(
             data,
             {
@@ -1294,7 +1295,7 @@ class AssociationComponentReleaseManifest:
             raise ValueError("component_release_id does not match the component release identity")
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationComponentReleaseManifest":
+    def from_mapping(cls, data: Mapping[str, Any]) -> AssociationComponentReleaseManifest:
         _exact_keys(
             data,
             {
@@ -1933,7 +1934,7 @@ class AssociationComponentDelta:
         )
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationComponentDelta":
+    def from_mapping(cls, data: Mapping[str, Any]) -> AssociationComponentDelta:
         _exact_keys(
             data,
             {
@@ -2188,7 +2189,7 @@ class AssociationComponentDeltaReleaseManifest:
             raise ValueError("delta_release_id does not match the component delta release identity")
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "AssociationComponentDeltaReleaseManifest":
+    def from_mapping(cls, data: Mapping[str, Any]) -> AssociationComponentDeltaReleaseManifest:
         _exact_keys(
             data,
             {

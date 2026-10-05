@@ -12,11 +12,11 @@ import math
 import shutil
 import sqlite3
 import tempfile
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 import polars as pl
-import pyarrow.parquet as pq
 
 from .sources import CatalogueSource
 
@@ -506,6 +506,8 @@ def _file_sha256(path: Path) -> str:
 
 def validate_source_inventory(path: str | Path) -> None:
     """Disk-backed uniqueness check with a bounded Arrow batch/cache size."""
+    import pyarrow.parquet as pq
+
     path = Path(path)
     with tempfile.TemporaryDirectory(prefix=".identity-", dir=path.parent) as directory:
         database = Path(directory) / "ids.sqlite"

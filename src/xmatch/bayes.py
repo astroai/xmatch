@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Optional
 
 import numpy as np
 
@@ -72,8 +71,8 @@ def compute_p_match(
     sigma_left: np.ndarray,
     sigma_right: np.ndarray,
     radius_arcsec: float,
-    prior_log_match: Optional[np.ndarray] = None,
-    prior_log_bg: Optional[np.ndarray] = None,
+    prior_log_match: np.ndarray | None = None,
+    prior_log_bg: np.ndarray | None = None,
 ) -> np.ndarray:
     """Compute ``p_match`` in [0, 1] per matched pair.
 
@@ -117,7 +116,7 @@ def fit_empirical_kde(
     values_right: np.ndarray,
     *,
     sample_cap: int = _SAMPLE_CAP_DEFAULT,
-    bandwidth: Optional[str] = None,
+    bandwidth: str | None = None,
 ):
     """Return a scipy gaussian_kde fit on the UNION of values_left and
     values_right (subsampled to ``sample_cap`` rows). The Tier-3 Bayesian

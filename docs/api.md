@@ -98,7 +98,9 @@ def crossmatch_multi(
 # 3-way intersection across Parquet, CSV, and remote Gaia
 result = cm.crossmatch_multi(
     ["my_sources.parquet", "wise_cutout.csv", "gaia_esa"],
-    ra=279.23, dec=38.78, radius_deg=0.01,
+    ra=279.23,
+    dec=38.78,
+    radius_deg=0.01,
     radius_arcsec=1.5,
 )
 ```

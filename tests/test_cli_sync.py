@@ -25,7 +25,7 @@ from .tap_fake import FakeTAPServer, make_rows
 
 
 @pytest.fixture()
-def tap_server() -> "Iterator[FakeTAPServer]":
+def tap_server() -> Iterator[FakeTAPServer]:
     srv = FakeTAPServer(make_rows(200))
     yield srv
     srv.shutdown()

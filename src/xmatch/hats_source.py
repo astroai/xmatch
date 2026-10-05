@@ -10,7 +10,6 @@ a clear error if it is missing rather than failing at import time.
 """
 
 import logging
-from typing import Optional
 
 import polars as pl
 
@@ -62,8 +61,8 @@ def hats_crossmatch(
     src2: CatalogueSource,
     spec: MatchSpec,
     *,
-    local_lf1: Optional[pl.LazyFrame] = None,
-    local_lf2: Optional[pl.LazyFrame] = None,
+    local_lf1: pl.LazyFrame | None = None,
+    local_lf2: pl.LazyFrame | None = None,
     right_suffix: str = _RIGHT_SUFFIX,
 ) -> pl.DataFrame:
     """Crossmatch two catalogues where at least one is a HATS catalogue.
@@ -95,8 +94,8 @@ def hats_crossmatch(
             return read_hats(src)
         if lf is None:
             raise CrossMatchError(f"Cannot turn '{src.name}' into a HATS catalogue without data.")
-        pdf = lf.collect().to_pandas()
-        return lsdb.from_dataframe(pdf, ra_column=src.ra_column, dec_column=src.dec_column)
+        df = lf.collect()
+        return lsdb.from_dataframe(df, ra_column=src.ra_column, dec_column=src.dec_column)
 
     cat1 = to_catalog(src1, local_lf1)
     cat2 = to_catalog(src2, local_lf2)
@@ -107,7 +106,12 @@ def hats_crossmatch(
         n_neighbors=n_neighbors,
         suffixes=("", right_suffix),
     ).compute()
-    result = pl.from_pandas(matched.reset_index(drop=True))
+    if isinstance(matched, pl.DataFrame):
+        result = matched
+    elif hasattr(matched, "to_arrow"):
+        result = pl.DataFrame(matched.to_arrow())
+    else:
+        result = pl.from_pandas(matched.reset_index(drop=True))
 
     # Normalise to xmatch schema: rename LSDB's _dist_arcsec → sep_arcsec.
     if "_dist_arcsec" in result.columns:
