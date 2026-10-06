@@ -628,6 +628,55 @@ def _skyerr_pair_filter(
     return _best_per_primary(left_idx, right_idx, seps, scores)
 
 
+def _skyellipse_pair_filter(
+    left_idx: np.ndarray,
+    right_idx: np.ndarray,
+    seps: np.ndarray,
+    l_ra: np.ndarray,
+    l_dec: np.ndarray,
+    r_ra: np.ndarray,
+    r_dec: np.ndarray,
+    cov_l: tuple[np.ndarray, np.ndarray, np.ndarray],
+    cov_r: tuple[np.ndarray, np.ndarray, np.ndarray],
+    max_error: float,
+    *,
+    find: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply the per-pair 2-D Mahalanobis d² <= max_error² criterion.
+
+    Shared across ``fast``, ``zone``, and ``ray`` so every engine evaluates
+    identical error-ellipse geometry and tie-breaking.
+    """
+    if left_idx.size == 0:
+        return left_idx, right_idx, seps
+    sra2_l, sde2_l, rho_l = cov_l
+    sra2_r, sde2_r, rho_r = cov_r
+    mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
+    cos_dec = np.cos(np.radians(mean_dec))
+    delta_ra = (l_ra[left_idx] - r_ra[right_idx]) * 3600.0 * cos_dec
+    delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
+    d2 = _mahalanobis_pairwise(
+        delta_ra,
+        delta_dec,
+        sra2_l[left_idx],
+        sde2_l[left_idx],
+        rho_l[left_idx],
+        sra2_r[right_idx],
+        sde2_r[right_idx],
+        rho_r[right_idx],
+    )
+    keep = np.isfinite(d2) & (d2 <= max_error**2)
+    left_idx, right_idx, seps, d2 = (
+        left_idx[keep],
+        right_idx[keep],
+        seps[keep],
+        d2[keep],
+    )
+    if find == "best" and left_idx.size > 0:
+        return _best_per_primary(left_idx, right_idx, seps, d2)
+    return left_idx, right_idx, seps
+
+
 # --------------------------------------------------------------------------- #
 # proper motion correction
 # --------------------------------------------------------------------------- #
@@ -1140,6 +1189,45 @@ def _build_nd_features(
     return features, stats
 
 
+# Module-level configuration — tunable for benchmarking / memory tuning.
+_ND_CHUNK_SIZE = 50_000
+
+
+def _rank_nd_candidates(
+    left_idx: np.ndarray,
+    right_idx: np.ndarray,
+    seps: np.ndarray,
+    l_ra: np.ndarray,
+    l_dec: np.ndarray,
+    r_ra: np.ndarray,
+    r_dec: np.ndarray,
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+    spec: MatchSpec,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Select the N-dimensional nearest candidate per primary source.
+
+    Used by ``fast``, ``zone``, and ``ray`` whenever ``spec.extra_distance_cols``
+    is set with ``find="best"``.  Evaluates N-d Euclidean distance in chunks of
+    ``_ND_CHUNK_SIZE`` candidate pairs to bound memory.
+    """
+    if left_idx.size == 0 or not spec.extra_distance_cols or spec.find != "best":
+        return left_idx, right_idx, seps
+
+    l_feat, stats = _build_nd_features(l_ra, l_dec, left, spec.extra_distance_cols)
+    r_feat, _ = _build_nd_features(r_ra, r_dec, right, spec.extra_distance_cols, union_mean=stats)
+
+    n_pairs = left_idx.size
+    nd_dists = np.empty(n_pairs, dtype=float)
+    chunk_size = max(1, _ND_CHUNK_SIZE)
+    for start in range(0, n_pairs, chunk_size):
+        end = min(start + chunk_size, n_pairs)
+        diff = r_feat[right_idx[start:end]] - l_feat[left_idx[start:end]]
+        nd_dists[start:end] = np.linalg.norm(diff, axis=-1)
+
+    return _best_per_primary(left_idx, right_idx, seps, nd_dists)
+
+
 def _apply_match_filter(
     left: pl.DataFrame,
     right: pl.DataFrame,
@@ -1249,8 +1337,8 @@ def _scipy_match(
     if chord_max <= 0:
         return empty
 
-    # --- N-dimensional ranking (only affects find="best") ------------------
-    if spec.extra_distance_cols and spec.find == "best":
+    # --- N-dimensional ranking for plain sky (only affects find="best") ----
+    if spec.matcher == "sky" and spec.extra_distance_cols and spec.find == "best":
         return _scipy_match_nd(
             l_xyz,
             r_xyz,
@@ -1265,77 +1353,62 @@ def _scipy_match(
         )
 
     tree = cKDTree(r_xyz)
-    # Likelihood Ratio: always retrieve ALL candidates so the scoring
-    # function can compute reliabilities across the full candidate set.
+    # Likelihood Ratio / ML / XGB / AUF / macauff: retrieve ALL candidates so
+    # the scoring function can compute reliabilities across the full candidate set.
     if spec.matcher in ("lr", "ml", "xgb", "auf", "macauff"):
-        idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
-        return _flatten_candidates(idx_lists, l_xyz, r_xyz)
+        idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1, return_sorted=True)
+        left_idx, right_idx, seps = _flatten_candidates(idx_lists, l_xyz, r_xyz)
+        if spec.extra_distance_cols and spec.find == "best":
+            return _rank_nd_candidates(
+                left_idx, right_idx, seps, l_ra, l_dec, r_ra, r_dec, left, right, spec
+            )
+        return left_idx, right_idx, seps
 
     if spec.matcher == "skyerr":
         # ``skyerr`` is a per-row criterion, so the global-chord candidate set
         # must be scored rather than reduced to the nearest candidate.
         assert lsig is not None and rsig is not None
-        idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
+        idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1, return_sorted=True)
         left_idx, right_idx, seps = _flatten_candidates(idx_lists, l_xyz, r_xyz)
-        return _skyerr_pair_filter(
+        left_idx, right_idx, seps = _skyerr_pair_filter(
             left_idx,
             right_idx,
             seps,
             lsig,
             rsig,
             spec.max_error,
-            find=spec.find,
+            find="all" if spec.extra_distance_cols else spec.find,
         )
+        if spec.extra_distance_cols and spec.find == "best":
+            return _rank_nd_candidates(
+                left_idx, right_idx, seps, l_ra, l_dec, r_ra, r_dec, left, right, spec
+            )
+        return left_idx, right_idx, seps
+
+    if spec.matcher == "skyellipse":
+        assert cov_l is not None and cov_r is not None
+        idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1, return_sorted=True)
+        left_idx, right_idx, seps = _flatten_candidates(idx_lists, l_xyz, r_xyz)
+        left_idx, right_idx, seps = _skyellipse_pair_filter(
+            left_idx,
+            right_idx,
+            seps,
+            l_ra,
+            l_dec,
+            r_ra,
+            r_dec,
+            cov_l,
+            cov_r,
+            spec.max_error,
+            find="all" if spec.extra_distance_cols else spec.find,
+        )
+        if spec.extra_distance_cols and spec.find == "best":
+            return _rank_nd_candidates(
+                left_idx, right_idx, seps, l_ra, l_dec, r_ra, r_dec, left, right, spec
+            )
+        return left_idx, right_idx, seps
+
     if spec.find == "best":
-        # --- skyellipse: query k>1 candidates, pick best by Mahalanobis d² --
-        if spec.matcher == "skyellipse":
-            assert cov_l is not None and cov_r is not None
-            k_candidates = min(max(10, int(spec.max_error * 2)), r_xyz.shape[0])
-            dist_sp, idx_sp = tree.query(
-                l_xyz,
-                k=min(k_candidates, r_xyz.shape[0]),
-                distance_upper_bound=chord_max,
-                workers=-1,
-            )
-            if k_candidates == 1:
-                dist_sp = dist_sp[:, None]
-                idx_sp = idx_sp[:, None]
-
-            sra2_l, sde2_l, rho_l = cov_l
-            sra2_r, sde2_r, rho_r = cov_r
-
-            valid_mask = np.isfinite(dist_sp) & (idx_sp < r_xyz.shape[0])
-            valid_i, valid_k = np.nonzero(valid_mask)
-
-            if len(valid_i) == 0:
-                return empty
-
-            candidates = idx_sp[valid_i, valid_k].astype(np.int64)
-
-            # Compute d² for each candidate.
-            mean_dec = 0.5 * (l_dec[valid_i] + r_dec[candidates])
-            cos_dec = np.cos(np.radians(mean_dec))
-            delta_ra = (l_ra[valid_i] - r_ra[candidates]) * 3600.0 * cos_dec
-            delta_dec = (l_dec[valid_i] - r_dec[candidates]) * 3600.0
-
-            d2 = _mahalanobis_pairwise(
-                delta_ra,
-                delta_dec,
-                sra2_l[valid_i],
-                sde2_l[valid_i],
-                rho_l[valid_i],
-                sra2_r[candidates],
-                sde2_r[candidates],
-                rho_r[candidates],
-            )
-
-            keep = d2 <= spec.max_error**2
-            if not np.any(keep):
-                return empty
-
-            candidate_seps = _chord_to_arcsec(dist_sp[valid_i[keep], valid_k[keep]])
-            return _best_per_primary(valid_i[keep], candidates[keep], candidate_seps, d2[keep])
-
         # --- plain sky: spatial-nearest match ------------------------------
         dist, idx = tree.query(l_xyz, k=1, distance_upper_bound=chord_max, workers=-1)
         valid = np.isfinite(dist) & (idx < r_xyz.shape[0])
@@ -1345,36 +1418,8 @@ def _scipy_match(
         return left_idx, right_idx, sep
 
     # find == "all": per-left list of matched right indices.
-    idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
-    left_idx, right_idx, sep = _flatten_candidates(idx_lists, l_xyz, r_xyz)
-
-    # --- skyellipse Mahalanobis post-filter (find="all") -------------------
-    if spec.matcher == "skyellipse" and left_idx.size > 0:
-        assert cov_l is not None and cov_r is not None
-        sra2_l, sde2_l, rho_l = cov_l
-        sra2_r, sde2_r, rho_r = cov_r
-        mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
-        cos_dec = np.cos(np.radians(mean_dec))
-        delta_ra = (l_ra[left_idx] - r_ra[right_idx]) * 3600.0 * cos_dec
-        delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
-        d2 = _mahalanobis_pairwise(
-            delta_ra,
-            delta_dec,
-            sra2_l[left_idx],
-            sde2_l[left_idx],
-            rho_l[left_idx],
-            sra2_r[right_idx],
-            sde2_r[right_idx],
-            rho_r[right_idx],
-        )
-        keep = d2 <= spec.max_error**2
-        left_idx, right_idx, sep = left_idx[keep], right_idx[keep], sep[keep]
-
-    return left_idx, right_idx, sep
-
-
-# Module-level configuration — tunable for benchmarking / memory tuning.
-_ND_CHUNK_SIZE = 50_000
+    idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1, return_sorted=True)
+    return _flatten_candidates(idx_lists, l_xyz, r_xyz)
 
 
 def _scipy_match_nd(
@@ -2726,17 +2771,7 @@ def _zone_match(
     query neighbour pixels within the cone radius — classic HATS-style
     partitioning. When ``cdshealpix`` is not importable we transparently
     downgrade to :func:`_scipy_match` and log a warning.
-
-    N-dimensional extra_distance_cols are delegated to :func:`_scipy_match`
-    since the N-d ranking loop is simpler without pixel sharding.
     """
-    if spec.extra_distance_cols or spec.matcher in ("lr", "ml", "xgb", "auf", "macauff"):
-        if spec.fallback_policy == "error":
-            raise CrossMatchError(
-                "engine='zone' cannot honor extra-distance or probabilistic matcher semantics"
-            )
-        logger.info("extra_distance_cols/LR/ML/AUF/macauff set; using Tier 1 cKDTree for matching.")
-        return _scipy_match(left, right, left_src, right_src, spec)
     try:
         import cdshealpix as hp  # noqa: F401
     except ImportError as exc:
@@ -2773,7 +2808,9 @@ def _zone_match_healpix(
     r_ra = right[right_src.ra_column].to_numpy().astype(float)
     r_dec = right[right_src.dec_column].to_numpy().astype(float)
 
-    if spec.matcher == "sky":
+    cov_l = cov_r = None
+    lsig = rsig = None
+    if spec.matcher in ("sky", "lr", "ml", "xgb", "auf", "macauff"):
         radius_deg = spec.radius_arcsec / 3600.0
         chord_max = _arcsec_to_chord(spec.radius_arcsec)
     elif spec.matcher == "skyellipse":
@@ -2843,6 +2880,9 @@ def _zone_match_healpix(
         reverse=True,
     )
     batch_size = spec.batch_size or len(pixel_items)
+    need_all_candidates = (
+        spec.find != "best" or spec.matcher != "sky" or bool(spec.extra_distance_cols)
+    )
 
     l_parts, r_parts, sep_parts = [], [], []
     for batch_start in range(0, len(pixel_items), max(1, batch_size)):
@@ -2853,17 +2893,27 @@ def _zone_match_healpix(
 
         for _l_pix_int, left_indices in batch_pixels:
             indices_arr = np.asarray(left_indices, dtype=np.int64)
-            # Cone search once per pixel (same for all points in pixel).
+            # Cone search once per pixel, inflated by the exact intra-batch angular
+            # spread around the representative point so boundary pairs are never missed.
             mid = len(left_indices) // 2
             rep_i = left_indices[mid]
+            batch_xyz = l_xyz[indices_arr]  # (n_pix, 3)
+            rep_xyz = l_xyz[rep_i]
+            batch_spread_rad = float(
+                np.max(
+                    2.0
+                    * np.arcsin(
+                        np.clip(np.linalg.norm(batch_xyz - rep_xyz, axis=-1) * 0.5, 0.0, 1.0)
+                    )
+                )
+            )
             npix = _cone_search_pixels(
                 hp,
                 float(np.radians(l_ra[rep_i])),
                 float(np.radians(l_dec[rep_i])),
-                float(np.radians(radius_deg)),
+                min(math.pi, float(np.radians(radius_deg)) + batch_spread_rad),
                 DEPTH,
             )
-            batch_xyz = l_xyz[indices_arr]  # (n_pix, 3)
 
             # --- margin caching: merge all neighbouring right pixels into one
             #     tree and query it once instead of querying each right pixel
@@ -2884,12 +2934,9 @@ def _zone_match_healpix(
             margin_global = np.concatenate(margin_global_parts)
             margin_tree = cKDTree(margin_xyz)
 
-            if spec.find == "best" and spec.matcher == "sky":
-                # Plain radius + find="best": the spatial-nearest candidate is
-                # the answer, so one candidate per row suffices.  ``skyerr``
-                # must NOT take this path: it has to see every candidate inside
-                # the global bound so the per-row filter can rank by
-                # ``sep / (sigma_l + sigma_r)`` (below).
+            if not need_all_candidates:
+                # Plain radius + find="best" without extra_distance_cols: the
+                # spatial-nearest candidate is the answer.
                 dist, local_idx = margin_tree.query(
                     batch_xyz,
                     k=1,
@@ -2904,31 +2951,6 @@ def _zone_match_healpix(
                     batch_l.append(np.array([k_idx], dtype=np.int64))
                     batch_r.append(np.array([global_r_index], dtype=np.int64))
                     batch_s.append(np.array([sep_arcsec], dtype=float))
-            elif spec.find == "best":
-                # skyellipse + find="best": a chord-nearest candidate can fail the
-                # Mahalanobis criterion while a slightly farther one passes it, so
-                # retrieve several candidates per primary row here and let the d²
-                # post-filter below select the best (mirrors the ``fast`` engine).
-                k_candidates = min(max(10, int(spec.max_error * 2)), margin_tree.n)
-                dist, local_idx = margin_tree.query(
-                    batch_xyz,
-                    k=k_candidates,
-                    distance_upper_bound=chord_max,
-                    workers=-1,
-                )
-                if k_candidates == 1:
-                    dist = dist[:, None]
-                    local_idx = local_idx[:, None]
-                valid = np.isfinite(dist) & (local_idx < margin_tree.n)
-                valid_l, valid_k = np.nonzero(valid)
-                if valid_l.size:
-                    k_indices = np.asarray(left_indices, dtype=np.int64)[valid_l]
-                    global_r_indices = margin_global[local_idx[valid_l, valid_k]].astype(np.int64)
-                    batch_l.append(k_indices)
-                    batch_r.append(global_r_indices)
-                    batch_s.append(
-                        np.asarray(_chord_to_arcsec(dist[valid_l, valid_k]), dtype=float)
-                    )
             else:
                 idx_lists = margin_tree.query_ball_point(
                     batch_xyz,
@@ -2966,34 +2988,28 @@ def _zone_match_healpix(
     right_idx = np.concatenate(r_parts)
     seps = np.concatenate(sep_parts)
 
+    # Sort deterministically by (left_idx, right_idx) to match _scipy_match order.
+    order = np.lexsort((right_idx, left_idx))
+    left_idx = left_idx[order]
+    right_idx = right_idx[order]
+    seps = seps[order]
+
     # --- skyellipse Mahalanobis post-filter ---------------------------------
     if spec.matcher == "skyellipse" and left_idx.size > 0:
         assert cov_l is not None and cov_r is not None
-        sra2_l, sde2_l, rho_l = cov_l
-        sra2_r, sde2_r, rho_r = cov_r
-        mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
-        cos_dec = np.cos(np.radians(mean_dec))
-        delta_ra = (l_ra[left_idx] - r_ra[right_idx]) * 3600.0 * cos_dec
-        delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
-        d2 = _mahalanobis_pairwise(
-            delta_ra,
-            delta_dec,
-            sra2_l[left_idx],
-            sde2_l[left_idx],
-            rho_l[left_idx],
-            sra2_r[right_idx],
-            sde2_r[right_idx],
-            rho_r[right_idx],
+        left_idx, right_idx, seps = _skyellipse_pair_filter(
+            left_idx,
+            right_idx,
+            seps,
+            l_ra,
+            l_dec,
+            r_ra,
+            r_dec,
+            cov_l,
+            cov_r,
+            spec.max_error,
+            find="all" if spec.extra_distance_cols else spec.find,
         )
-        keep = d2 <= spec.max_error**2
-        left_idx, right_idx, seps, d2 = (
-            left_idx[keep],
-            right_idx[keep],
-            seps[keep],
-            d2[keep],
-        )
-        if spec.find == "best" and left_idx.size:
-            left_idx, right_idx, seps = _best_per_primary(left_idx, right_idx, seps, d2)
 
     # --- per-row skyerr N-sigma criterion -----------------------------------
     if spec.matcher == "skyerr" and left_idx.size > 0:
@@ -3005,7 +3021,13 @@ def _zone_match_healpix(
             lsig,
             rsig,
             spec.max_error,
-            find=spec.find,
+            find="all" if spec.extra_distance_cols else spec.find,
+        )
+
+    # --- N-dimensional ranking (when extra_distance_cols is set) ------------
+    if spec.extra_distance_cols and spec.find == "best" and left_idx.size > 0:
+        left_idx, right_idx, seps = _rank_nd_candidates(
+            left_idx, right_idx, seps, l_ra, l_dec, r_ra, r_dec, left, right, spec
         )
 
     return left_idx, right_idx, seps

@@ -48,8 +48,9 @@ All detailed architectural references and user guides are organized in the [`doc
   - Multi-catalogue sequential chains (`crossmatch_multi`).
 - **Local Mirroring & Offline Caching**:
   - `xmatch sync`: Mirror remote TAP and HATS surveys into a durable local HATS cache with keyset paging, rate limiting, and progress checkpoints.
-- **Persistent Full-Sky Master Unions**:
-  - `engine="ray-union"`: Distributed $N$-survey full-outer join producing partitioned HATS directories (`Norder/Dir/Npix.parquet`).
+- **Distributed Ray Execution & Full-Sky Master Unions**:
+  - `engine="ray"`: Distributes spatial candidate search across Ray workers with full support for all 8 matchers (`sky`, `skyerr`, `skyellipse`, `lr`, `ml`, `xgb`, `auf`, `macauff`), $N$-dimensional ranking, `probabilistic=True`, `nway_match`, `fof_match`, and proper-motion propagation (`target_epoch`, `pm_prior`).
+  - `engine="ray-union"`: Distributed $N$-survey full-outer join producing partitioned HATS directories (`Norder/Dir/Npix.parquet`) with `sky`, `skyerr`, `skyellipse`, `target_epoch`, and `pm_prior`.
 
 ---
 

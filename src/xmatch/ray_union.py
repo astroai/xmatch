@@ -113,6 +113,19 @@ class CataloguePlan:
     cols: list[str] = field(default_factory=list)  # original column names
     final_cols: list[str] = field(default_factory=list)  # after _k suffixing
     dtypes: dict[str, str] = field(default_factory=dict)  # final col -> polars dtype str
+    ra_err_column: str | None = None
+    dec_err_column: str | None = None
+    corr_column: str | None = None
+    astrometric_covariance_columns: dict[str, str] | None = None
+    pos_err_units: str = "arcsec"
+    default_pos_error_arcsec: float | None = None
+    epoch: float | None = None
+    epoch_column: str | None = None
+    pm_ra_column: str | None = None
+    pm_dec_column: str | None = None
+    parallax_column: str | None = None
+    radial_velocity_column: str | None = None
+    frame: str = "icrs"
 
 
 @dataclass
@@ -144,6 +157,12 @@ class UnionPlan:
     chunks: list[ChunkPlan] = field(default_factory=list)
     rest: list[RestPlan] = field(default_factory=list)
     rest_keys: set = field(default_factory=set)  # {(cat, part_idx)} of rest runs
+    matcher: str = "sky"
+    max_error: float = 1.0
+    target_epoch: float | None = None
+    pm_prior: bool = False
+    pm_prior_magnitude_column: str | None = None
+    fallback_policy: str = "warn"
 
 
 # --------------------------------------------------------------------------- #
@@ -374,12 +393,22 @@ def build_union_plan(
     max_tuples: int,
     out_dir: str,
     cache_root: str | None = None,
+    matcher: str = "sky",
+    max_error: float = 1.0,
+    target_epoch: float | None = None,
+    pm_prior: bool = False,
+    pm_prior_magnitude_column: str | None = None,
+    fallback_policy: str = "warn",
 ) -> UnionPlan:
     """Return a :class:`UnionPlan`; every source must be a local HATS dir."""
     if not sources:
         raise CrossMatchError("union needs at least one catalogue")
     if sep_arcsec <= 0:
         raise CrossMatchError(f"radius_arcsec must be positive, got {sep_arcsec}")
+    if matcher not in ("sky", "skyerr", "skyellipse"):
+        raise CrossMatchError(
+            f"engine='ray-union' supports matcher in ('sky', 'skyerr', 'skyellipse'), got matcher='{matcher}'."
+        )
     max_tuples = max(1, int(max_tuples))
     task_rows = max(1, int(task_rows))
     chunk_memory_gb = max(0.1, float(chunk_memory_gb))
@@ -450,6 +479,18 @@ def build_union_plan(
         dtypes: dict[str, str] = {
             final: str(schema[orig]) for orig, final in zip(cols, final_cols, strict=True)
         }
+        col_map = dict(zip(cols, final_cols, strict=True))
+
+        def _map_col(c: str | None, cmap: dict[str, str] = col_map) -> str | None:
+            if c is None:
+                return None
+            return cmap.get(c, c)
+
+        cov_cols = (
+            {k: col_map.get(v, v) for k, v in src.astrometric_covariance_columns.items()}
+            if src.astrometric_covariance_columns
+            else None
+        )
 
         ra_orig = src.ra_column or "ra"
         dec_orig = src.dec_column or "dec"
@@ -467,11 +508,29 @@ def build_union_plan(
                 cols=cols,
                 final_cols=final_cols,
                 dtypes=dtypes,
+                ra_err_column=_map_col(src.ra_err_column),
+                dec_err_column=_map_col(src.dec_err_column),
+                corr_column=_map_col(src.corr_column),
+                astrometric_covariance_columns=cov_cols,
+                pos_err_units=src.pos_err_units or "arcsec",
+                default_pos_error_arcsec=src.default_pos_error_arcsec,
+                epoch=src.epoch,
+                epoch_column=_map_col(src.epoch_column),
+                pm_ra_column=_map_col(src.pm_ra_column),
+                pm_dec_column=_map_col(src.pm_dec_column),
+                parallax_column=_map_col(src.parallax_column),
+                radial_velocity_column=_map_col(src.radial_velocity_column),
+                frame=src.frame or "icrs",
             )
         )
 
     all_cols += ["sep_arcsec", "_src_cats"]
-    sep_deg = sep_arcsec / 3600.0
+    eff_arcsec = float(sep_arcsec)
+    if matcher in ("skyerr", "skyellipse"):
+        eff_arcsec = max(eff_arcsec, float(max_error) * 30.0)
+    if target_epoch is not None:
+        eff_arcsec += 60.0
+    sep_deg = eff_arcsec / 3600.0
     cone_radius = 2.0 * (sep_deg + max_delta)
     depths = [max((p.order for p in c.partitions), default=0) for c in catalogues]
 
@@ -546,6 +605,12 @@ def build_union_plan(
         chunks=chunks,
         rest=rest,
         rest_keys={(r.cat, r.part_idx) for r in rest},
+        matcher=matcher,
+        max_error=float(max_error),
+        target_epoch=float(target_epoch) if target_epoch is not None else None,
+        pm_prior=bool(pm_prior),
+        pm_prior_magnitude_column=pm_prior_magnitude_column,
+        fallback_policy=fallback_policy,
     )
 
 
@@ -574,7 +639,32 @@ def _check_coords(frame: pl.DataFrame, ra: str, dec: str, what: str) -> None:
         )
 
 
-def _cat_frame(cat: CataloguePlan, idxs: Sequence[int]) -> pl.DataFrame:
+def _plan_source(cat: CataloguePlan) -> CatalogueSource:
+    """Reconstruct a ``CatalogueSource`` matching the renamed partition columns."""
+    return CatalogueSource(
+        name=cat.name,
+        is_local=True,
+        ra_column=cat.ra,
+        dec_column=cat.dec,
+        ra_err_column=cat.ra_err_column,
+        dec_err_column=cat.dec_err_column,
+        corr_column=cat.corr_column,
+        astrometric_covariance_columns=cat.astrometric_covariance_columns,
+        pos_err_units=cat.pos_err_units,
+        default_pos_error_arcsec=cat.default_pos_error_arcsec,
+        epoch=cat.epoch,
+        epoch_column=cat.epoch_column,
+        pm_ra_column=cat.pm_ra_column,
+        pm_dec_column=cat.pm_dec_column,
+        parallax_column=cat.parallax_column,
+        radial_velocity_column=cat.radial_velocity_column,
+        frame=cat.frame,
+    )
+
+
+def _cat_frame(
+    cat: CataloguePlan, idxs: Sequence[int], plan: UnionPlan | None = None
+) -> pl.DataFrame:
     """Rows of the given partitions, renamed to final output column names."""
     frames = [_part_frame(cat, cat.partitions[i]) for i in idxs]
     # 0-row partitions read fine (polars keeps the schema); dropping them
@@ -589,7 +679,96 @@ def _cat_frame(cat: CataloguePlan, idxs: Sequence[int]) -> pl.DataFrame:
     if rename:
         frame = frame.rename(rename)
     _check_coords(frame, cat.ra, cat.dec, f"catalogue '{cat.name}'")
+    if plan is not None and plan.target_epoch is not None and frame.height > 0:
+        src_meta = _plan_source(cat)
+        target_epoch = float(plan.target_epoch)
+        if plan.matcher == "skyerr":
+            from .out_of_core import _align_epoch, _validate_sigma  # noqa: PLC0415
+
+            frame = _align_epoch(
+                frame.lazy(),
+                src_meta,
+                target_epoch,
+                propagate_covariance=True,
+                pm_prior=plan.pm_prior,
+                magnitude_column=plan.pm_prior_magnitude_column,
+            ).collect()
+            _validate_sigma(frame.lazy(), matchers._EPOCH_SIGMA, src_meta)
+        else:
+            empty_src = CatalogueSource(
+                name="_empty", is_local=True, ra_column="_ra", dec_column="_dec"
+            )
+            empty_df = pl.DataFrame(
+                {"_ra": pl.Series([], dtype=pl.Float64), "_dec": pl.Series([], dtype=pl.Float64)}
+            )
+            frame, _ = matchers._apply_proper_motion(
+                frame,
+                empty_df,
+                src_meta,
+                empty_src,
+                target_epoch,
+                propagate_covariance=plan.matcher == "skyellipse",
+                fallback_policy=plan.fallback_policy,
+            )
+            if plan.pm_prior:
+                frame, _, _, _ = matchers._apply_pm_drift_prior(
+                    src_meta,
+                    empty_src,
+                    frame,
+                    empty_df,
+                    target_epoch,
+                    magnitude_column=plan.pm_prior_magnitude_column,
+                )
     return frame
+
+
+def _extract_matcher_err(frame: pl.DataFrame, cat: CataloguePlan, matcher: str) -> Any:
+    """Extract per-row positional sigma (``skyerr``) or covariance tuple (``skyellipse``)."""
+    if frame.height == 0 or matcher == "sky":
+        return None
+    src_meta = _plan_source(cat)
+    if matcher == "skyerr":
+        sig = matchers._pos_sigma_arcsec(frame, src_meta)
+        if sig is None:
+            raise CrossMatchError(
+                f"matcher='skyerr' requires positional errors on catalogue '{cat.name}'"
+            )
+        return sig
+    if matcher == "skyellipse":
+        cov = matchers._pos_covariance(frame, src_meta)
+        if cov is None:
+            raise CrossMatchError(
+                f"matcher='skyellipse' requires positional errors on catalogue '{cat.name}'"
+            )
+        return cov
+    return None
+
+
+def _effective_pair_chord(
+    plan: UnionPlan,
+    centre_err: Any,
+    pool_errs: Sequence[Any],
+) -> float:
+    """Spatial upper-bound chord for cKDTree pre-filtering in chunk/rest workers."""
+    base_chord = matchers._arcsec_to_chord(float(plan.sep_arcsec))
+    if plan.matcher == "skyerr" and centre_err is not None:
+        c_max = float(np.nanmax(centre_err)) if len(centre_err) else 0.0
+        p_max = max(
+            (float(np.nanmax(pe)) for pe in pool_errs if pe is not None and len(pe)),
+            default=0.0,
+        )
+        bound_arcsec = float(plan.max_error) * (c_max + p_max)
+        if np.isfinite(bound_arcsec) and bound_arcsec > 0.0:
+            return max(base_chord, matchers._arcsec_to_chord(bound_arcsec))
+    elif plan.matcher == "skyellipse" and centre_err is not None:
+        chords = [base_chord]
+        for pe in pool_errs:
+            if pe is not None and len(pe[0]):
+                chords.append(
+                    matchers._skyellipse_search_chord_max(centre_err, pe, float(plan.max_error))
+                )
+        return max(chords)
+    return base_chord
 
 
 def _gather_rows(frame: pl.DataFrame, idx: np.ndarray) -> pl.DataFrame:
@@ -620,6 +799,10 @@ def _block_combos(
     cat_labels: Sequence[int],
     centre_cat: int = 0,
     drop_singles: bool = False,
+    matcher: str = "sky",
+    max_error: float = 1.0,
+    centre_err: Any = None,
+    pool_errs: Sequence[Any] | None = None,
 ) -> tuple[dict[int, np.ndarray], np.ndarray, list[str], np.ndarray]:
     """Enumerate star-shaped row sets for one block of centre rows.
 
@@ -667,7 +850,45 @@ def _block_combos(
                 ra, dec = pools[k]
                 xyz_c = matchers._radec_to_xyz(ra[idx], dec[idx])
                 chord = np.sqrt(np.clip(2.0 - 2.0 * (h_xyz[bi] @ xyz_c.T), 0.0, 4.0))
-                nbrs.append((idx, matchers._chord_to_arcsec(chord)))
+                seps_k = matchers._chord_to_arcsec(chord)
+                if (
+                    matcher == "skyerr"
+                    and centre_err is not None
+                    and pool_errs is not None
+                    and pool_errs[k] is not None
+                ):
+                    c_sig = float(centre_err[bi])
+                    p_sig = np.asarray(pool_errs[k], dtype=float)[idx]
+                    limit = float(max_error) * (c_sig + p_sig)
+                    keep_k = np.isfinite(limit) & np.isfinite(seps_k) & (seps_k <= limit)
+                    idx = idx[keep_k]
+                    seps_k = seps_k[keep_k]
+                elif (
+                    matcher == "skyellipse"
+                    and centre_err is not None
+                    and pool_errs is not None
+                    and pool_errs[k] is not None
+                ):
+                    sra2_c, sde2_c, rho_c = centre_err
+                    sra2_p, sde2_p, rho_p = pool_errs[k]
+                    mean_dec = 0.5 * (float(centre_dec[bi]) + dec[idx])
+                    cos_dec = np.cos(np.radians(mean_dec))
+                    delta_ra = (float(centre_ra[bi]) - ra[idx]) * 3600.0 * cos_dec
+                    delta_dec = (float(centre_dec[bi]) - dec[idx]) * 3600.0
+                    d2 = matchers._mahalanobis_pairwise(
+                        delta_ra,
+                        delta_dec,
+                        np.full(idx.size, float(sra2_c[bi])),
+                        np.full(idx.size, float(sde2_c[bi])),
+                        np.full(idx.size, float(rho_c[bi])),
+                        sra2_p[idx],
+                        sde2_p[idx],
+                        rho_p[idx],
+                    )
+                    keep_k = np.isfinite(d2) & (d2 <= float(max_error) ** 2)
+                    idx = idx[keep_k]
+                    seps_k = seps_k[keep_k]
+                nbrs.append((idx, seps_k))
             else:
                 nbrs.append((idx, np.array([], dtype=float)))
 
@@ -840,7 +1061,10 @@ def _empty_named(col_names: Sequence[str]) -> pl.DataFrame:
 def _run_chunk(plan: UnionPlan, chunk: ChunkPlan) -> dict[str, Any]:
     """Execute one chunk: rows radiating from its centre partition."""
     centre = plan.catalogues[chunk.center]
-    centre_frame = _cat_frame(centre, [chunk.center_idx])
+    centre_frame = _cat_frame(centre, [chunk.center_idx], plan)
+    centre_err = _extract_matcher_err(centre_frame, centre, plan.matcher)
+    if centre_frame.columns and set(centre.final_cols).issubset(centre_frame.columns):
+        centre_frame = centre_frame.select(centre.final_cols)
     n = centre_frame.height
     centre_ra = centre_frame[centre.ra].to_numpy() if n else np.zeros(0, dtype=float)
     centre_dec = centre_frame[centre.dec].to_numpy() if n else np.zeros(0, dtype=float)
@@ -848,10 +1072,14 @@ def _run_chunk(plan: UnionPlan, chunk: ChunkPlan) -> dict[str, Any]:
     partner_globals = sorted(chunk.cand_idx)
     cat_frames: dict[int, pl.DataFrame] = {}
     pools: list[tuple[np.ndarray, np.ndarray]] = []
+    pool_errs: list[Any] = []
     labels: list[int] = []
     for k in partner_globals:
         cat = plan.catalogues[k]
-        frame = _cat_frame(cat, chunk.cand_idx[k])
+        frame = _cat_frame(cat, chunk.cand_idx[k], plan)
+        pool_errs.append(_extract_matcher_err(frame, cat, plan.matcher))
+        if frame.columns and set(cat.final_cols).issubset(frame.columns):
+            frame = frame.select(cat.final_cols)
         cat_frames[k] = frame
         pools.append(
             (
@@ -861,11 +1089,21 @@ def _run_chunk(plan: UnionPlan, chunk: ChunkPlan) -> dict[str, Any]:
         )
         labels.append(k + 1)
 
-    sep_chord = matchers._arcsec_to_chord(float(plan.sep_arcsec))
+    sep_chord = _effective_pair_chord(plan, centre_err, pool_errs)
     drop_singles = (chunk.center, chunk.center_idx) in plan.rest_keys
     blocks: list[pl.DataFrame] = []
     for b0 in range(0, n, _HUB_BLOCK):
         b1 = min(b0 + _HUB_BLOCK, n)
+        block_centre_err: Any = None
+        if centre_err is not None:
+            if plan.matcher == "skyerr":
+                block_centre_err = centre_err[b0:b1]
+            elif plan.matcher == "skyellipse":
+                block_centre_err = (
+                    centre_err[0][b0:b1],
+                    centre_err[1][b0:b1],
+                    centre_err[2][b0:b1],
+                )
         cat_sel, seps, srcs, centre_ids = _block_combos(
             centre_ra[b0:b1],
             centre_dec[b0:b1],
@@ -877,6 +1115,10 @@ def _run_chunk(plan: UnionPlan, chunk: ChunkPlan) -> dict[str, Any]:
             cat_labels=labels,
             centre_cat=chunk.center,
             drop_singles=drop_singles,
+            matcher=plan.matcher,
+            max_error=plan.max_error,
+            centre_err=block_centre_err,
+            pool_errs=pool_errs,
         )
         if not len(seps):
             continue
@@ -918,7 +1160,10 @@ def _run_rest(plan: UnionPlan, rest: RestPlan) -> dict[str, Any]:
     mate are dropped here.
     """
     cat = plan.catalogues[rest.cat]
-    frame = _cat_frame(cat, [rest.part_idx])
+    frame = _cat_frame(cat, [rest.part_idx], plan)
+    centre_err = _extract_matcher_err(frame, cat, plan.matcher)
+    if frame.columns and set(cat.final_cols).issubset(frame.columns):
+        frame = frame.select(cat.final_cols)
     m = frame.height
     dest_root = Path(plan.out_dir) / "chunks"
     dest_root.mkdir(parents=True, exist_ok=True)
@@ -931,9 +1176,11 @@ def _run_rest(plan: UnionPlan, rest: RestPlan) -> dict[str, Any]:
 
     partner_globals = sorted(rest.cand_idx)
     pools: list[tuple[np.ndarray, np.ndarray]] = []
+    pool_errs: list[Any] = []
     for k in partner_globals:
         other = plan.catalogues[k]
-        pf = _cat_frame(other, rest.cand_idx[k])
+        pf = _cat_frame(other, rest.cand_idx[k], plan)
+        pool_errs.append(_extract_matcher_err(pf, other, plan.matcher))
         pools.append(
             (
                 pf[other.ra].to_numpy() if pf.height else np.zeros(0, dtype=float),
@@ -941,20 +1188,55 @@ def _run_rest(plan: UnionPlan, rest: RestPlan) -> dict[str, Any]:
             )
         )
 
-    sep_chord = matchers._arcsec_to_chord(float(plan.sep_arcsec))
+    sep_chord = _effective_pair_chord(plan, centre_err, pool_errs)
     from scipy.spatial import cKDTree  # noqa: PLC0415
 
     keep = np.ones(m, dtype=bool)
     for b0 in range(0, m, _HUB_BLOCK):
         b1 = min(b0 + _HUB_BLOCK, m)
         h_xyz = matchers._radec_to_xyz(ra_full[b0:b1], dec_full[b0:b1])
-        for ra, dec in pools:
+        for pk, (ra, dec) in enumerate(pools):
             if not len(ra):
                 continue
-            tree = cKDTree(matchers._radec_to_xyz(ra, dec))
+            p_xyz = matchers._radec_to_xyz(ra, dec)
+            tree = cKDTree(p_xyz)
             hits = tree.query_ball_point(h_xyz, sep_chord)
+            pe = pool_errs[pk]
             for i, hs in enumerate(hits):
-                if hs:
+                if not hs:
+                    continue
+                if plan.matcher == "sky":
+                    keep[b0 + i] = False
+                elif plan.matcher == "skyerr" and centre_err is not None and pe is not None:
+                    idx = np.asarray(hs, dtype=np.int64)
+                    chord = np.sqrt(np.clip(2.0 - 2.0 * (h_xyz[i] @ p_xyz[idx].T), 0.0, 4.0))
+                    seps_k = matchers._chord_to_arcsec(chord)
+                    limit = float(plan.max_error) * (
+                        float(centre_err[b0 + i]) + np.asarray(pe, dtype=float)[idx]
+                    )
+                    if np.any(np.isfinite(limit) & np.isfinite(seps_k) & (seps_k <= limit)):
+                        keep[b0 + i] = False
+                elif plan.matcher == "skyellipse" and centre_err is not None and pe is not None:
+                    idx = np.asarray(hs, dtype=np.int64)
+                    sra2_c, sde2_c, rho_c = centre_err
+                    sra2_p, sde2_p, rho_p = pe
+                    mean_dec = 0.5 * (float(dec_full[b0 + i]) + dec[idx])
+                    cos_dec = np.cos(np.radians(mean_dec))
+                    delta_ra = (float(ra_full[b0 + i]) - ra[idx]) * 3600.0 * cos_dec
+                    delta_dec = (float(dec_full[b0 + i]) - dec[idx]) * 3600.0
+                    d2 = matchers._mahalanobis_pairwise(
+                        delta_ra,
+                        delta_dec,
+                        np.full(idx.size, float(sra2_c[b0 + i])),
+                        np.full(idx.size, float(sde2_c[b0 + i])),
+                        np.full(idx.size, float(rho_c[b0 + i])),
+                        sra2_p[idx],
+                        sde2_p[idx],
+                        rho_p[idx],
+                    )
+                    if np.any(np.isfinite(d2) & (d2 <= float(plan.max_error) ** 2)):
+                        keep[b0 + i] = False
+                else:
                     keep[b0 + i] = False
 
     kept_ids = np.flatnonzero(keep)
@@ -1304,6 +1586,12 @@ def ray_union_match(
     max_tuples: int | None = None,
     cache_root: str | None = None,
     progress_cb: Callable[[str], None] | None = None,
+    matcher: str = "sky",
+    max_error: float = 1.0,
+    target_epoch: float | None = None,
+    pm_prior: bool = False,
+    pm_prior_magnitude_column: str | None = None,
+    fallback_policy: str = "warn",
 ) -> None:
     """Distributed N-way full-outer join over mirrored HATS catalogues.
 
@@ -1313,14 +1601,14 @@ def ray_union_match(
     are recorded in ``resume.state``; rerunning with different parameters
     into the same directory wipes the stale chunks first.
     """
-    matchers._validate_coordinate_frames(list(sources))
+    matchers._validate_coordinate_frames(list(sources), target_epoch=target_epoch)
     out = Path(str(output_file))
     out.mkdir(parents=True, exist_ok=True)
     task_rows = int(task_rows or DEFAULT_TASK_ROWS)
     chunk_memory_gb = float(chunk_memory_gb or DEFAULT_CHUNK_MEMORY_GB)
     max_tuples = int(max_tuples or DEFAULT_MAX_TUPLES)
     sep_arcsec = float(sep_arcsec)
-    fingerprint = {
+    fingerprint: dict[str, Any] = {
         "sep_arcsec": sep_arcsec,
         "hats_threshold": int(hats_threshold),
         "task_rows": task_rows,
@@ -1335,6 +1623,15 @@ def ray_union_match(
             for s in sources
         ],
     }
+    if matcher != "sky":
+        fingerprint["matcher"] = matcher
+        fingerprint["max_error"] = float(max_error)
+    if target_epoch is not None:
+        fingerprint["target_epoch"] = float(target_epoch)
+    if pm_prior:
+        fingerprint["pm_prior"] = True
+        if pm_prior_magnitude_column is not None:
+            fingerprint["pm_prior_magnitude_column"] = pm_prior_magnitude_column
 
     state_path = out / _STATE_NAME
     prior_fp = None
@@ -1361,6 +1658,12 @@ def ray_union_match(
         max_tuples=max_tuples,
         out_dir=str(out),
         cache_root=cache_root,
+        matcher=matcher,
+        max_error=float(max_error),
+        target_epoch=target_epoch,
+        pm_prior=pm_prior,
+        pm_prior_magnitude_column=pm_prior_magnitude_column,
+        fallback_policy=fallback_policy,
     )
     _LAST_PLAN = plan
     if progress_cb:
@@ -1369,6 +1672,7 @@ def ray_union_match(
             f"delta={plan.delta_arcsec:.4f} deg, radius={sep_arcsec} arcsec"
         )
     state_path.write_text(json.dumps({"status": "running", "fingerprint": fingerprint}, indent=2))
+
     import ray  # noqa: PLC0415
 
     # join a running head (CANFAR: `ray start --head` + RAY_ADDRESS); on a

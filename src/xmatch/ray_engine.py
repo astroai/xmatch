@@ -204,35 +204,29 @@ def ray_zone_match(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Ray-parallelised HEALPix pixel-batch zone match.
 
+    Supports all matchers (``sky``, ``skyerr``, ``skyellipse``, ``lr``, ``ml``,
+    ``xgb``, ``auf``, ``macauff``) and N-dimensional ``extra_distance_cols``.
     Falls back to :func:`xmatch.matchers._zone_match` when Ray is unavailable
-    or when the Ray cluster has only one node.
+    (unless ``fallback_policy="error"``).
 
     Parameters are identical to :func:`xmatch.matchers._scipy_match`.
     """
-    from .matchers import _pixellate, _scipy_match, _skyerr_pair_filter, _zone_match
+    import math
 
-    # N-dimensional extra_distance_cols are delegated to _scipy_match
-    # (single-machine cKDTree with N-d ranking).
-    if spec.extra_distance_cols:
-        if spec.fallback_policy == "error":
-            raise CrossMatchError(
-                "engine='ray' cannot honor extra-distance semantics; use engine='fast'"
-            )
-        logger.info("extra_distance_cols set; using Tier 1 cKDTree for N-d matching.")
-        return _scipy_match(left, right, left_src, right_src, spec)
-
-    # The distributed tasks score candidates on an isotropic per-row radius only,
-    # so a full 2-D Mahalanobis match cannot be expressed here.  Say so instead
-    # of silently matching a different criterion (torchsky does the same).
-    if spec.matcher == "skyellipse":
-        message = (
-            "engine='ray' does not implement matcher='skyellipse'; "
-            "use engine='zone' or engine='fast'"
-        )
-        if spec.fallback_policy == "error":
-            raise CrossMatchError(message)
-        logger.warning("%s — falling back to the single-machine zone engine.", message)
-        return _zone_match(left, right, left_src, right_src, spec)
+    from .matchers import (
+        _arcsec_to_chord,
+        _cone_search_pixels,
+        _pixellate,
+        _pos_covariance,
+        _pos_sigma_arcsec,
+        _radec_to_xyz,
+        _rank_nd_candidates,
+        _scipy_match,
+        _skyellipse_pair_filter,
+        _skyellipse_search_chord_max,
+        _skyerr_pair_filter,
+        _zone_match,
+    )
 
     if not ray_available():
         if spec.fallback_policy == "error":
@@ -267,9 +261,12 @@ def ray_zone_match(
             logger.warning("Ray init failed (%s); using single-machine zone engine.", exc)
             return _zone_match(left, right, left_src, right_src, spec)
 
+    empty = (np.array([], int), np.array([], int), np.array([], float))
+    if left.height == 0 or right.height == 0:
+        return empty
+
     # --- partition left-side data by HEALPix pixel ------------------------
     from .astro_utils import require_finite_coordinates
-    from .matchers import _radec_to_xyz
 
     l_ra = left[left_src.ra_column].to_numpy().astype(float)
     l_dec = left[left_src.dec_column].to_numpy().astype(float)
@@ -277,6 +274,38 @@ def ray_zone_match(
     r_dec = right[right_src.dec_column].to_numpy().astype(float)
     require_finite_coordinates(l_ra, l_dec, label=f"catalogue '{left_src.name}'")
     require_finite_coordinates(r_ra, r_dec, label=f"catalogue '{right_src.name}'")
+
+    # Compute chord_max and radius_deg for the match before dispatching tasks.
+    cov_l = cov_r = None
+    lsig = rsig = None
+    if spec.matcher in ("sky", "lr", "ml", "xgb", "auf", "macauff"):
+        radius_deg = spec.radius_arcsec / 3600.0
+        chord_max = _arcsec_to_chord(spec.radius_arcsec)
+    elif spec.matcher == "skyellipse":
+        cov_l = _pos_covariance(left, left_src)
+        cov_r = _pos_covariance(right, right_src)
+        if cov_l is None or cov_r is None:
+            logger.warning(
+                "Matcher '%s' needs positional errors; none found.",
+                spec.matcher,
+            )
+            return empty
+        chord_max = _skyellipse_search_chord_max(cov_l, cov_r, spec.max_error)
+        radius_deg = math.degrees(2.0 * math.asin(chord_max * 0.5)) if chord_max < 2.0 else 180.0
+    else:
+        lsig = _pos_sigma_arcsec(left, left_src)
+        rsig = _pos_sigma_arcsec(right, right_src)
+        if lsig is None or rsig is None:
+            logger.warning(
+                "Matcher '%s' needs positional errors; none found.",
+                spec.matcher,
+            )
+            return empty
+        search_radius = spec.max_error * (float(np.nanmax(lsig)) + float(np.nanmax(rsig)))
+        radius_deg = max(search_radius, 0.0) / 3600.0
+        chord_max = _arcsec_to_chord(max(search_radius, 0.0))
+    if radius_deg <= 0 or chord_max <= 0:
+        return empty
 
     try:
         import cdshealpix as hp
@@ -318,28 +347,12 @@ def ray_zone_match(
     for pix, xyz in r_xyz_by_pix.items():
         r_xyz_refs[pix] = ray.put(xyz)
 
-    # Compute chord_max and radius_deg for the match.
-    from .matchers import _arcsec_to_chord
-
-    if spec.matcher == "sky":
-        radius_deg = spec.radius_arcsec / 3600.0
-        chord_max = _arcsec_to_chord(spec.radius_arcsec)
-    else:
-        from .matchers import _pos_sigma_arcsec
-
-        lsig = _pos_sigma_arcsec(left, left_src)
-        rsig = _pos_sigma_arcsec(right, right_src)
-        if lsig is None or rsig is None:
-            return (np.array([], int), np.array([], int), np.array([], float))
-        search_radius = spec.max_error * (float(np.nanmax(lsig)) + float(np.nanmax(rsig)))
-        radius_deg = max(search_radius, 0.0) / 3600.0
-        chord_max = _arcsec_to_chord(max(search_radius, 0.0))
-
-    # Put immutable data in object store.  ``skyerr`` is a per-row criterion, so
-    # the workers must hand back every candidate inside the global bound; the
-    # driver applies the N-sigma filter and the best-per-primary reduction once
-    # the batch results are gathered.
-    task_spec = dataclasses.replace(spec, find="all") if spec.matcher == "skyerr" else spec
+    # Put immutable data in object store.  Whenever a non-sky matcher or N-d
+    # extra_distance_cols is active, workers must hand back every candidate
+    # inside the spatial bound; the driver applies per-row / population scoring
+    # and the best-per-primary reduction once the batch results are gathered.
+    need_all_candidates = spec.matcher != "sky" or bool(spec.extra_distance_cols)
+    task_spec = dataclasses.replace(spec, find="all") if need_all_candidates else spec
     l_xyz = _radec_to_xyz(l_ra, l_dec)
     l_xyz_ref = ray.put(l_xyz)
     spec_ref = ray.put(task_spec)
@@ -349,22 +362,27 @@ def ray_zone_match(
     # Passing the full ``r_xyz_refs`` dict made each worker resolve and
     # materialise the ENTIRE right catalogue (O(P) object-store reads per
     # task, O(P^2) overall — and on a multi-node cluster the whole catalogue
-    # over the network per task).  The neighbour set is identical to the one
-    # the worker used to compute locally, so results do not change.
-    from .matchers import _cone_search_pixels
-
-    # Submit one task per left pixel group.
+    # over the network per task).  The cone radius is inflated by the exact
+    # intra-batch angular spread around the representative point so boundary
+    # pairs are never missed.
     pixel_batch_fn = _get_ray_pixel_batch()
     futures: list = []
     total_batches = 0
     for l_pix_int, left_indices in l_by_pix.items():
         indices_arr = np.asarray(left_indices, dtype=np.int64)
-        rep = l_xyz[indices_arr[indices_arr.shape[0] // 2]]
+        rep_i = int(indices_arr[indices_arr.shape[0] // 2])
+        batch_xyz = l_xyz[indices_arr]
+        rep = l_xyz[rep_i]
+        batch_spread_rad = float(
+            np.max(
+                2.0 * np.arcsin(np.clip(np.linalg.norm(batch_xyz - rep, axis=-1) * 0.5, 0.0, 1.0))
+            )
+        )
         npix = _cone_search_pixels(
             hp,
-            float(np.arctan2(rep[1], rep[0])),
-            float(np.arcsin(np.clip(rep[2], -1.0, 1.0))),
-            float(np.radians(radius_deg)),
+            float(np.radians(l_ra[rep_i])),
+            float(np.radians(l_dec[rep_i])),
+            min(math.pi, float(np.radians(radius_deg)) + batch_spread_rad),
             DEPTH,
         )
         task_refs = {int(p): r_xyz_refs[int(p)] for p in npix if int(p) in r_xyz_refs}
@@ -395,13 +413,36 @@ def ray_zone_match(
         r_parts.append(r_idx)
         sep_parts.append(seps)
 
-    empty = (np.array([], int), np.array([], int), np.array([], float))
     if not l_parts:
         return empty
     left_idx = np.concatenate(l_parts)
     right_idx = np.concatenate(r_parts)
     seps = np.concatenate(sep_parts)
-    if spec.matcher == "skyerr":
+
+    # Sort deterministically by (left_idx, right_idx) to match _scipy_match order.
+    order = np.lexsort((right_idx, left_idx))
+    left_idx = left_idx[order]
+    right_idx = right_idx[order]
+    seps = seps[order]
+
+    if spec.matcher == "skyellipse" and left_idx.size > 0:
+        assert cov_l is not None and cov_r is not None
+        left_idx, right_idx, seps = _skyellipse_pair_filter(
+            left_idx,
+            right_idx,
+            seps,
+            l_ra,
+            l_dec,
+            r_ra,
+            r_dec,
+            cov_l,
+            cov_r,
+            spec.max_error,
+            find="all" if spec.extra_distance_cols else spec.find,
+        )
+
+    if spec.matcher == "skyerr" and left_idx.size > 0:
+        assert lsig is not None and rsig is not None
         left_idx, right_idx, seps = _skyerr_pair_filter(
             left_idx,
             right_idx,
@@ -409,6 +450,12 @@ def ray_zone_match(
             lsig,
             rsig,
             spec.max_error,
-            find=spec.find,
+            find="all" if spec.extra_distance_cols else spec.find,
         )
+
+    if spec.extra_distance_cols and spec.find == "best" and left_idx.size > 0:
+        left_idx, right_idx, seps = _rank_nd_candidates(
+            left_idx, right_idx, seps, l_ra, l_dec, r_ra, r_dec, left, right, spec
+        )
+
     return left_idx, right_idx, seps

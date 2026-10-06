@@ -985,3 +985,105 @@ def test_union_output_dir_convention_for_deep_pixels(tmp_path: Path) -> None:
     import hats  # noqa: PLC0415
 
     assert hats.read_hats(out).get_healpix_pixels(), "output must be readable"
+
+
+@pytest.mark.parametrize("matcher", ["skyerr", "skyellipse"])
+def test_ray_union_skyerr_and_skyellipse(tmp_path: Path, matcher: str) -> None:
+    """ray_union_match with matcher='skyerr' and 'skyellipse' filters pairs by
+    per-row N-sigma / 2-D Mahalanobis distance."""
+    # Row 0: 0.45" apart with ~1.0" errors -> matches under max_error=1.0
+    # Row 1: 0.80" apart with tiny 0.05" errors -> rejected under max_error=1.0
+    a = pl.DataFrame(
+        {
+            "id": ["a0", "a1"],
+            "ra": [10.0, 20.0],
+            "dec": [0.0, 0.0],
+            "rae": [1.0, 0.05],
+            "dee": [1.0, 0.05],
+            "corr": [0.0, 0.0],
+        }
+    )
+    b = pl.DataFrame(
+        {
+            "id": ["b0", "b1"],
+            "ra": [10.0 + 0.45 / 3600.0, 20.0 + 0.80 / 3600.0],
+            "dec": [0.0, 0.0],
+            "rae": [1.0, 0.05],
+            "dee": [1.0, 0.05],
+            "corr": [0.0, 0.0],
+        }
+    )
+    src_a = dataclasses_replace_err(_catalogue(tmp_path / f"a_{matcher}", "a", a))
+    src_b = dataclasses_replace_err(_catalogue(tmp_path / f"b_{matcher}", "b", b))
+    out = tmp_path / f"out_{matcher}.hats"
+    ray_union.ray_union_match(
+        [src_a, src_b],
+        sep_arcsec=2.0,
+        output_file=str(out),
+        matcher=matcher,
+        max_error=1.0,
+    )
+    df = _read_output(out)
+    # a0+b0 matched ("1+2"), a1 ("1") and b1 ("2") stayed unmatched singletons
+    assert sorted(df["_src_cats"].to_list()) == ["1", "1+2", "2"]
+
+
+def dataclasses_replace_err(src: CatalogueSource) -> CatalogueSource:
+    from dataclasses import replace
+
+    return replace(
+        src,
+        ra_err_column="rae",
+        dec_err_column="dee",
+        corr_column="corr",
+        pos_err_units="arcsec",
+    )
+
+
+def test_ray_union_target_epoch_and_pm_prior(tmp_path: Path) -> None:
+    """ray_union_match propagates proper motion to target_epoch and inflates
+    errors with pm_prior when a catalogue has epoch but no PM columns."""
+    from dataclasses import replace
+
+    # Source moves +100 mas/yr in RA over 16 years (2000 -> 2016) = +1.6 arcsec.
+    a = pl.DataFrame(
+        {
+            "id": ["a0"],
+            "ra": [10.0],
+            "dec": [0.0],
+            "pmra": [100.0],
+            "pmdec": [0.0],
+            "epoch": [2000.0],
+        }
+    )
+    b = pl.DataFrame(
+        {
+            "id": ["b0"],
+            "ra": [10.0 + 1.6 / 3600.0],
+            "dec": [0.0],
+            "epoch": [2016.0],
+        }
+    )
+    src_a = replace(
+        _catalogue(tmp_path / "a_pm", "a", a),
+        pm_ra_column="pmra",
+        pm_dec_column="pmdec",
+        epoch_column="epoch",
+        epoch=2000.0,
+    )
+    src_b = replace(
+        _catalogue(tmp_path / "b_pm", "b", b),
+        epoch_column="epoch",
+        epoch=2016.0,
+    )
+    out = tmp_path / "out_pm.hats"
+    ray_union.ray_union_match(
+        [src_a, src_b],
+        sep_arcsec=0.5,
+        output_file=str(out),
+        target_epoch=2016.0,
+        pm_prior=True,
+    )
+    df = _read_output(out)
+    assert df.height == 1
+    assert df["_src_cats"][0] == "1+2"

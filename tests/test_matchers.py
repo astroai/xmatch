@@ -2557,3 +2557,236 @@ def test_skyerr_ray_engine_matches_single_machine():
             ), f"find={find}: ray and astropy disagree on the pair set"
     finally:
         ray.shutdown()
+
+
+@pytest.fixture(scope="module")
+def _ray_cluster():
+    ray = pytest.importorskip("ray")
+    started = not ray.is_initialized()
+    if started:
+        ray.init(ignore_reinit_error=True, logging_level=40)
+    yield ray
+    if started and ray.is_initialized():
+        ray.shutdown()
+
+
+@pytest.mark.parametrize(
+    "matcher",
+    ["sky", "skyerr", "skyellipse", "lr", "ml", "xgb", "auf", "macauff"],
+)
+@pytest.mark.parametrize("find", ["best", "all"])
+def test_ray_and_zone_all_matchers_parity(_ray_cluster, matcher: str, find: str):
+    """Every matcher ('sky', 'skyerr', 'skyellipse', 'lr', 'ml', 'xgb', 'auf',
+    'macauff') must produce identical matched pairs and scores across 'fast',
+    'zone', and 'ray'."""
+    if matcher == "xgb":
+        pytest.importorskip("xgboost")
+
+    rng = np.random.default_rng(1234)
+    n_left = 24
+    base_ra = np.linspace(10.0, 20.0, n_left)
+    base_dec = np.linspace(-5.0, 5.0, n_left)
+    left = pl.DataFrame(
+        {
+            "id": np.arange(n_left),
+            "ra": base_ra,
+            "dec": base_dec,
+            "rae": rng.uniform(0.15, 0.45, n_left),
+            "dee": rng.uniform(0.15, 0.45, n_left),
+            "corr": rng.uniform(-0.5, 0.5, n_left),
+            "mag": rng.uniform(16.0, 21.0, n_left),
+            "color": rng.uniform(0.2, 1.5, n_left),
+        }
+    )
+    # Two candidates per primary row (one close + matching mag/color, one farther)
+    # plus a handful of background rows.
+    right = pl.DataFrame(
+        {
+            "id": np.arange(2 * n_left),
+            "ra": np.concatenate([base_ra + 0.25 / 3600.0, base_ra + 0.70 / 3600.0]),
+            "dec": np.concatenate([base_dec + 0.10 / 3600.0, base_dec - 0.20 / 3600.0]),
+            "rae": np.concatenate(
+                [rng.uniform(0.15, 0.45, n_left), rng.uniform(0.15, 0.45, n_left)]
+            ),
+            "dee": np.concatenate(
+                [rng.uniform(0.15, 0.45, n_left), rng.uniform(0.15, 0.45, n_left)]
+            ),
+            "corr": np.concatenate(
+                [rng.uniform(-0.5, 0.5, n_left), rng.uniform(-0.5, 0.5, n_left)]
+            ),
+            "mag": np.concatenate([left["mag"].to_numpy() + 0.03, left["mag"].to_numpy() + 1.8]),
+            "color": np.concatenate(
+                [left["color"].to_numpy() + 0.02, left["color"].to_numpy() + 0.9]
+            ),
+        }
+    )
+    a = _src("a", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    b = _src("b", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    spec = MatchSpec(
+        radius_arcsec=2.0,
+        matcher=matcher,
+        max_error=3.0,
+        find=find,
+        lr_magnitude_column="mag" if matcher == "lr" else None,
+        ml_color_columns=["mag", "color"] if matcher in ("ml", "xgb") else None,
+        macauff_flux_columns=["mag"] if matcher == "macauff" else None,
+    )
+
+    fast_df = (
+        sky_match(a, b, left.lazy(), right.lazy(), spec, engine="fast")
+        .collect()
+        .sort(["id", "id_2"])
+    )
+    zone_df = (
+        sky_match(a, b, left.lazy(), right.lazy(), spec, engine="zone")
+        .collect()
+        .sort(["id", "id_2"])
+    )
+    ray_df = (
+        sky_match(a, b, left.lazy(), right.lazy(), spec, engine="ray")
+        .collect()
+        .sort(["id", "id_2"])
+    )
+    assert fast_df.height > 0
+    for label, other_df in (("zone", zone_df), ("ray", ray_df)):
+        assert other_df.height == fast_df.height, f"{matcher}/{find}/{label}"
+        assert other_df["id"].to_list() == fast_df["id"].to_list()
+        assert other_df["id_2"].to_list() == fast_df["id_2"].to_list()
+        assert np.allclose(other_df["sep_arcsec"], fast_df["sep_arcsec"], atol=1e-6)
+        for score_col in (
+            "lr",
+            "reliability",
+            "ml_score",
+            "xgb_score",
+            "auf_prob",
+            "macauff_prob",
+        ):
+            if score_col in fast_df.columns:
+                assert score_col in other_df.columns
+                assert np.allclose(
+                    other_df[score_col], fast_df[score_col], atol=1e-6, equal_nan=True
+                )
+
+
+def test_ray_and_zone_extra_distance_cols_and_probabilistic_parity(_ray_cluster):
+    """extra_distance_cols, prior_columns (p_match), and target_epoch/pm_prior
+    must agree between 'fast', 'zone', and 'ray'."""
+    left = pl.DataFrame(
+        {
+            "id": [1, 2],
+            "ra": [10.0, 25.0],
+            "dec": [0.0, 10.0],
+            "z": [0.5, 1.2],
+            "mag": [18.0, 19.5],
+            "rae": [0.2, 0.2],
+            "dee": [0.2, 0.2],
+            "pmra": [10.0, -5.0],
+            "pmdec": [5.0, 10.0],
+            "epoch": [2000.0, 2000.0],
+        }
+    )
+    # Candidate A is spatially closer (0.2") but far in redshift (Δz=0.4);
+    # Candidate B is slightly farther on sky (0.5") but exact in redshift (Δz=0.0).
+    right = pl.DataFrame(
+        {
+            "id": [10, 11, 20, 21],
+            "ra": [
+                10.0 + 0.2 / 3600.0,
+                10.0 + 0.5 / 3600.0,
+                25.0 + 0.2 / 3600.0,
+                25.0 + 0.5 / 3600.0,
+            ],
+            "dec": [0.0, 0.0, 10.0, 10.0],
+            "z": [0.9, 0.5, 1.6, 1.2],
+            "mag": [18.02, 18.01, 19.52, 19.50],
+            "rae": [0.2, 0.2, 0.2, 0.2],
+            "dee": [0.2, 0.2, 0.2, 0.2],
+            "pmra": [0.0, 0.0, 0.0, 0.0],
+            "pmdec": [0.0, 0.0, 0.0, 0.0],
+            "epoch": [2016.0, 2016.0, 2016.0, 2016.0],
+        }
+    )
+    a = _src(
+        "a",
+        ra_err_column="rae",
+        dec_err_column="dee",
+        pm_ra_column="pmra",
+        pm_dec_column="pmdec",
+        epoch_column="epoch",
+    )
+    b = _src(
+        "b",
+        ra_err_column="rae",
+        dec_err_column="dee",
+        pm_ra_column="pmra",
+        pm_dec_column="pmdec",
+        epoch_column="epoch",
+    )
+    spec = MatchSpec(
+        radius_arcsec=2.0,
+        find="best",
+        extra_distance_cols={"z": 10.0},
+        prior_columns=["mag"],
+        target_epoch=2016.0,
+    )
+
+    fast_df = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="fast").collect().sort("id")
+    zone_df = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="zone").collect().sort("id")
+    ray_df = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="ray").collect().sort("id")
+    assert fast_df["id_2"].to_list() == [11, 21]
+    assert zone_df["id_2"].to_list() == [11, 21]
+    assert ray_df["id_2"].to_list() == [11, 21]
+    assert "p_match" in ray_df.columns
+    assert np.allclose(ray_df["p_match"], fast_df["p_match"], atol=1e-6)
+
+
+def test_ray_nway_and_fof_match_parity(_ray_cluster):
+    """nway_match and fof_match with engine='ray' must match local execution."""
+    from xmatch import CrossMatch
+
+    cat1 = pl.DataFrame(
+        {
+            "id": [1, 2],
+            "ra": [10.0, 30.0],
+            "dec": [0.0, 10.0],
+            "mag": [18.0, 20.0],
+        }
+    )
+    cat2 = pl.DataFrame(
+        {
+            "id": [10, 20],
+            "ra": [10.0 + 0.3 / 3600.0, 30.0 + 0.2 / 3600.0],
+            "dec": [0.0, 10.0],
+            "mag": [18.05, 19.95],
+        }
+    )
+    cat3 = pl.DataFrame(
+        {
+            "id": [100, 200],
+            "ra": [10.0 - 0.2 / 3600.0, 30.0 + 0.4 / 3600.0],
+            "dec": [0.0, 10.0],
+            "mag": [17.98, 20.02],
+        }
+    )
+    cm = CrossMatch()
+    nway_local = cm.nway_match(
+        [cat1, cat2, cat3],
+        radius_arcsec=2.0,
+        prior_columns=["mag"],
+        chunk_size=1,
+    )
+    nway_ray = cm.nway_match(
+        [cat1, cat2, cat3],
+        radius_arcsec=2.0,
+        prior_columns=["mag"],
+        chunk_size=1,
+        engine="ray",
+    )
+    assert nway_local is not None and nway_ray is not None
+    assert nway_ray.height == nway_local.height == 2
+    assert np.allclose(nway_ray.sort("id")["p_match"], nway_local.sort("id")["p_match"], atol=1e-6)
+
+    fof_local = cm.fof_match([cat1, cat2, cat3], radius_arcsec=2.0)
+    fof_ray = cm.fof_match([cat1, cat2, cat3], radius_arcsec=2.0, engine="ray")
+    assert fof_local is not None and fof_ray is not None
+    assert fof_ray.sort("bundle_id").equals(fof_local.sort("bundle_id"))

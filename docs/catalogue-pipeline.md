@@ -90,8 +90,9 @@ It does not propagate an unknown RV variance or promise a full six-parameter
 covariance model. Jacobian transport requires the optional torchsky backend.
 An explicitly requested missing-motion prior remains an assumed population
 model, distinct from measured covariance, and is not supported by spill execution.
-The distributed `ray-union` driver currently rejects `target_epoch` and `pm_prior`;
-prepare aligned inputs explicitly before using it. Direct eager and spill entry
+The distributed `ray-union` driver supports `target_epoch` and `pm_prior` when
+sources declare epoch and proper-motion columns, and rejects unannotated motion
+requests before writing output. Direct eager and spill entry
 points also validate declared frames instead of comparing incompatible coordinates.
 
 ```python

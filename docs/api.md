@@ -120,6 +120,7 @@ def union_match(
 ```
 
 - When full-sky remote surveys are passed without a cone constraint (`ra`, `dec`, `radius_deg`), `union_match` automatically routes to `engine="ray-union"`, mirroring the full tables into HATS and producing a distributed partitioned master HATS catalogue.
+- Supports `engine="ray"` across all matchers (`sky`, `skyerr`, `skyellipse`, `lr`, `ml`, `xgb`, `auf`, `macauff`) and output formats, and `engine="ray-union"` for distributed HATS output with `matcher="sky"`, `matcher="skyerr"`, or `matcher="skyellipse"`, `target_epoch`, and `pm_prior`.
 
 ---
 
@@ -142,7 +143,7 @@ def nway_match(
 ) -> pl.DataFrame | None
 ```
 
-Evaluates Cartesian candidate tuples $c_1 \times c_2 \times \dots \times c_N$ inside the spatial radius and scores each joint tuple with positional and photometric KDE Bayes factors, emitting a joint `p_match` posterior in $[0, 1]$.
+Evaluates Cartesian candidate tuples $c_1 \times c_2 \times \dots \times c_N$ inside the spatial radius and scores each joint tuple with positional and photometric KDE Bayes factors, emitting a joint `p_match` posterior in $[0, 1]$. Supports `engine="ray"` for distributed HEALPix candidate discovery and parallel `@ray.remote` chunk tuple scoring, as well as `target_epoch`, `pm_prior`, and HATS catalogue inputs.
 
 ---
 
@@ -161,6 +162,8 @@ def fof_match(
     **params: Any,
 ) -> pl.DataFrame | None
 ```
+
+Supports `engine="ray"` for distributed pairwise edge discovery, `target_epoch`, `pm_prior`, and HATS catalogue inputs.
 
 **Output Columns**:
 - `bundle_id`: Unique integer assigned to the connected component.
@@ -230,14 +233,14 @@ class SideOverrides:
 
 `xmatch` decouples matching algorithms from spatial indexing engines.
 
-| Engine | Primary Backend | Threading / Scaling | Memory Overhead | Notes |
+| Engine | Primary Backend | Threading / Scaling | Memory Overhead | Supported Algorithms & Features |
 |---|---|---|---|---|
-| **`fast`** | `scipy.spatial.cKDTree` | OpenMP multi-threaded (`workers=-1`) | Minimal (3D unit vectors) | Default high-performance engine for local data (~3–5× faster than Astropy). |
-| **`zone`** | `cdshealpix` + `cKDTree` | Single-machine HEALPix sharding | Bounded per pixel | Partitions data into HEALPix pixels; falls back to `fast` if `cdshealpix` missing. |
-| **`ray`** | Ray cluster | Multi-node / Multi-process Ray tasks | Distributed | Fans out HEALPix pixel matching tasks across a Ray cluster. |
-| **`ray-union`** | Ray cluster | Distributed star-shaped join | Resumable chunk storage | Distributed full-outer-join union producing full HATS partition trees. |
+| **`fast`** | `scipy.spatial.cKDTree` | OpenMP multi-threaded (`workers=-1`) | Minimal (3D unit vectors) | All 8 matchers (`sky`, `skyerr`, `skyellipse`, `lr`, `ml`, `xgb`, `auf`, `macauff`), `extra_distance_cols`, `probabilistic=True`, `target_epoch`, `pm_prior`, `nway_match`, `fof_match`. |
+| **`zone`** | `cdshealpix` + `cKDTree` | Single-machine HEALPix sharding | Bounded per pixel | Full feature parity with `fast`; partitions data into HEALPix pixels with exact boundary neighbour expansion. |
+| **`ray`** | Ray cluster | Multi-node / Multi-process Ray tasks | Distributed | Full feature parity with `fast` across flat files, in-memory frames, and HATS inputs (`sky`, `skyerr`, `skyellipse`, `lr`, `ml`, `xgb`, `auf`, `macauff`, `extra_distance_cols`, `probabilistic=True`, `target_epoch`, `pm_prior`, `nway_match`, `fof_match`). |
+| **`ray-union`** | Ray cluster | Distributed star-shaped join | Resumable chunk storage | Distributed full-outer-join union producing full HATS partition trees with `matcher="sky"`, `"skyerr"`, or `"skyellipse"`, `target_epoch`, and `pm_prior`. |
 | **`astropy`** | Astropy `SkyCoord` | Single-threaded Python | High (object trees) | Pure-Python fallback; used when SciPy or C extensions are unavailable. |
-| **`stilts`** | STILTS `tmatch2` | External Java subprocess | Managed by JVM | Requires Java and `stilts` CLI tool. |
+| **`stilts`** | STILTS `tmatch2` | External Java subprocess | Managed by JVM | `sky`, `skyerr`, `skyellipse`; requires Java and `stilts` CLI tool. |
 | **`torchsky`** | PyTorch / Torchsky | GPU / Vectorized Tensor ops | Fixed PyTorch RSS | Tensor-native candidate pruning; requires `torchsky`. |
 
 ---

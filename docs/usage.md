@@ -410,14 +410,51 @@ xmatch match large_survey_a.parquet large_survey_b.parquet \
 
 ### Ray Distributed Cluster Crossmatching
 
-Run crossmatching across a cluster (e.g. CANFAR Ray cluster):
+`engine="ray"` distributes HEALPix spatial candidate search across Ray workers and supports **all** crossmatch algorithms (`sky`, `skyerr`, `skyellipse`, `lr`, `ml`, `xgb`, `auf`, `macauff`), multimodal $N$-dimensional ranking (`extra_distance_cols`), Bayesian qualification (`probabilistic=True`, `nway_match`), transitive closure (`fof_match`), and proper-motion propagation (`target_epoch`, `pm_prior`) across flat files, in-memory frames, and HATS directories:
 
 ```bash
 # Connect to an existing cluster or start local Ray workers
 xmatch match full_sky_a.parquet full_sky_b.parquet \
   --engine ray \
-  -r 1.0 \
+  --matcher lr \
+  --lr-mag-col r_mag \
+  -r 2.0 \
   -o ray_output.parquet
+```
+
+```python
+from xmatch import CrossMatch, MatchRequest, MatchSpec
+
+cm = CrossMatch()
+
+# Distributed Ray crossmatch with XGBoost, epoch alignment, and Bayesian posterior
+req = MatchRequest(
+    cat1="survey_a.hats",
+    cat2="survey_b.hats",
+    engine="ray",
+    probabilistic=True,
+    spec=MatchSpec(
+        radius_arcsec=2.0,
+        matcher="xgb",
+        ml_color_columns=["g_mag", "r_mag"],
+        prior_columns=["g_mag"],
+        target_epoch=2016.0,
+    ),
+)
+matches = cm.crossmatch_request(req)
+
+# Distributed Bayesian N-way and Friends-of-Friends clustering on Ray
+nway_df = cm.nway_match(
+    ["gaia_sample.parquet", "wise_sample.parquet", "twomass_sample.parquet"],
+    radius_arcsec=1.5,
+    prior_columns=["phot_g_mean_mag"],
+    engine="ray",
+)
+fof_df = cm.fof_match(
+    ["gaia_sample.parquet", "wise_sample.parquet", "twomass_sample.parquet"],
+    radius_arcsec=1.5,
+    engine="ray",
+)
 ```
 
 ---
@@ -434,12 +471,15 @@ xmatch sync gaia allwise twomass des ls_dr10
 
 ### Step 2: Generate Full-Sky Master Union
 
-Run `engine="ray-union"` to produce a unified, partitioned HATS master catalog:
+Run `engine="ray-union"` to produce a unified, partitioned HATS master catalog (supporting `matcher="sky"`, `"skyerr"`, or `"skyellipse"`, `target_epoch`, and `pm_prior`):
 
 ```bash
 xmatch match gaia allwise twomass des ls_dr10 \
   --union \
   --engine ray-union \
+  --matcher skyerr \
+  --max-error 3.0 \
+  --target-epoch 2016.0 \
   -o /arc/projects/hats/master_union_v1.hats
 ```
 
