@@ -15,6 +15,11 @@ def _require(condition: bool, message: str) -> None:
         raise SystemExit(message)
 
 
+def check_tag(tag: str, version: str) -> None:
+    expected = f"v{version}"
+    _require(tag == expected, f"release tag {tag!r} does not match project version {expected!r}")
+
+
 def package_files(root: Path) -> list[Path]:
     return sorted(
         path
@@ -219,10 +224,13 @@ def check_sdist(sdist_path: Path, root: Path, required: list[Path], project_name
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dist", type=Path, default=Path("dist"))
+    parser.add_argument("--tag", help="require this release tag to match the project version")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     with (root / "pyproject.toml").open("rb") as stream:
         project = tomllib.load(stream)["project"]
+    if args.tag is not None:
+        check_tag(args.tag, project["version"])
     artifacts = list(args.dist.glob("*.whl"))
     _require(len(artifacts) == 1, f"expected one wheel in {args.dist}, found {artifacts}")
     wheel_path = artifacts[0]

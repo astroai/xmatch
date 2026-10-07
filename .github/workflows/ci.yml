@@ -4,6 +4,7 @@ on:
   # ponytail: PR events cover feature branches; push verifies merged main.
   push:
     branches: [main]
+    tags: [v*]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -63,3 +64,40 @@ jobs:
         run: |
           pixi run --as-is python -c 'import os; from pathlib import Path; import xmatch; root = Path(os.environ["PYTHONPATH"]).resolve(); path = Path(xmatch.__file__).resolve(); assert path.is_relative_to(root), (path, root); print(path)'
           "${RUNNER_TEMP}/xmatch-wheel/bin/xmatch" --help
+      - name: Prepare verified release assets
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          pixi run --as-is python scripts/check_release.py --dist dist --tag "$GITHUB_REF_NAME"
+          cp "docs/release-${GITHUB_REF_NAME#v}.md" dist/RELEASE_NOTES.md
+          cd dist
+          sha256sum *.whl *.tar.gz > SHA256SUMS
+
+      - name: Preserve verified release assets
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dist
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      # ponytail: Attach the artifacts already tested by linux instead of rebuilding them.
+      - name: Publish verified release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --name release-dist --dir dist
+          cd dist
+          sha256sum --check SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" *.whl *.tar.gz SHA256SUMS \
+            --verify-tag --title "xmatch $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md

@@ -9,7 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 No changes yet.
 
-## [0.5.0] — release candidate (unpublished)
+## [0.5.0] — 2026-10-07
+
+Distributed from the private GitHub repository at tag `v0.5.0`; no PyPI package
+is published because another project owns the `xmatch` name.
 
 ### Added
 

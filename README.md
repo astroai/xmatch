@@ -59,8 +59,8 @@ Requires Python $\ge 3.13$. The checked Pixi environment and local release gate 
 ### Recommended: Pixi
 
 ```bash
-# Clone the repository
-git clone https://github.com/astroai/xmatch.git
+# Clone the 0.5.0 release tag (the private repository requires access)
+git clone --branch v0.5.0 https://github.com/astroai/xmatch.git
 cd xmatch
 
 # Install environment and dependencies
@@ -73,22 +73,18 @@ pixi run ci-local
 
 ### Standard: Pip
 
-The PyPI distribution name [`xmatch`](https://pypi.org/project/xmatch/) belongs
-to a different project. Until this project has a confirmed distribution name
-and first release, install from a checkout instead of running `pip install xmatch`:
+The 0.5.0 release is distributed from the private GitHub repository at tag
+`v0.5.0`; repository access is required. The PyPI name [`xmatch`](https://pypi.org/project/xmatch/)
+belongs to a different project, so this project is not published on PyPI.
 
 ```bash
-git clone https://github.com/astroai/xmatch.git
+git clone --branch v0.5.0 https://github.com/astroai/xmatch.git
 cd xmatch
 python -m pip install .
 
 # Optional integrations; use only the extras you need
 python -m pip install ".[cds,hats-ray,torchfits,ml]"
 ```
-
-The repository is currently private, so this installation route requires
-repository access. A PyPI installation command will be documented after the
-package name is settled and a release is published.
 
 The tensor-native `torchsky` engine is not a package extra: no `torchsky`
 distribution is published on PyPI. To use it, install xmatch alongside a

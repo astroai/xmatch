@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.check_release import check_sdist, check_wheel, package_files, required_sdist_files
+from scripts.check_release import (
+    check_sdist,
+    check_tag,
+    check_wheel,
+    package_files,
+    required_sdist_files,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,6 +24,17 @@ ROOT = Path(__file__).resolve().parents[1]
 def _project():
     with (ROOT / "pyproject.toml").open("rb") as stream:
         return tomllib.load(stream)["project"]
+
+
+def test_release_tag_matches_project_version():
+    version = _project()["version"]
+    check_tag(f"v{version}", version)
+
+
+@pytest.mark.parametrize("tag", ["0.5.0", "v0.5.1", "v0.5.0-rc1"])
+def test_release_tag_rejects_other_versions(tag):
+    with pytest.raises(SystemExit, match="does not match project version"):
+        check_tag(tag, "0.5.0")
 
 
 def _wheel(path, *, extra=(), license_bytes=None, include_license=True, corrupt=None):
