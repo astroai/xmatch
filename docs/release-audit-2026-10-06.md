@@ -148,6 +148,14 @@ and published Torchfits 1.0.0; this does not establish an independently publishe
 Torchsky distribution. Healpy and actual LR, Random Forest, XGBoost, AUF and
 macauff scoring integrations also passed with strict fallback.
 
+TAP execution now uses PyVO's native asynchronous-job context manager. Four
+real-client tests against the local UWS protocol reproduced orphaned jobs before
+the fix, then verified exact-job cleanup on success, server error, callback
+failure and cancellation while preserving an unrelated job. The affected offline
+TAP, mirror, CLI-sync and remote slice passed all 64 tests. Native cleanup may
+still wait on an unresponsive archive, and failed submission before PyVO returns
+a job object remains an upstream lifecycle limitation.
+
 The live ARC VOS test used `python-vos` 3.7 and actual backend moves. It exposed
 and fixed non-idempotent parent creation and incorrect `listdir()` result
 handling. Upload/readback, transfer interruption with old bytes preserved,
@@ -212,6 +220,13 @@ Polars type aliases. Codespell passes with a reduced list of scientific tokens.
 
 Final combined checks, rebuilt artifacts, Ubuntu CI, Python compatibility and
 CANFAR worker evidence will be recorded after those runs finish.
+
+The review candidate is [draft PR #204](https://github.com/astroai/xmatch/pull/204).
+Its configured commit and pre-push offline gates passed. The first Ubuntu job
+caught incompatible setup-pixi settings (`cache=true`, `run-install=false`);
+the workflow now performs the locked installation through the setup action,
+removing the redundant separate install step. A fresh Linux job must confirm
+the corrected workflow before this candidate is ready.
 
 ## Compatibility and limits from the initial audit
 
