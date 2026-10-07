@@ -4,8 +4,12 @@ and traversal rejection at the storage boundary."""
 
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import polars as pl
@@ -16,6 +20,7 @@ from xmatch.storage import (
     LocalStorage,
     VOSpaceStorage,
     all_cache_roots,
+    assert_headroom,
     default_cache_root,
     default_output_root,
     open_storage,
@@ -72,6 +77,17 @@ def test_write_parquet_atomic_failure_path(tmp_path: Path, monkeypatch) -> None:
     assert list((tmp_path / "x").iterdir()) == [target]
 
 
+def test_write_parquet_preserves_umask_created_permissions(tmp_path: Path) -> None:
+    store = LocalStorage(tmp_path)
+    previous_umask = os.umask(0o027)
+    try:
+        store.write_parquet(pl.DataFrame({"a": [1]}), "shared.parquet")
+    finally:
+        os.umask(previous_umask)
+
+    assert stat.S_IMODE((tmp_path / "shared.parquet").stat().st_mode) == 0o640
+
+
 def test_stage_out_failure_leaves_no_tmp(tmp_path: Path, monkeypatch) -> None:
     store = LocalStorage(tmp_path)
     src = tmp_path / "payload.dat"
@@ -88,6 +104,29 @@ def test_stage_out_failure_leaves_no_tmp(tmp_path: Path, monkeypatch) -> None:
     # pre-existing target untouched, no orphaned tmp
     assert (tmp_path / "c" / "t.dat").read_bytes() == b"data-bytes"
     assert sorted(p.name for p in (tmp_path / "c").iterdir()) == ["t.dat"]
+
+
+def test_concurrent_stage_out_uses_distinct_temporary_files(tmp_path: Path, monkeypatch) -> None:
+    store = LocalStorage(tmp_path / "cache")
+    sources = [tmp_path / "one", tmp_path / "two"]
+    sources[0].write_bytes(b"one")
+    sources[1].write_bytes(b"two")
+    both_opened = threading.Barrier(2)
+    both_written = threading.Barrier(2)
+
+    def synchronized_copy(src, dst):
+        with Path(dst).open("wb") as handle:
+            both_opened.wait(timeout=5)
+            handle.write(Path(src).read_bytes())
+            both_written.wait(timeout=5)
+
+    monkeypatch.setattr("xmatch.storage.shutil.copy2", synchronized_copy)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(store.stage_out, src, "same.dat") for src in sources]
+        errors = [future.exception(timeout=10) for future in futures]
+
+    assert errors == [None, None]
+    assert (store.root / "same.dat").read_bytes() in {b"one", b"two"}
 
 
 def test_rel_traversal_rejected(tmp_path: Path) -> None:
@@ -108,6 +147,57 @@ def test_rel_traversal_rejected(tmp_path: Path) -> None:
         vos._uri("../x.parquet")
     with pytest.raises(ValueError, match="escapes the root"):
         vos._argv("put", "/tmp/local", "a/../../victim.parquet")
+
+
+def test_rel_symlink_cannot_escape_local_storage_root(tmp_path: Path) -> None:
+    store = LocalStorage(tmp_path / "cache")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (store.root / "escape").symlink_to(outside, target_is_directory=True)
+    payload = tmp_path / "payload.dat"
+    payload.write_bytes(b"must stay inside")
+
+    with pytest.raises(ValueError, match="escapes the root"):
+        store.stage_out(payload, "escape/payload.dat")
+
+    assert not (outside / "payload.dat").exists()
+
+
+def test_assert_headroom_uses_binary_gibibytes(tmp_path: Path, monkeypatch) -> None:
+    from collections import namedtuple
+
+    from xmatch.exceptions import CrossMatchError
+
+    DiskUsage = namedtuple("DiskUsage", "total used free")
+    monkeypatch.setattr(
+        "xmatch.storage.shutil.disk_usage",
+        lambda _: DiskUsage(2**40, 2**40 - 1_000_000_000, 1_000_000_000),
+    )
+    with pytest.raises(CrossMatchError, match="below the --min-free-gb floor"):
+        assert_headroom(tmp_path, 1.0, "test filesystem")
+
+    monkeypatch.setattr(
+        "xmatch.storage.shutil.disk_usage",
+        lambda _: DiskUsage(2**40, 0, 1024**3),
+    )
+    assert_headroom(tmp_path, 1.0, "test filesystem")
+
+
+def test_rm_unlinks_internal_symlinks_without_removing_their_targets(tmp_path: Path) -> None:
+    store = LocalStorage(tmp_path / "cache")
+    target = store.root / "target"
+    target.mkdir()
+    alias = store.root / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    dangling = store.root / "dangling"
+    dangling.symlink_to(store.root / "missing")
+
+    store.rm("alias")
+    store.rm("dangling")
+
+    assert target.is_dir()
+    assert not alias.is_symlink()
+    assert not dangling.is_symlink()
 
 
 def _fake_vos_binary(monkeypatch, tmp_path: Path, scripts: dict[str, str] | None = None):
@@ -179,7 +269,7 @@ def test_vospace_list_parses_basenames_and_sizes(monkeypatch, tmp_path) -> None:
         tmp_path,
         scripts={
             "vos:probe/root/data/Npix=3.parquet": long_out,
-            "vos:probe/root/data": "Npix=3.parquet\ndataset\n",
+            "vos:probe/root/data": "Npix=3.parquet\ndataset/\n",
         },
     )
     store = VOSpaceStorage("vos:probe/root")
@@ -201,6 +291,76 @@ def test_vospace_stage_out_mkdirs_parents(monkeypatch, tmp_path) -> None:
     mkdir = runs.index(["vos", "vmkdir", "-p", "vos:probe/root/name/v1/dataset"])
     put = runs.index(["vos", "vcp", str(local), "vos:probe/root/name/v1/dataset/Npix=3.parquet"])
     assert mkdir < put
+
+
+def test_vospace_python_stage_out_reuses_existing_parent(tmp_path: Path) -> None:
+    """The python-vos fallback must tolerate repeated mkdirs like `vmkdir -p`."""
+
+    class Node:
+        def __init__(self, node_type: str) -> None:
+            self.type = node_type
+
+    class Client:
+        def __init__(self) -> None:
+            self.nodes = {"vos:probe/root": Node("vos:ContainerNode")}
+            self.mkdir_calls: list[str] = []
+            self.copied: dict[str, bytes] = {}
+
+        def get_node(self, uri: str) -> Node:
+            if uri not in self.nodes:
+                raise FileNotFoundError(uri)
+            return self.nodes[uri]
+
+        def mkdir(self, uri: str) -> None:
+            self.mkdir_calls.append(uri)
+            if uri in self.nodes:
+                raise FileExistsError(uri)
+            self.nodes[uri] = Node("vos:ContainerNode")
+
+        def copy(self, source: str, destination: str) -> None:
+            self.copied[destination] = Path(source).read_bytes()
+            self.nodes[destination] = Node("vos:DataNode")
+
+    store = VOSpaceStorage.__new__(VOSpaceStorage)
+    store.root = "vos:probe/root"
+    store._binary = None
+    store._client = Client()
+    first = tmp_path / "first.parquet"
+    second = tmp_path / "second.parquet"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+
+    store.stage_out(first, "dataset/first.parquet")
+    store.stage_out(second, "dataset/second.parquet")
+
+    assert store._client.copied == {
+        "vos:probe/root/dataset/first.parquet": b"first",
+        "vos:probe/root/dataset/second.parquet": b"second",
+    }
+    assert store._client.mkdir_calls == ["vos:probe/root/dataset"]
+
+    store._client.nodes["vos:probe/root/not-a-container"] = Node("vos:DataNode")
+    with pytest.raises(OSError, match="exists and is not a container"):
+        store.mkdir("not-a-container")
+
+
+def test_vospace_python_list_normalizes_names() -> None:
+    """python-vos 3.7 returns child names, not Node objects, from listdir."""
+
+    class Node:
+        uri = "vos:probe/root/catalogue/dataset/"
+
+    class Client:
+        def listdir(self, uri: str) -> list[object]:
+            assert uri == "vos:probe/root/catalogue"
+            return ["properties", Node()]
+
+    store = VOSpaceStorage.__new__(VOSpaceStorage)
+    store.root = "vos:probe/root"
+    store._binary = None
+    store._client = Client()
+
+    assert store.list("catalogue") == ["dataset", "properties"]
 
 
 def test_open_storage_routing(tmp_path: Path) -> None:

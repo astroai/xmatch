@@ -21,7 +21,7 @@ dict twice.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -192,6 +192,18 @@ class MatchRequest:
     probabilistic: bool = False
     """Signal that Tier-3 Bayesian qualification should be attempted."""
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.probabilistic, bool):
+            raise ValueError("probabilistic must be a boolean")
+        if self.probabilistic or self.spec.probabilistic:
+            if self.id_join:
+                raise ValueError("probabilistic scoring requires positional matching, not id_join")
+            self.probabilistic = True
+            if not self.spec.probabilistic:
+                self.spec = replace(self.spec, probabilistic=True)
+        elif self.id_join and self.spec.prior_columns:
+            raise ValueError("prior_columns require positional matching, not id_join")
+
     # ----------------------------------------------------------------- factory
     @classmethod
     def from_params(
@@ -216,6 +228,7 @@ class MatchRequest:
             join_type=params.get("join_type", "1and2"),
             find=params.get("find", "best"),
             prior_columns=prior,
+            probabilistic=params.get("probabilistic", False),
             target_epoch=params.get("target_epoch"),
             filter_expr=params.get("filter_expr"),
             extra_distance_cols=extra_distance,
@@ -286,7 +299,7 @@ class MatchRequest:
             ra=params.get("ra"),
             dec=params.get("dec"),
             radius_deg=params.get("radius_deg"),
-            probabilistic=bool(params.get("probabilistic")),
+            probabilistic=params.get("probabilistic", False),
         )
 
 

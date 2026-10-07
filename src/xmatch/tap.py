@@ -75,6 +75,8 @@ def execute_tap_query(
 ):
     """Execute an ADQL query (async) and return the result as an astropy Table.
 
+    PyVO attempts to delete the submitted job on exit, including errors or cancellation.
+
     ``progress_cb`` is invoked with short status strings at three points:
     on submission ("submitting TAP job"), every poll iteration
     ("phase: queued" / "phase: running" / ...), and on completion
@@ -82,18 +84,18 @@ def execute_tap_query(
     """
     logger.debug("ADQL: %s", query)
     try:
-        job = tap_service.submit_job(query, maxrec=maxrec, language="ADQL")
-        if progress_cb is not None:
-            progress_cb("submitting TAP job")
-        job.run()
-        _poll_job(job, progress_cb)
-        if job.phase != "COMPLETED":
-            message = getattr(job, "message", None) or job.phase
-            raise TapError(f"TAP job did not complete: {message}")
-        result = job.fetch_result().to_table()
-        if progress_cb is not None:
-            progress_cb(f"fetching {len(result)} rows")
-        return result
+        with tap_service.submit_job(query, maxrec=maxrec, language="ADQL") as job:
+            if progress_cb is not None:
+                progress_cb("submitting TAP job")
+            job.run()
+            _poll_job(job, progress_cb)
+            if job.phase != "COMPLETED":
+                message = getattr(job, "message", None) or job.phase
+                raise TapError(f"TAP job did not complete: {message}")
+            result = job.fetch_result().to_table()
+            if progress_cb is not None:
+                progress_cb(f"fetching {len(result)} rows")
+            return result
     except TapError:
         raise
     except Exception as exc:

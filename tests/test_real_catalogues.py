@@ -8,19 +8,20 @@ default::
     pytest -m slow --durations=20    # also dumps per-test timings
 
 Each test that needs real catalogue data looks at
-``/scratch/xmatch-catalogues/<name>_top500.csv`` and triggers an
+the system temporary directory's ``xmatch-catalogues-v2/<name>_top500.csv`` and triggers an
 ``astroquery``-backed fetch on first access. Subsequent runs read only the
 cached CSV; the network is touched once per clean cache directory.
 
-Catalogues exercised (all sampled at RA=262.4°, Dec=-32.77°, radius=0.5°,
-the Stripe-82 neighbourhood — a deep, multi-survey window of sky):
+Catalogues exercised near the Galactic center (RA=262.4°, Dec=-32.77°):
 
-* **Gaia DR3 / EDR3** — optical, integer ``source_id``, positional errors
+* **Gaia DR3** — optical, integer ``source_id``, positional errors
   (``ra_error``, ``dec_error`` in mas), ``phot_g_mean_mag`` for Tier 3 priors.
-* **AllWISE** — mid-IR (W1..W4), string ``AllWISE`` designation for ID-style joins.
+  Its fetch uses a 1° RA/Dec bounding box, not a circular cone.
+* **AllWISE** — mid-IR (W1..W4), string ``AllWISE`` designation for ID-style joins,
+  sampled in a 0.5° cone.
 * **USNO-B1.0** — optical with astrometric proper motion
-  (``pmRA``/``pmDE``, mas/yr) and per-axis position errors in mas. Exercises
-  ``skyerr`` on real survey data.
+  (``pmRA``/``pmDE``, mas/yr) and per-axis position errors in mas, sampled in a
+  0.5° cone. Exercises ``skyerr`` on real survey data.
 
 A graceful skip applies when :mod:`astroquery` isn't available. A test whose
 cache fixture fails (network outage, upstream schema drift) is reported as
@@ -51,7 +52,7 @@ from xmatch.sources import CatalogueSource
 CACHE_DIR = pathlib.Path(
     os.environ.get(
         "XMATCH_REAL_CATALOGUES_DIR",
-        str(pathlib.Path(tempfile.gettempdir()) / "xmatch-catalogues"),
+        str(pathlib.Path(tempfile.gettempdir()) / "xmatch-catalogues-v2"),
     )
 )
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -114,8 +115,9 @@ def _with_retries(fn: Callable[[], None], *, attempts: int = 3, sleep_s: float =
 def _fetch_gaia(path: pathlib.Path) -> None:
     from astroquery.gaia import Gaia
 
-    # A plain RA/Dec box is *much* cheaper for TAP than ST_CONTAINS, and the
-    # extra coverage on the corners is harmless on a 0.5° cone.
+    # A plain RA/Dec box is much cheaper than a geometric TAP predicate. Keep
+    # it explicit in the fixture description; corner rows are outside the
+    # circular 0.5° cone used by the VizieR fetchers.
     ra_lo = CENTRE_RA_DEG - CONE_RADIUS_DEG
     ra_hi = CENTRE_RA_DEG + CONE_RADIUS_DEG
     dec_lo = CENTRE_DEC_DEG - CONE_RADIUS_DEG
@@ -123,10 +125,11 @@ def _fetch_gaia(path: pathlib.Path) -> None:
     adql = (
         f"SELECT TOP {N_ROWS} source_id, ra, dec, ra_error, dec_error, "
         f"ra_dec_corr, phot_g_mean_mag "
-        f"FROM gaiaedr3.gaia_source "
+        f"FROM gaiadr3.gaia_source "
         f"WHERE ra BETWEEN {ra_lo} AND {ra_hi} "
         f"AND dec BETWEEN {dec_lo} AND {dec_hi} "
-        f"AND phot_g_mean_mag < 16"
+        f"AND phot_g_mean_mag < 16 "
+        f"ORDER BY source_id"
     )
 
     def _launch() -> None:
@@ -212,13 +215,51 @@ def _ensure_csv(path: pathlib.Path) -> pathlib.Path:
     if fetcher is None:
         raise KeyError(f"No fetcher registered for {path}.")
     _require_network()
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    tmp_path = pathlib.Path(tmp_name)
     t0 = time.perf_counter()
-    fetcher(path)
+    try:
+        fetcher(tmp_path)
+        if not tmp_path.exists() or tmp_path.stat().st_size < 100:
+            raise RuntimeError(f"Catalogue cache miss after fetch for {path}.")
+        os.replace(tmp_path, path)
+    except Exception as exc:  # noqa: BLE001 - upstream errors skip slow live tests
+        tmp_path.unlink(missing_ok=True)
+        pytest.skip(f"Could not fetch real catalogue {path.name}: {exc}")
     elapsed = time.perf_counter() - t0
-    if not path.exists() or path.stat().st_size < 100:
-        raise RuntimeError(f"Catalogue cache miss after fetch for {path}.")
     print(f"\n[real-catalogues] populated {path.name} in {elapsed:.1f}s")
     return path
+
+
+def test_csv_cache_promotes_only_a_complete_fetch(tmp_path: pathlib.Path, monkeypatch) -> None:
+    path = tmp_path / "catalogue.csv"
+    path.write_text("old partial cache")
+    monkeypatch.setattr("tests.test_real_catalogues._require_network", lambda: None)
+    monkeypatch.setitem(CATALOGUE_FETCHERS, path, lambda tmp: tmp.write_text("new,complete\n" * 20))
+
+    assert _ensure_csv(path) == path
+    assert path.read_text() == "new,complete\n" * 20
+    assert list(tmp_path.glob(".catalogue.csv.*.tmp")) == []
+
+
+def test_csv_cache_fetch_failure_preserves_existing_file(
+    tmp_path: pathlib.Path, monkeypatch
+) -> None:
+    path = tmp_path / "catalogue.csv"
+    path.write_text("old partial cache")
+
+    def fail_after_partial_write(tmp: pathlib.Path) -> None:
+        tmp.write_text("partial" * 100)
+        raise OSError("simulated upstream interruption")
+
+    monkeypatch.setattr("tests.test_real_catalogues._require_network", lambda: None)
+    monkeypatch.setitem(CATALOGUE_FETCHERS, path, fail_after_partial_write)
+    with pytest.raises(pytest.skip.Exception, match="simulated upstream interruption"):
+        _ensure_csv(path)
+
+    assert path.read_text() == "old partial cache"
+    assert list(tmp_path.glob(".catalogue.csv.*.tmp")) == []
 
 
 @pytest.fixture(scope="session")
@@ -253,8 +294,6 @@ def _gaia_source(csv: pathlib.Path) -> CatalogueSource:
         pos_err_units="mas",
     )
     if csv.exists():
-        import polars as pl
-
         cols = pl.scan_csv(str(csv)).collect_schema().names()
         if "ra_dec_corr" in cols:
             src.corr_column = "ra_dec_corr"
@@ -331,36 +370,20 @@ def test_real_gaia_x_allwise_zone_matches_fast(gaia_csv, allwise_csv):
     spec = MatchSpec(radius_arcsec=5.0, find="best")
     fast = sky_match(left_src, right_src, lf_l, lf_r, spec, engine="fast").collect()
     zone = sky_match(left_src, right_src, lf_l, lf_r, spec, engine="zone").collect()
+    # The independent Top-500 fetches are not a complete crossmatch sample, so
+    # compare engine outputs without assuming that every chosen sample overlaps.
     assert fast.height == zone.height, (
         f"Tier 2 ({zone.height}) disagrees with Tier 1 ({fast.height}) — "
         "the cdshealpix fallback or HEALPix dedup is broken."
     )
     if fast.height:
+        keys = ["source_id", "AllWISE"]
+        assert fast.select(keys).sort(keys).equals(zone.select(keys).sort(keys))
         assert np.allclose(
             np.sort(fast["sep_arcsec"].to_numpy()),
             np.sort(zone["sep_arcsec"].to_numpy()),
             atol=1e-6,
         )
-
-
-@pytest.mark.skipif(not _HAVE_ASTROQUERY, reason="astroquery not installed")
-def test_real_gaia_x_allwise_tier1_finds_physical_matches(gaia_csv, allwise_csv):
-    """Same-sky cone: Gaia (optical) and AllWISE (mid-IR) must share a handful
-    of real overlap pairs (W1 detection of every bright Gaia source in the
-    surveyed cone). Radius ``5 arcsec`` tolerates AllWISE position scatter."""
-    left_src = _gaia_source(gaia_csv)
-    right_src = _allwise_source(allwise_csv)
-    lf_l = left_src.lazy()
-    lf_r = right_src.lazy()
-    spec = MatchSpec(radius_arcsec=5.0, find="best")
-    out = sky_match(left_src, right_src, lf_l, lf_r, spec, engine="fast").collect()
-    assert out.height >= 1, "no real Gaia × AllWISE overlap at 5″ — investigate."
-    assert (out["sep_arcsec"] <= 5.0).all()
-    assert "source_id" in out.columns
-    assert "AllWISE" in out.columns
-    # Gaia (left) + AllWISE (right) share no column names, so the right
-    # side is not renamed with the "_2" suffix.
-    assert "AllWISE_2" not in out.columns
 
 
 @pytest.mark.skipif(not _HAVE_ASTROQUERY, reason="astroquery not installed")
@@ -435,7 +458,7 @@ def test_real_usno_skyerr_self_tier1(usno_csv):
 
 
 @pytest.mark.skipif(not _HAVE_ASTROQUERY, reason="astroquery not installed")
-def test_real_allwise_tier1_self_matches(gaia_csv, allwise_csv):
+def test_real_allwise_tier1_self_matches(allwise_csv):
     """AllWISE itself + Tier 1 self-match (round-trip through the matcher,
     not just CSV-to-LazyFrame)."""
     src = _allwise_source(allwise_csv)
@@ -521,37 +544,27 @@ def test_skyellipse_vs_sky_on_gaia_self_match(gaia_csv):
 
 
 @pytest.mark.skipif(not _HAVE_ASTROQUERY, reason="astroquery not installed")
-def test_nway_gaia_allwise_usno_photometric_priors(gaia_csv, allwise_csv, usno_csv):
-    """3-way Bayesian N-way crossmatch (Gaia × AllWISE × USNO-B1.0) with a
-    photometric prior on ``phot_g_mean_mag``.
+def test_nway_rejects_photometric_prior_missing_from_catalogue(gaia_csv, allwise_csv, usno_csv):
+    """A heterogeneous 3-survey set cannot reuse Gaia's magnitude as a prior.
 
-    Uses :meth:`CrossMatch.nway_match` to score simultaneous 3-catalogue
-    tuples with the Budavári N-way posterior.  The test verifies that the
-    result contains at least one matched tuple, that ``p_match`` falls in
-    [0, 1], and that columns from all three catalogues are present.
+    The n-way photometric KDE model requires one semantically common scalar in
+    every catalogue. AllWISE and USNO-B1.0 lack Gaia's ``phot_g_mean_mag``;
+    silently treating that missing feature as a uniform prior would misstate
+    the requested scoring model.
     """
     from pathlib import Path
 
     from xmatch.crossmatch import CrossMatch
+    from xmatch.exceptions import CrossMatchError
 
     config = Path(__file__).parent.parent / "src" / "xmatch" / "xmatch.yaml"
     cm = CrossMatch(config_file=config)
 
-    result = cm.nway_match(
-        [str(gaia_csv), str(allwise_csv), str(usno_csv)],
-        radius_arcsec=2.0,
-        prior_columns=["phot_g_mean_mag"],
-        max_tuples_per_source=5_000,
-        chunk_size=10_000,
-    )
-
-    assert result.height >= 1, "nway_match found no 3-way tuples — check cache or cone selection"
-    assert "p_match" in result.columns
-    p = result["p_match"].to_numpy()
-    assert ((p >= 0.0) & (p <= 1.0)).all()
-    assert np.isfinite(p).all()
-
-    # Verify columns from all three catalogues are present.
-    assert "source_id" in result.columns  # Gaia
-    assert "AllWISE_2" in result.columns or "AllWISE" in result.columns
-    assert "USNO-B1.0_3" in result.columns or "USNO-B1.0" in result.columns
+    with pytest.raises(CrossMatchError, match="must exist in every catalogue"):
+        cm.nway_match(
+            [str(gaia_csv), str(allwise_csv), str(usno_csv)],
+            radius_arcsec=2.0,
+            prior_columns=["phot_g_mean_mag"],
+            max_tuples_per_source=5_000,
+            chunk_size=10_000,
+        )

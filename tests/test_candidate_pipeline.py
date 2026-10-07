@@ -154,6 +154,18 @@ def test_candidate_release_rejects_unconverted_coordinate_frames(tmp_path):
     assert not (tmp_path / "release").exists()
 
 
+@pytest.mark.parametrize("parameter", ["radius_arcsec", "target_epoch"])
+def test_candidate_release_rejects_boolean_scientific_parameters(tmp_path, parameter):
+    kwargs = {parameter: True}
+    with pytest.raises(ValueError, match="finite|radius"):
+        write_candidate_release(
+            tmp_path / "release",
+            [_source("a", [0.0], [0.0]), _source("b", [1.0], [0.0])],
+            **kwargs,
+        )
+    assert not (tmp_path / "release").exists()
+
+
 def test_empty_hypotheses_preserve_explicit_empty_schema():
     sources = pl.DataFrame(schema={"source_id": pl.String})
     pairs = pl.DataFrame(
@@ -165,6 +177,19 @@ def test_empty_hypotheses_preserve_explicit_empty_schema():
         .height
         == 0
     )
+
+
+def test_hypotheses_reject_boolean_no_match_weight():
+    pairs = pl.DataFrame(
+        schema={"source_id": pl.String, "candidate_id": pl.String, "log_weight": pl.Float64}
+    )
+    with pytest.raises(ValueError, match="no-match log weight"):
+        normalize_candidate_hypotheses(
+            pl.DataFrame({"source_id": ["a"]}),
+            pairs,
+            candidate_namespace="targets/v1",
+            no_match_log_weight=True,
+        )
 
 
 def test_hypotheses_orient_pairs_and_do_not_compete_between_surveys():

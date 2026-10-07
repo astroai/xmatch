@@ -72,10 +72,57 @@ def test_catalogue_entry_from_schema_builds_yaml_ready_dict():
     assert entry["archive"] == "cds"
     assert entry["ra_column"] == "RAJ2000"
     assert entry["id_column"] == "objID"
+    assert "default_pos_error_arcsec" not in entry
     assert "gmag" in entry["default_columns"]
     block = format_catalogue_yaml(name, entry)
     assert "ps1_test:" in block
     assert "access_identifier: II/349/ps1" in block or 'access_identifier: "II/349/ps1"' in block
+
+
+def test_detect_radec_columns_uses_tap_ucd_when_names_are_uninformative():
+    import polars as pl
+
+    from xmatch.discovery import detect_radec_columns
+
+    columns = pl.DataFrame(
+        {
+            "column_name": ["alpha_native", "delta_native"],
+            "ucd": ["pos.eq.ra;meta.main", "pos.eq.dec;meta.main"],
+        }
+    )
+    assert detect_radec_columns(columns) == ("alpha_native", "delta_native")
+
+
+def test_detect_radec_columns_handles_empty_tap_schema():
+    import polars as pl
+
+    from xmatch.discovery import detect_radec_columns
+
+    assert detect_radec_columns(pl.DataFrame()) == (None, None)
+
+
+def test_auth_sessions_accept_actual_archive_names_and_legacy_env_names(monkeypatch):
+    from xmatch.auth import AuthConfig
+
+    monkeypatch.setenv("XMATCH_VIZIER_USER", "legacy-cds")
+    monkeypatch.setenv("XMATCH_VIZIER_PASSWORD", "legacy-secret")
+    monkeypatch.setenv("XMATCH_GAIA_ARCHIVE_USER", "legacy-gaia")
+    monkeypatch.setenv("XMATCH_GAIA_ARCHIVE_PASSWORD", "legacy-secret")
+    monkeypatch.setenv("XMATCH_CDS_USER", "canonical-cds")
+    monkeypatch.setenv("XMATCH_CDS_PASSWORD", "canonical-secret")
+    sessions = {}
+
+    def make_session(username, password):
+        session = object()
+        sessions[username] = session
+        return session
+
+    monkeypatch.setattr("xmatch.auth._make_basic_auth_session", make_session)
+    auth = AuthConfig()
+
+    assert auth.get_auth_session("cds") is sessions["canonical-cds"]
+    assert auth.get_auth_session("esa_gaia") is sessions["legacy-gaia"]
+    assert auth.get_auth_session("vizier") is sessions["legacy-cds"]
 
 
 def test_deep_merge_and_user_overlay(tmp_path, monkeypatch):
@@ -196,6 +243,27 @@ def test_append_catalogue_to_user_config(tmp_path):
     assert data["catalogue_aliases"]["ps1x"] == "ps1_local"
     with pytest.raises(ConfigError, match="already exists"):
         append_catalogue_to_user_config("ps1_local", entry, path=dest, archives=archives)
+
+
+def test_failed_user_config_serialization_preserves_previous_file(tmp_path, monkeypatch):
+    dest = tmp_path / "xmatch.yaml"
+    original = "archives: {cds: {}}\ncatalogues: {}\n"
+    dest.write_text(original)
+    entry = {
+        "description": "test",
+        "archive": "cds",
+        "service_id": "tap_service",
+        "access_identifier": "II/999/test",
+    }
+
+    def fail_dump(*args, **kwargs):
+        raise OSError("write failed")
+
+    monkeypatch.setattr("xmatch.user_config.yaml.safe_dump", fail_dump)
+    with pytest.raises(OSError, match="write failed"):
+        append_catalogue_to_user_config("test", entry, path=dest)
+
+    assert dest.read_text() == original
 
 
 def test_bundled_new_survey_aliases():

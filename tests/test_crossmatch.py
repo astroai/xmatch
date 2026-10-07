@@ -383,8 +383,42 @@ def test_crossmatch_multi_preserves_first_ra_dec(cm, three_frames):
 
 
 # ----------------------------------------------------------- remote-first multi
+def test_crossmatch_multi_remote_first_over_real_tap_protocol(cm, tmp_path, monkeypatch):
+    """Materialize the remote primary before matching both local catalogues."""
+    from .tap_fake import FakeTAPServer
+
+    server = FakeTAPServer(
+        [{"source_id": 999, "ra": 10.0, "dec": 5.0}], cols=("source_id", "ra", "dec")
+    )
+    server.key = "source_id"
+    cfg = cm.catalogues_config["gaia_esa"]
+    service = cm.archives_config[cfg["archive"]][cfg["service_id"]]
+    monkeypatch.setitem(service, "access_url", server.url)
+    local2 = tmp_path / "local2.csv"
+    local3 = tmp_path / "local3.csv"
+    pl.DataFrame({"id": [1], "ra": [10.0], "dec": [5.0]}).write_csv(local2)
+    pl.DataFrame({"id": [101], "ra": [10.0001], "dec": [5.0]}).write_csv(local3)
+    try:
+        out = cm.crossmatch_multi(
+            ["gaia_esa", str(local2), str(local3)],
+            ra=10.0,
+            dec=5.0,
+            radius_deg=0.005,
+            radius_arcsec=1.0,
+            columns_1=["source_id", "ra", "dec"],
+            engine="fast",
+            fallback_policy="error",
+        )
+        assert out.select("source_id", "id", "id_3").rows() == [(999, 1, 101)]
+        assert out.columns.count("sep_arcsec") == 1
+        assert len(server.queries) == 1
+        assert server.jobs == {}
+    finally:
+        server.shutdown()
+
+
 @pytest.mark.slow
-def test_crossmatch_multi_remote_first_catalogue(cm, tmp_path):
+def test_crossmatch_multi_remote_first_catalogue(cm, tmp_path, gaia_csv):
     """Multi-way crossmatch where catalogue 1 is a remote TAP catalogue
     (``gaia_esa``) and catalogues 2, 3 are local files.
 
@@ -400,33 +434,35 @@ def test_crossmatch_multi_remote_first_catalogue(cm, tmp_path):
     except (urllib.error.URLError, TimeoutError, OSError):
         pytest.skip("ESA Gaia TAP endpoint is not reachable from this host.")
 
-    # --- Gaia DR3 source region (guaranteed Gaia coverage) -------------
-    ra_vega = 279.24289761
-    dec_vega = 38.78910887
+    # Anchor both local inputs to an actual DR3 source at its catalogue epoch.
+    # A nominal bright-star position does not guarantee a DR3 detection there.
+    seed = pl.read_csv(gaia_csv).row(0, named=True)
+    ra_seed = float(seed["ra"])
+    dec_seed = float(seed["dec"])
     cone_deg = 0.005  # ~18 arcsec — small enough for a fast TAP round-trip
 
-    # --- local catalogue 2: a single star at Vega's position -----------------
-    local2 = pl.DataFrame({"id": [1], "ra": [ra_vega], "dec": [dec_vega]})
+    # --- local catalogue 2: the known DR3 source ----------------------------
+    local2 = pl.DataFrame({"id": [1], "ra": [ra_seed], "dec": [dec_seed]})
     local2_path = tmp_path / "local2.csv"
     local2.write_csv(local2_path)
 
-    # --- local catalogue 3: a star offset ~0.5" from Vega -------------------
-    local3 = pl.DataFrame({"id": [101], "ra": [ra_vega + 0.00014], "dec": [dec_vega]})
+    # --- local catalogue 3: a nearby source, within 0.5 arcsec --------------
+    local3 = pl.DataFrame({"id": [101], "ra": [ra_seed + 0.00014], "dec": [dec_seed]})
     local3_path = tmp_path / "local3.csv"
     local3.write_csv(local3_path)
 
     # --- 3-way: gaia_esa × local2 × local3 ----------------------------------
     out = cm.crossmatch_multi(
         ["gaia_esa", str(local2_path), str(local3_path)],
-        ra=ra_vega,
-        dec=dec_vega,
+        ra=ra_seed,
+        dec=dec_seed,
         radius_deg=cone_deg,
         radius_arcsec=1.0,
         join_type="1and2",
     )
 
     assert isinstance(out, pl.DataFrame)
-    assert out.height >= 1, "expected at least 1 three-way match at Vega"
+    assert (int(seed["source_id"]), 1, 101) in out.select("source_id", "id", "id_3").rows()
     # Gaia (cat-1) columns: ra, dec, source_id, phot_g_mean_mag, …
     assert "ra" in out.columns
     assert "dec" in out.columns

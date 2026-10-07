@@ -4,12 +4,97 @@ import pytest
 
 from xmatch import stilts
 from xmatch.exceptions import CrossMatchError
-from xmatch.matchers import MatchSpec, id_join, sky_match
+from xmatch.matchers import (
+    MatchSpec,
+    _engineer_ml_features_and_labels,
+    id_join,
+    sky_match,
+)
 from xmatch.sources import CatalogueSource
 
 
 def _src(name, ra="ra", dec="dec", **kw):
     return CatalogueSource(name=name, is_local=True, ra_column=ra, dec_column=dec, **kw)
+
+
+def test_ml_synthetic_negatives_are_repeatable_without_mutating_global_rng():
+    n = 32
+    ra = np.linspace(0.0, 100.0, n)
+    magnitude = np.arange(n, dtype=float)
+    left = pl.DataFrame(
+        {
+            "ra": ra,
+            "dec": np.zeros(n),
+            "mag": magnitude,
+            "color": magnitude * 0.2,
+        }
+    )
+    right = pl.DataFrame(
+        {
+            "ra": ra + 0.18 / 3600.0,
+            "dec": np.zeros(n),
+            "mag": magnitude + 0.1,
+            "color": magnitude * 0.2 + 0.05,
+        }
+    )
+    source = _src("catalogue")
+    indices = np.arange(n)
+    spec = MatchSpec(
+        radius_arcsec=1.0,
+        matcher="xgb",
+        ml_color_columns=["mag", "color"],
+    )
+    rng_before = np.random.get_state()
+    try:
+        first = _engineer_ml_features_and_labels(
+            left,
+            right,
+            source,
+            source,
+            indices,
+            indices,
+            np.full(n, 0.18),
+            spec,
+            "xgb",
+            add_synthetic_negatives=True,
+        )
+        second = _engineer_ml_features_and_labels(
+            left,
+            right,
+            source,
+            source,
+            indices,
+            indices,
+            np.full(n, 0.18),
+            spec,
+            "xgb",
+            add_synthetic_negatives=True,
+        )
+        rng_after = np.random.get_state()
+    finally:
+        np.random.set_state(rng_before)
+
+    assert first[0].shape[0] > n  # synthetic negatives were included
+    np.testing.assert_array_equal(first[0], second[0])
+    np.testing.assert_array_equal(first[1], second[1])
+    assert rng_before[0] == rng_after[0]
+    np.testing.assert_array_equal(rng_before[1], rng_after[1])
+    assert rng_before[2:] == rng_after[2:]
+
+
+@pytest.mark.skipif(not stilts.stilts_available(), reason="STILTS not available")
+def test_stilts_best_allows_shared_secondary():
+    left = pl.DataFrame({"id": [1, 2], "ra": [10.0, 10.0001], "dec": [0.0, 0.0]})
+    right = pl.DataFrame({"id": [3], "ra": [10.0], "dec": [0.0]})
+    result = sky_match(
+        _src("left"),
+        _src("right"),
+        left.lazy(),
+        right.lazy(),
+        MatchSpec(radius_arcsec=1, find="best", fallback_policy="error"),
+        engine="stilts",
+    ).collect()
+    assert sorted(zip(result["id"], result["id_2"], strict=True)) == [(1, 3), (2, 3)]
 
 
 # Engines to test: always astropy; add STILTS when a command is discoverable.
@@ -27,6 +112,27 @@ def test_sky_match_best_within_radius():
     ).collect()
     assert out.height == 1
     assert out["sep_arcsec"][0] < 1.0
+
+
+@pytest.mark.parametrize("radius", [0.0, -1.0, np.nan, np.inf, 648_000.1])
+def test_match_spec_rejects_invalid_spherical_radius(radius):
+    with pytest.raises(ValueError, match="radius_arcsec"):
+        MatchSpec(radius_arcsec=radius)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"max_error": np.nan}, "max_error"),
+        ({"lr_q": 1.1}, "lr_q"),
+        ({"target_epoch": np.inf}, "target_epoch"),
+        ({"extra_distance_cols": {"mag": np.inf}}, "extra_distance_cols"),
+        ({"batch_size": 0}, "batch_size"),
+    ],
+)
+def test_match_spec_rejects_invalid_numeric_options(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        MatchSpec(**kwargs)
 
 
 def test_sky_match_radius_is_arcsec_not_degrees():
@@ -73,6 +179,73 @@ def test_skyerr_sigma_criterion():
     spec_big = MatchSpec(radius_arcsec=2.0, matcher="skyerr", max_error=100.0)
     out2 = sky_match(a, b, left.lazy(), right.lazy(), spec_big, engine="astropy").collect()
     assert out2.height == 1
+
+
+@pytest.mark.parametrize("radius", [648_000.0, 1_000_000.0])
+def test_arcsec_to_chord_saturates_at_half_circumference(radius):
+    from xmatch.matchers import _arcsec_to_chord
+
+    assert _arcsec_to_chord(radius) == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("radius", [np.nan, np.inf, -np.inf, -1.0])
+def test_arcsec_to_chord_rejects_invalid_radius(radius):
+    from xmatch.matchers import _arcsec_to_chord
+
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        _arcsec_to_chord(radius)
+
+
+@pytest.mark.parametrize("invalid", [-0.1, np.nan, np.inf, -np.inf])
+def test_pairwise_bayes_rejects_corrupt_sigmas(invalid):
+    from xmatch.bayes import positional_log_likelihood
+
+    with pytest.raises(ValueError, match="positional errors must be finite and nonnegative"):
+        positional_log_likelihood(np.array([0.0]), np.array([invalid]), np.array([0.1]))
+
+
+def test_pairwise_bayes_uses_documented_floor_for_exact_zero_errors():
+    from xmatch.bayes import positional_log_likelihood
+
+    result = positional_log_likelihood(np.array([0.0]), np.array([0.0]), np.array([0.0]))
+    assert np.isfinite(result).all()
+
+
+def test_unknown_positional_error_units_fail_instead_of_assuming_arcsec():
+    from xmatch.matchers import _pos_sigma_arcsec
+
+    frame = pl.DataFrame({"rae": [1.0], "dee": [1.0]})
+    source = _src("bad-units", ra_err_column="rae", dec_err_column="dee", pos_err_units="ivar")
+    with pytest.raises(CrossMatchError, match="Unsupported positional-error unit"):
+        _pos_sigma_arcsec(frame, source)
+
+
+@pytest.mark.parametrize("invalid", [-0.1, np.nan, np.inf, -np.inf])
+def test_invalid_declared_position_errors_are_rejected_even_with_floor(invalid):
+    from xmatch.matchers import _pos_covariance, _pos_sigma_arcsec
+
+    frame = pl.DataFrame({"rae": [invalid], "dee": [0.1], "rho": [0.0]})
+    source = _src(
+        "bad-errors",
+        ra_err_column="rae",
+        dec_err_column="dee",
+        corr_column="rho",
+        default_pos_error_arcsec=0.01,
+    )
+    with pytest.raises(CrossMatchError, match="position error"):
+        _pos_sigma_arcsec(frame, source)
+    with pytest.raises(CrossMatchError, match="position error"):
+        _pos_covariance(frame, source)
+
+
+@pytest.mark.parametrize("invalid", [np.nan, np.inf, -np.inf, -1.01, 1.01])
+def test_invalid_declared_position_correlations_are_rejected(invalid):
+    from xmatch.matchers import _pos_covariance
+
+    frame = pl.DataFrame({"rae": [0.1], "dee": [0.2], "rho": [invalid]})
+    source = _src("bad-correlation", ra_err_column="rae", dec_err_column="dee", corr_column="rho")
+    with pytest.raises(CrossMatchError, match="correlation"):
+        _pos_covariance(frame, source)
 
 
 @pytest.mark.skipif("stilts" not in _ENGINES, reason="STILTS not available")
@@ -152,7 +325,14 @@ def test_sky_engine_fast_find_all():
     left = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     right = pl.DataFrame({"ra": [10.00005, 10.0001, 50.0], "dec": [5.00005, 5.0, 5.0]})
     spec = MatchSpec(radius_arcsec=1.0, find="all")
-    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+    out = sky_match(
+        _src("a", default_pos_error_arcsec=0.5),
+        _src("b", default_pos_error_arcsec=0.5),
+        left.lazy(),
+        right.lazy(),
+        spec,
+        engine="fast",
+    ).collect()
     assert out.height == 2
 
 
@@ -190,7 +370,14 @@ def test_probabilistic_pmatch_in_unit_range():
     spec = MatchSpec(radius_arcsec=60.0, prior_columns=["mag"])
     # Fixture: left row #2 is 0.5 deg from the right cluster, far outside
     # radius=60 arcsec, so it must NOT match. Only the first two rows fit.
-    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+    out = sky_match(
+        _src("a", default_pos_error_arcsec=0.5),
+        _src("b", default_pos_error_arcsec=0.5),
+        left.lazy(),
+        right.lazy(),
+        spec,
+        engine="fast",
+    ).collect()
     assert out.height == 2
     assert "p_match" in out.columns
     p = out["p_match"].to_numpy()
@@ -218,7 +405,14 @@ def test_probabilistic_pmatch_pos_v_sep_distinguishes():
         }
     )
     spec = MatchSpec(radius_arcsec=60.0, prior_columns=["mag"])
-    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+    out = sky_match(
+        _src("a", default_pos_error_arcsec=0.5),
+        _src("b", default_pos_error_arcsec=0.5),
+        left.lazy(),
+        right.lazy(),
+        spec,
+        engine="fast",
+    ).collect()
     assert out.height == 2
     assert "p_match" in out.columns
     p = out["p_match"].to_numpy()
@@ -229,6 +423,53 @@ def test_probabilistic_pmatch_pos_v_sep_distinguishes():
         f"Expected sep-driven posterior gap >= 0.2; got closer={closer_p} "
         f"farther={farther_p} seps={sorted(sep.tolist())}"
     )
+
+
+def test_probabilistic_flag_scores_without_photometric_priors():
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [0.1], "dee": [0.1]})
+    right = pl.DataFrame({"ra": [10.00001], "dec": [5.0], "rae": [0.1], "dee": [0.1]})
+    source1 = _src("left", ra_err_column="rae", dec_err_column="dee")
+    source2 = _src("right", ra_err_column="rae", dec_err_column="dee")
+
+    result = sky_match(
+        source1,
+        source2,
+        left.lazy(),
+        right.lazy(),
+        MatchSpec(probabilistic=True),
+        engine="fast",
+    ).collect()
+
+    assert "p_match" in result.columns
+    assert 0.0 <= result["p_match"][0] <= 1.0
+
+
+def test_probabilistic_scoring_requires_declared_uncertainty():
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "mag": [12.0]})
+    right = pl.DataFrame({"ra": [10.00001], "dec": [5.0], "mag": [12.0]})
+    with pytest.raises(
+        CrossMatchError, match="requires positional errors or default_pos_error_arcsec"
+    ):
+        sky_match(
+            _src("left"),
+            _src("right"),
+            left.lazy(),
+            right.lazy(),
+            MatchSpec(probabilistic=True, prior_columns=["mag"]),
+            engine="fast",
+        ).collect()
+
+
+def test_request_propagates_probabilistic_flag_and_rejects_id_join():
+    from xmatch.request import MatchRequest
+
+    request = MatchRequest.from_params("left.csv", "right.csv", probabilistic=True)
+    assert request.probabilistic
+    assert request.spec.probabilistic
+    with pytest.raises(ValueError, match="requires positional matching"):
+        MatchRequest.from_params("left.csv", "right.csv", probabilistic=True, id_join=True)
+    with pytest.raises(ValueError, match="probabilistic must be a boolean"):
+        MatchRequest.from_params("left.csv", "right.csv", probabilistic="false")
 
 
 # ------------------------------------------------------------------- proper motion
@@ -509,15 +750,56 @@ def test_invalid_gaia_covariance_row_is_not_zero_imputed():
     }
     for key in ASTROMETRIC_COVARIANCE_KEYS[5:]:
         row[key] = [1.1 if key == "ra_dec_corr" else 0.0]
-    result = _astrometric_covariance_mas(
-        pl.DataFrame(row),
-        _src("gaia", astrometric_covariance_columns=covariance_columns),
-    )
+    frame = pl.DataFrame(row)
+    source = _src("gaia", astrometric_covariance_columns=covariance_columns)
+    result = _astrometric_covariance_mas(frame, source)
 
     assert result is not None
     _covariance, valid_6d, valid_angular = result
     assert not valid_6d[0]
     assert not valid_angular[0]
+    from xmatch.matchers import _pos_sigma_arcsec
+
+    with pytest.raises(CrossMatchError, match="invalid declared astrometric covariance"):
+        _pos_sigma_arcsec(frame, source)
+
+
+def test_five_parameter_covariance_supplies_positional_sigma_and_ellipse():
+    from xmatch.matchers import _pos_covariance, _pos_sigma_arcsec
+    from xmatch.sources import ASTROMETRIC_COVARIANCE_KEYS
+
+    row = {
+        "ra_error": [3.0],
+        "dec_error": [4.0],
+        "parallax_error": [1.0],
+        "pmra_error": [1.0],
+        "pmdec_error": [1.0],
+    }
+    row.update({key: [0.0] for key in ASTROMETRIC_COVARIANCE_KEYS[5:]})
+    frame = pl.DataFrame(row)
+    source = _src(
+        "gaia", astrometric_covariance_columns={key: key for key in ASTROMETRIC_COVARIANCE_KEYS}
+    )
+
+    covariance = _pos_covariance(frame, source)
+
+    assert covariance is not None
+    np.testing.assert_allclose(covariance[0], [9e-6])
+    np.testing.assert_allclose(covariance[1], [16e-6])
+    np.testing.assert_allclose(covariance[2], [0.0])
+    np.testing.assert_allclose(_pos_sigma_arcsec(frame, source), [0.005])
+
+
+def test_pm_drift_has_same_radial_budget_for_sigma_and_covariance():
+    from xmatch.matchers import _pos_covariance, _pos_sigma_arcsec
+
+    frame = pl.DataFrame({"rae": [0.3], "dee": [0.4], "_pm_drift_arcsec": [0.5]})
+    source = _src("drift", ra_err_column="rae", dec_err_column="dee")
+    covariance = _pos_covariance(frame, source)
+
+    assert covariance is not None
+    np.testing.assert_allclose(_pos_sigma_arcsec(frame, source), [np.sqrt(0.5)])
+    np.testing.assert_allclose(np.sqrt(covariance[0] + covariance[1]), [np.sqrt(0.5)])
 
 
 def test_angular_covariance_remains_valid_without_parallax_uncertainty():
@@ -569,17 +851,9 @@ def test_proper_motion_empty_frame_preserves_schema():
     assert moved.schema == empty.schema
 
 
-def test_proper_motion_rejects_nonfinite_target_epoch(pm_frames):
-    left, right = pm_frames
-    source = _src("a", pm_ra_column="pmra", pm_dec_column="pmdec", epoch_column="ref_epoch")
-    with pytest.raises(CrossMatchError, match="target_epoch must be finite"):
-        sky_match(
-            source,
-            _src("b"),
-            left.lazy(),
-            right.lazy(),
-            MatchSpec(target_epoch=np.nan),
-        )
+def test_proper_motion_rejects_nonfinite_target_epoch():
+    with pytest.raises(ValueError, match="target_epoch must be finite"):
+        MatchSpec(target_epoch=np.nan)
 
 
 def test_proper_motion_no_pm_columns_returns_unchanged(pm_frames):
@@ -742,14 +1016,14 @@ def test_filter_expr_all_pass():
     assert out.height == 4  # 2 left × 2 right = 4 matches within 1 arcsec
 
 
-def test_filter_expr_invalid_sql_falls_back():
-    """Invalid SQL should be caught and all pairs kept with a warning."""
+@pytest.mark.parametrize("filter_expr", ["THIS IS NOT VALID SQL !!!", "missing_column > 0"])
+def test_filter_expr_invalid_sql_raises(filter_expr):
+    """Invalid filters must not silently turn into unfiltered matches."""
     left = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005]})
-    spec = MatchSpec(radius_arcsec=1.0, filter_expr="THIS IS NOT VALID SQL !!!", find="best")
-    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
-    # Should keep the pair despite invalid filter (graceful fallback)
-    assert out.height == 1
+    spec = MatchSpec(radius_arcsec=1.0, filter_expr=filter_expr, find="best")
+    with pytest.raises(CrossMatchError, match="filter_expr"):
+        sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
 
 
 def test_filter_expr_with_find_best_reduces_after_filter():
@@ -857,8 +1131,29 @@ def test_nd_match_picks_photometrically_closer_star():
     assert all(abs(out_nd["mag_2"].to_numpy() - 10.05) < 0.01)
 
 
+def test_nd_match_considers_every_candidate_inside_radius():
+    """ND ranking must include candidates beyond the nearest spatial neighbors."""
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "mag": [10.0]})
+    # The closest ten candidates are photometrically poor. The eleventh is
+    # still inside the spatial radius and has the best joint feature distance.
+    offsets_arcsec = np.arange(1, 12, dtype=float) * 0.05
+    right = pl.DataFrame(
+        {
+            "ra": 10.0 + offsets_arcsec / (3600.0 * np.cos(np.radians(5.0))),
+            "dec": np.full(11, 5.0),
+            "mag": [100.0] * 10 + [10.0],
+        }
+    )
+    spec = MatchSpec(radius_arcsec=1.0, extra_distance_cols={"mag": 1.0})
+
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+
+    assert out.height == 1
+    assert out["mag_2"][0] == 10.0
+
+
 def test_nd_chunk_size_parity():
-    """Chunked _scipy_match_nd must produce identical results regardless of
+    """Chunked ND ranking must produce identical results regardless of
     _ND_CHUNK_SIZE.  Test with extreme chunk_size=1 (one row per chunk) vs
     the default 50_000 on a small catalogue to verify index-offset
     correctness."""
@@ -906,14 +1201,49 @@ def test_nd_chunk_size_parity():
         assert abs(out_1["mag_2"][i] - out_1["mag"][i]) < 0.01
 
 
-def test_nd_match_missing_column_warns_but_matches():
-    """When extra_distance_cols references a column not in the data,
-    the engine should warn and fall back to spatial-only."""
+def test_nd_match_missing_column_raises():
+    """A missing requested ranking feature must not silently become spatial-only."""
     left = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005]})
     spec = MatchSpec(radius_arcsec=1.0, find="best", extra_distance_cols={"nonexistent_col": 1.0})
-    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
-    assert out.height == 1  # still matches spatially
+    with pytest.raises(CrossMatchError, match="nonexistent_col"):
+        sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_nd_match_nonfinite_feature_values_raise(value):
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "mag": [value]})
+    right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005], "mag": [10.0]})
+    spec = MatchSpec(radius_arcsec=1.0, extra_distance_cols={"mag": 1.0})
+    with pytest.raises(CrossMatchError, match="mag.*finite"):
+        sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+
+
+def test_nd_match_rejects_overflowed_normalized_feature():
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "mag": [-1e308]})
+    right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005], "mag": [1e308]})
+    spec = MatchSpec(radius_arcsec=1.0, extra_distance_cols={"mag": 1.0})
+    with pytest.raises(CrossMatchError, match="mag.*finite"):
+        sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
+
+
+def test_nd_match_normalizes_extra_features_across_both_catalogues():
+    left = pl.DataFrame({"id": [0], "ra": [10.0], "dec": [0.0], "mag": [0.0]})
+    right = pl.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "ra": [10.0 + 0.2 / 3600.0, 10.0 + 0.7 / 3600.0, 100.0],
+            "dec": [0.0, 0.0, 0.0],
+            "mag": [1.0, 0.0, 1e8],
+        }
+    )
+    spec = MatchSpec(radius_arcsec=1.0, extra_distance_cols={"mag": 1.0})
+    result = sky_match(
+        _src("left"), _src("right"), left.lazy(), right.lazy(), spec, engine="fast"
+    ).collect()
+    # The distant high-magnitude source sets the shared population scale.
+    # With that documented union z-score, the 0.2" candidate beats the 0.7" one.
+    assert result["id_2"].to_list() == [1]
 
 
 def test_nd_match_find_all_unaffected():
@@ -1221,35 +1551,28 @@ def test_ray_engine_find_all_parity_with_zone():
     assert np.allclose(sep_zone, sep_ray, atol=1e-6)
 
 
-def test_ray_engine_joins_ray_address(monkeypatch):
-    """engine='ray' joins the cluster in RAY_ADDRESS (CANFAR cluster
-    script); a dead address falls back to a fresh local cluster."""
-    ray = pytest.importorskip("ray")
-    ray.shutdown()  # deterministic start: init must actually run
+def test_ray_engine_failed_address_warns_and_preserves_environment(monkeypatch, caplog):
+    """The public wrapper preserves a failed address and uses the warned zone fallback."""
+    import os
 
+    ray = pytest.importorskip("ray")
     monkeypatch.setenv("RAY_ADDRESS", "head.example:6379")
-    calls: list = []
-    real_init = ray.init
+    monkeypatch.setattr(ray, "is_initialized", lambda: False)
+    calls = []
 
     def fake_init(**kw):
         calls.append(kw)
-        if kw.get("address"):
-            raise ConnectionError("no cluster at head.example")
-        return real_init(**kw)
+        raise ConnectionError("no cluster at head.example")
 
     monkeypatch.setattr(ray, "init", fake_init)
-    left = pl.DataFrame({"ra": [10.0, 10.001], "dec": [5.0, 5.0]})
-    right = pl.DataFrame({"ra": [10.0005, 30.0], "dec": [5.0005, 5.0]})
-    spec = MatchSpec(radius_arcsec=15.0, find="best")
-    try:
-        out = sky_match(
-            _src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="ray"
-        ).collect()
-        assert calls[0]["address"] == "head.example:6379"
-        assert calls[1]["address"] is None  # ConnectionError -> local fallback
-        assert out.height == 2  # both left rows matched the close right row
-    finally:
-        ray.shutdown()
+    left = pl.DataFrame({"id": [0, 1], "ra": [10.0, 10.001], "dec": [5.0, 5.0]})
+    right = pl.DataFrame({"id": ["r0", "r1"], "ra": [10.0005, 30.0], "dec": [5.0005, 5.0]})
+    spec = MatchSpec(radius_arcsec=15.0, find="best", fallback_policy="warn")
+    out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="ray").collect()
+    assert [call["address"] for call in calls] == ["head.example:6379"]
+    assert os.environ["RAY_ADDRESS"] == "head.example:6379"
+    assert "using single-machine zone engine" in caplog.text
+    assert out.select("id", "id_2").sort("id").rows() == [(0, "r0"), (1, "r0")]
 
 
 def test_ray_engine_graceful_fallback_when_unavailable(monkeypatch):
@@ -1552,6 +1875,29 @@ def test_skyellipse_engine_parity():
     assert out_fast.height == out_zone.height
 
 
+def test_skyellipse_wraps_ra_difference_across_zero():
+    from astropy import units as u
+    from astropy.coordinates import SkyCoord
+
+    left = pl.DataFrame({"ra": [359.99999], "dec": [0.0], "rae": [0.1], "dee": [0.1]})
+    right = pl.DataFrame({"ra": [0.00001], "dec": [0.0], "rae": [0.1], "dee": [0.1]})
+    separation = SkyCoord(ra=359.99999 * u.deg, dec=0.0 * u.deg).separation(
+        SkyCoord(ra=0.00001 * u.deg, dec=0.0 * u.deg)
+    )
+    assert separation.arcsec < 1.0
+
+    result = sky_match(
+        _src("left", ra_err_column="rae", dec_err_column="dee"),
+        _src("right", ra_err_column="rae", dec_err_column="dee"),
+        left.lazy(),
+        right.lazy(),
+        MatchSpec(radius_arcsec=1.0, matcher="skyellipse", max_error=3.0),
+        engine="fast",
+    ).collect()
+    assert result.height == 1
+    assert result["sep_arcsec"][0] == pytest.approx(separation.arcsec)
+
+
 # ------------------------------------------------------------------- nway
 @pytest.mark.parametrize("n_cats", [2, 3])
 def test_nway_bayesian_pmatch_in_unit_range(n_cats):
@@ -1587,6 +1933,188 @@ def test_nway_bayesian_pmatch_in_unit_range(n_cats):
     assert p_far[0] < 0.5, f"Expected low p_match for scattered tuple, got {p_far[0]}"
 
 
+def test_nway_bayes_factor_matches_two_catalogue_formula_across_ra_wrap():
+    import astropy.units as u
+    from astropy.coordinates import SkyCoord
+
+    from xmatch.bayes import compute_nway_bayes_factor
+
+    ras = [np.array([359.99999]), np.array([0.00001])]
+    decs = [np.array([12.0]), np.array([12.0])]
+    sigmas = [np.array([0.1]), np.array([0.2])]
+    actual = compute_nway_bayes_factor(ras, decs, sigmas, radius_arcsec=1.0)
+
+    positions = [
+        SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
+        for ra, dec in zip(ras, decs, strict=True)
+    ]
+    separation = positions[0].separation(positions[1]).rad[0]
+    weights = 1.0 / (np.asarray([0.1, 0.2]) * np.deg2rad(1.0 / 3600.0)) ** 2
+    sum_weight = weights.sum()
+    log_b = (
+        np.log(2.0)
+        + np.log(weights).sum()
+        - np.log(sum_weight)
+        - weights[0] * weights[1] * separation**2 / (2.0 * sum_weight)
+    )
+    np.testing.assert_allclose(actual, [log_b / np.log(10.0)], rtol=1e-12, atol=2e-10)
+
+
+def test_nway_bayes_factor_three_catalogue_formula_and_rotation_invariance():
+    import astropy.units as u
+    from astropy.coordinates import SkyCoord
+
+    from xmatch.bayes import compute_nway_bayes_factor
+
+    ras = [np.array([359.99999]), np.array([0.00001]), np.array([0.00002])]
+    decs = [np.array([10.0]), np.array([10.00001]), np.array([9.99998])]
+    sigmas_arcsec = np.array([0.1, 0.2, 0.3])
+    sigmas_rad = sigmas_arcsec * np.deg2rad(1.0 / 3600.0)
+    weights = 1.0 / sigmas_rad**2
+    sum_weight = weights.sum()
+    positions = [
+        SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
+        for ra, dec in zip(ras, decs, strict=True)
+    ]
+    exponent = sum(
+        weights[i]
+        * weights[j]
+        * positions[i].separation(positions[j]).rad[0] ** 2
+        / (2.0 * sum_weight)
+        for i in range(3)
+        for j in range(i + 1, 3)
+    )
+    expected = (2.0 * np.log(2.0) + np.log(weights).sum() - np.log(sum_weight) - exponent) / np.log(
+        10.0
+    )
+    sigmas = [np.full(1, sigma) for sigma in sigmas_arcsec]
+    actual = compute_nway_bayes_factor(ras, decs, sigmas, radius_arcsec=1.0)
+    rotated = compute_nway_bayes_factor(
+        [(ra + 137.0) % 360.0 for ra in ras], decs, sigmas, radius_arcsec=999.0
+    )
+    np.testing.assert_allclose(actual, [expected], rtol=1e-12, atol=2e-10)
+    np.testing.assert_allclose(rotated, actual, rtol=1e-12, atol=2e-10)
+
+
+def test_nway_bayes_factor_rejects_invalid_uncertainty():
+    from xmatch.bayes import compute_nway_bayes_factor
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        compute_nway_bayes_factor(
+            [np.array([10.0]), np.array([10.0])],
+            [np.array([0.0]), np.array([0.0])],
+            [np.array([0.1]), np.array([np.nan])],
+            radius_arcsec=1.0,
+        )
+
+
+def test_nway_p_match_uses_pre_fitted_prior_kde(monkeypatch):
+    import xmatch.bayes as bayes
+
+    gaussian_kde = pytest.importorskip("scipy.stats").gaussian_kde
+    kde = gaussian_kde(np.linspace(10.0, 20.0, 100))
+    for name in (
+        "dataset",
+        "_weights",
+        "_data_covariance",
+        "_data_cho_cov",
+        "covariance",
+        "cho_cov",
+    ):
+        values = getattr(kde, name, None)
+        if isinstance(values, np.ndarray):
+            values.flags.writeable = False
+
+    def fail_if_refit(*args, **kwargs):
+        raise AssertionError("pre-fitted full-catalogue KDE was ignored")
+
+    monkeypatch.setattr(bayes, "fit_empirical_kde", fail_if_refit)
+    probability = bayes.compute_nway_p_match(
+        [np.array([10.0]), np.array([10.01]), np.array([10.02])],
+        [np.array([5.0]), np.array([5.01]), np.array([4.99])],
+        [np.array([0.1]), np.array([0.1]), np.array([0.1])],
+        radius_arcsec=1.0,
+        prior_columns=[[np.array([10.0]), np.array([10.01]), np.array([10.02])]],
+        prior_kdes=[kde],
+    )
+    assert probability.shape == (1,)
+    assert np.isfinite(probability).all()
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_nway_p_match_rejects_nonfinite_photometric_values(value):
+    from xmatch.bayes import compute_nway_p_match
+
+    with pytest.raises(ValueError, match="photometric prior values must be finite"):
+        compute_nway_p_match(
+            [np.array([10.0]), np.array([10.01]), np.array([10.02])],
+            [np.array([5.0]), np.array([5.01]), np.array([4.99])],
+            [np.array([0.1]), np.array([0.1]), np.array([0.1])],
+            radius_arcsec=1.0,
+            prior_columns=[[np.array([value]), np.array([10.01]), np.array([10.02])]],
+        )
+
+
+def test_nway_p_match_rejects_nonfinite_kde_log_density():
+    from scipy.stats import gaussian_kde
+
+    from xmatch.bayes import compute_nway_p_match
+
+    kde = gaussian_kde(np.linspace(10.0, 20.0, 100))
+    with pytest.raises(ValueError, match="photometric prior log-density must be finite"):
+        compute_nway_p_match(
+            [np.array([10.0]), np.array([10.01]), np.array([10.02])],
+            [np.array([5.0]), np.array([5.01]), np.array([4.99])],
+            [np.array([0.1]), np.array([0.1]), np.array([0.1])],
+            radius_arcsec=1.0,
+            prior_columns=[[np.array([1e200]), np.array([1e200]), np.array([1e200])]],
+            prior_kdes=[kde],
+        )
+
+
+def test_pairwise_kde_rejects_nonfinite_photometric_values():
+    from scipy.stats import gaussian_kde
+
+    from xmatch.bayes import kde_log_at
+
+    kde = gaussian_kde(np.linspace(10.0, 20.0, 100))
+    with pytest.raises(ValueError, match="KDE evaluation values must be finite"):
+        kde_log_at(kde, np.array([np.nan]))
+
+
+def test_pairwise_bayes_uses_equivalent_per_axis_error(monkeypatch):
+    from xmatch import bayes
+    from xmatch.matchers import _bayesian_qualify
+
+    observed = {}
+
+    def capture(seps, sigma_left, sigma_right, radius_arcsec, **kwargs):
+        observed["left"] = sigma_left
+        observed["right"] = sigma_right
+        return np.zeros(len(seps))
+
+    monkeypatch.setattr(bayes, "compute_p_match", capture)
+    monkeypatch.setattr(bayes, "fit_empirical_kde", lambda *args, **kwargs: None)
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [0.1], "dee": [0.1], "mag": [12.0]})
+    right = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [0.1], "dee": [0.1], "mag": [12.0]})
+    src_left = _src("left", ra_err_column="rae", dec_err_column="dee")
+    src_right = _src("right", ra_err_column="rae", dec_err_column="dee")
+
+    _bayesian_qualify(
+        left,
+        right,
+        np.array([0]),
+        np.array([0]),
+        np.array([0.0]),
+        src_left,
+        src_right,
+        MatchSpec(prior_columns=["mag"]),
+    )
+
+    np.testing.assert_allclose(observed["left"], [0.1])
+    np.testing.assert_allclose(observed["right"], [0.1])
+
+
 def test_nway_crossmatch_end_to_end():
     """nway_match on CrossMatch should produce result frame with p_match."""
     from xmatch import CrossMatch
@@ -1618,6 +2146,9 @@ def test_nway_crossmatch_end_to_end():
         [left, mid, right],
         radius_arcsec=1.0,
         prior_columns=["g"],
+        default_pos_error_arcsec_1=0.5,
+        default_pos_error_arcsec_2=0.5,
+        default_pos_error_arcsec_3=0.5,
     )
     assert result.height >= 1
     assert "p_match" in result.columns
@@ -1633,7 +2164,12 @@ def test_nway_crossmatch_two_catalogues_works():
     right = pl.DataFrame({"ra": [10.0, 10.00005], "dec": [5.0, 5.0]})
 
     cm = CrossMatch()
-    result = cm.nway_match([left, right], radius_arcsec=1.0)
+    result = cm.nway_match(
+        [left, right],
+        radius_arcsec=1.0,
+        default_pos_error_arcsec_1=0.5,
+        default_pos_error_arcsec_2=0.5,
+    )
     assert result.height >= 1
     assert "p_match" in result.columns
 
@@ -2557,3 +3093,242 @@ def test_skyerr_ray_engine_matches_single_machine():
             ), f"find={find}: ray and astropy disagree on the pair set"
     finally:
         ray.shutdown()
+
+
+@pytest.fixture(scope="module")
+def _ray_cluster():
+    ray = pytest.importorskip("ray")
+    started = not ray.is_initialized()
+    if started:
+        ray.init(ignore_reinit_error=True, logging_level=40)
+    yield ray
+    if started and ray.is_initialized():
+        ray.shutdown()
+
+
+@pytest.mark.parametrize(
+    "matcher",
+    ["sky", "skyerr", "skyellipse", "lr", "ml", "xgb", "auf", "macauff"],
+)
+@pytest.mark.parametrize("find", ["best", "all"])
+def test_ray_and_zone_all_matchers_parity(_ray_cluster, matcher: str, find: str):
+    """Every matcher ('sky', 'skyerr', 'skyellipse', 'lr', 'ml', 'xgb', 'auf',
+    'macauff') must produce identical matched pairs and scores across 'fast',
+    'zone', and 'ray'."""
+    if matcher == "xgb":
+        pytest.importorskip("xgboost")
+
+    rng = np.random.default_rng(1234)
+    n_left = 24
+    base_ra = np.linspace(10.0, 20.0, n_left)
+    base_dec = np.linspace(-5.0, 5.0, n_left)
+    left = pl.DataFrame(
+        {
+            "id": np.arange(n_left),
+            "ra": base_ra,
+            "dec": base_dec,
+            "rae": rng.uniform(0.15, 0.45, n_left),
+            "dee": rng.uniform(0.15, 0.45, n_left),
+            "corr": rng.uniform(-0.5, 0.5, n_left),
+            "mag": rng.uniform(16.0, 21.0, n_left),
+            "color": rng.uniform(0.2, 1.5, n_left),
+        }
+    )
+    # Two candidates per primary row (one close + matching mag/color, one farther)
+    # plus a handful of background rows.
+    right = pl.DataFrame(
+        {
+            "id": np.arange(2 * n_left),
+            "ra": np.concatenate([base_ra + 0.25 / 3600.0, base_ra + 0.70 / 3600.0]),
+            "dec": np.concatenate([base_dec + 0.10 / 3600.0, base_dec - 0.20 / 3600.0]),
+            "rae": np.concatenate(
+                [rng.uniform(0.15, 0.45, n_left), rng.uniform(0.15, 0.45, n_left)]
+            ),
+            "dee": np.concatenate(
+                [rng.uniform(0.15, 0.45, n_left), rng.uniform(0.15, 0.45, n_left)]
+            ),
+            "corr": np.concatenate(
+                [rng.uniform(-0.5, 0.5, n_left), rng.uniform(-0.5, 0.5, n_left)]
+            ),
+            "mag": np.concatenate([left["mag"].to_numpy() + 0.03, left["mag"].to_numpy() + 1.8]),
+            "color": np.concatenate(
+                [left["color"].to_numpy() + 0.02, left["color"].to_numpy() + 0.9]
+            ),
+        }
+    )
+    a = _src("a", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    b = _src("b", ra_err_column="rae", dec_err_column="dee", corr_column="corr")
+    spec = MatchSpec(
+        radius_arcsec=2.0,
+        matcher=matcher,
+        max_error=3.0,
+        find=find,
+        lr_magnitude_column="mag" if matcher == "lr" else None,
+        ml_color_columns=["mag", "color"] if matcher in ("ml", "xgb") else None,
+        macauff_flux_columns=["mag"] if matcher == "macauff" else None,
+    )
+
+    fast_df = (
+        sky_match(a, b, left.lazy(), right.lazy(), spec, engine="fast")
+        .collect()
+        .sort(["id", "id_2"])
+    )
+    zone_df = (
+        sky_match(a, b, left.lazy(), right.lazy(), spec, engine="zone")
+        .collect()
+        .sort(["id", "id_2"])
+    )
+    ray_df = (
+        sky_match(a, b, left.lazy(), right.lazy(), spec, engine="ray")
+        .collect()
+        .sort(["id", "id_2"])
+    )
+    assert fast_df.height > 0
+    for label, other_df in (("zone", zone_df), ("ray", ray_df)):
+        assert other_df.height == fast_df.height, f"{matcher}/{find}/{label}"
+        assert other_df["id"].to_list() == fast_df["id"].to_list()
+        assert other_df["id_2"].to_list() == fast_df["id_2"].to_list()
+        assert np.allclose(other_df["sep_arcsec"], fast_df["sep_arcsec"], atol=1e-6)
+        for score_col in (
+            "lr",
+            "reliability",
+            "ml_score",
+            "xgb_score",
+            "auf_prob",
+            "macauff_prob",
+        ):
+            if score_col in fast_df.columns:
+                assert score_col in other_df.columns
+                assert np.allclose(
+                    other_df[score_col], fast_df[score_col], atol=1e-6, equal_nan=True
+                )
+
+
+def test_ray_and_zone_extra_distance_cols_and_probabilistic_parity(_ray_cluster):
+    """extra_distance_cols, prior_columns (p_match), and target_epoch/pm_prior
+    must agree between 'fast', 'zone', and 'ray'."""
+    left = pl.DataFrame(
+        {
+            "id": [1, 2],
+            "ra": [10.0, 25.0],
+            "dec": [0.0, 10.0],
+            "z": [0.5, 1.2],
+            "mag": [18.0, 19.5],
+            "rae": [0.2, 0.2],
+            "dee": [0.2, 0.2],
+            "pmra": [10.0, -5.0],
+            "pmdec": [5.0, 10.0],
+            "epoch": [2000.0, 2000.0],
+        }
+    )
+    # Candidate A is spatially closer (0.2") but far in redshift (Δz=0.4);
+    # Candidate B is slightly farther on sky (0.5") but exact in redshift (Δz=0.0).
+    right = pl.DataFrame(
+        {
+            "id": [10, 11, 20, 21],
+            "ra": [
+                10.0 + 0.2 / 3600.0,
+                10.0 + 0.5 / 3600.0,
+                25.0 + 0.2 / 3600.0,
+                25.0 + 0.5 / 3600.0,
+            ],
+            "dec": [0.0, 0.0, 10.0, 10.0],
+            "z": [0.9, 0.5, 1.6, 1.2],
+            "mag": [18.02, 18.01, 19.52, 19.50],
+            "rae": [0.2, 0.2, 0.2, 0.2],
+            "dee": [0.2, 0.2, 0.2, 0.2],
+            "pmra": [0.0, 0.0, 0.0, 0.0],
+            "pmdec": [0.0, 0.0, 0.0, 0.0],
+            "epoch": [2016.0, 2016.0, 2016.0, 2016.0],
+        }
+    )
+    a = _src(
+        "a",
+        ra_err_column="rae",
+        dec_err_column="dee",
+        pm_ra_column="pmra",
+        pm_dec_column="pmdec",
+        epoch_column="epoch",
+    )
+    b = _src(
+        "b",
+        ra_err_column="rae",
+        dec_err_column="dee",
+        pm_ra_column="pmra",
+        pm_dec_column="pmdec",
+        epoch_column="epoch",
+    )
+    spec = MatchSpec(
+        radius_arcsec=2.0,
+        find="best",
+        extra_distance_cols={"z": 10.0},
+        prior_columns=["mag"],
+        target_epoch=2016.0,
+    )
+
+    fast_df = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="fast").collect().sort("id")
+    zone_df = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="zone").collect().sort("id")
+    ray_df = sky_match(a, b, left.lazy(), right.lazy(), spec, engine="ray").collect().sort("id")
+    assert fast_df["id_2"].to_list() == [11, 21]
+    assert zone_df["id_2"].to_list() == [11, 21]
+    assert ray_df["id_2"].to_list() == [11, 21]
+    assert "p_match" in ray_df.columns
+    assert np.allclose(ray_df["p_match"], fast_df["p_match"], atol=1e-6)
+
+
+def test_ray_nway_and_fof_match_parity(_ray_cluster):
+    """nway_match and fof_match with engine='ray' must match local execution."""
+    from xmatch import CrossMatch
+
+    cat1 = pl.DataFrame(
+        {
+            "id": [1, 2],
+            "ra": [10.0, 30.0],
+            "dec": [0.0, 10.0],
+            "mag": [18.0, 20.0],
+        }
+    )
+    cat2 = pl.DataFrame(
+        {
+            "id": [10, 20],
+            "ra": [10.0 + 0.3 / 3600.0, 30.0 + 0.2 / 3600.0],
+            "dec": [0.0, 10.0],
+            "mag": [18.05, 19.95],
+        }
+    )
+    cat3 = pl.DataFrame(
+        {
+            "id": [100, 200],
+            "ra": [10.0 - 0.2 / 3600.0, 30.0 + 0.4 / 3600.0],
+            "dec": [0.0, 10.0],
+            "mag": [17.98, 20.02],
+        }
+    )
+    cm = CrossMatch()
+    nway_local = cm.nway_match(
+        [cat1, cat2, cat3],
+        radius_arcsec=2.0,
+        prior_columns=["mag"],
+        chunk_size=1,
+        default_pos_error_arcsec_1=0.5,
+        default_pos_error_arcsec_2=0.5,
+        default_pos_error_arcsec_3=0.5,
+    )
+    nway_ray = cm.nway_match(
+        [cat1, cat2, cat3],
+        radius_arcsec=2.0,
+        prior_columns=["mag"],
+        chunk_size=1,
+        engine="ray",
+        default_pos_error_arcsec_1=0.5,
+        default_pos_error_arcsec_2=0.5,
+        default_pos_error_arcsec_3=0.5,
+    )
+    assert nway_local is not None and nway_ray is not None
+    assert nway_ray.height == nway_local.height == 2
+    assert np.allclose(nway_ray.sort("id")["p_match"], nway_local.sort("id")["p_match"], atol=1e-6)
+
+    fof_local = cm.fof_match([cat1, cat2, cat3], radius_arcsec=2.0)
+    fof_ray = cm.fof_match([cat1, cat2, cat3], radius_arcsec=2.0, engine="ray")
+    assert fof_local is not None and fof_ray is not None
+    assert fof_ray.sort("bundle_id").equals(fof_local.sort("bundle_id"))

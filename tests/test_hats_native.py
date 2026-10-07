@@ -174,3 +174,120 @@ def test_margin_pixels_includes_healpix_neighbors():
     assert pix in marg
     assert any(n in marg for n in neigh)
     assert 9999 not in marg
+
+
+@pytest.mark.parametrize("join_type", ["1and2", "all1", "1not2", "1or2"])
+def test_hats_native_ray_engine_joins(tmp_path: Path, join_type: str):
+    ray = pytest.importorskip("ray")
+    left = _write_hats(
+        tmp_path / "left",
+        [
+            {"id": 1, "ra": 10.0, "dec": 5.0, "rae": 0.2, "dee": 0.2},
+            {"id": 2, "ra": 25.0, "dec": 5.0, "rae": 0.2, "dee": 0.2},
+        ],
+        pix=0,
+    )
+    right = _write_hats(
+        tmp_path / "right",
+        [
+            {"id": 10, "ra": 10.00005, "dec": 5.0, "rae": 0.2, "dee": 0.2},
+            {"id": 20, "ra": 35.0, "dec": 5.0, "rae": 0.2, "dee": 0.2},
+        ],
+        pix=0,
+    )
+    src1 = CatalogueSource(
+        name="L",
+        is_local=False,
+        access_method="hats",
+        access_identifier=str(left),
+        ra_column="ra",
+        dec_column="dec",
+        ra_err_column="rae",
+        dec_err_column="dee",
+    )
+    src2 = CatalogueSource(
+        name="R",
+        is_local=False,
+        access_method="hats",
+        access_identifier=str(right),
+        ra_column="ra",
+        dec_column="dec",
+        ra_err_column="rae",
+        dec_err_column="dee",
+    )
+    spec = MatchSpec(radius_arcsec=2.0, join_type=join_type, matcher="skyerr", max_error=3.0)
+    if not ray.is_initialized():
+        ray.init(ignore_reinit_error=True, logging_level=40)
+    fast_out = hats_native.hats_native_crossmatch(src1, src2, spec, engine="fast")
+    ray_out = hats_native.hats_native_crossmatch(src1, src2, spec, engine="ray")
+    assert ray_out.height == fast_out.height
+    assert set(ray_out.columns) == set(fast_out.columns)
+
+
+@pytest.mark.parametrize("matcher", ["skyellipse", "lr", "ml", "auf", "macauff"])
+def test_hats_native_ray_engine_matchers(tmp_path: Path, matcher: str):
+    ray = pytest.importorskip("ray")
+    left_rows = [
+        {
+            "id": i,
+            "ra": 10.0 + i * 0.01,
+            "dec": 5.0,
+            "rae": 0.2,
+            "dee": 0.2,
+            "corr": 0.1,
+            "mag": 18.0 + 0.1 * i,
+            "color": 0.5 + 0.05 * i,
+        }
+        for i in range(12)
+    ]
+    right_rows = [
+        {
+            "id": 100 + i,
+            "ra": 10.0 + i * 0.01 + 0.2 / 3600.0,
+            "dec": 5.0,
+            "rae": 0.2,
+            "dee": 0.2,
+            "corr": 0.1,
+            "mag": 18.02 + 0.1 * i,
+            "color": 0.51 + 0.05 * i,
+        }
+        for i in range(12)
+    ]
+    left = _write_hats(tmp_path / f"left_{matcher}", left_rows, pix=0)
+    right = _write_hats(tmp_path / f"right_{matcher}", right_rows, pix=0)
+    src1 = CatalogueSource(
+        name="L",
+        is_local=False,
+        access_method="hats",
+        access_identifier=str(left),
+        ra_column="ra",
+        dec_column="dec",
+        ra_err_column="rae",
+        dec_err_column="dee",
+        corr_column="corr",
+    )
+    src2 = CatalogueSource(
+        name="R",
+        is_local=False,
+        access_method="hats",
+        access_identifier=str(right),
+        ra_column="ra",
+        dec_column="dec",
+        ra_err_column="rae",
+        dec_err_column="dee",
+        corr_column="corr",
+    )
+    spec = MatchSpec(
+        radius_arcsec=2.0,
+        matcher=matcher,
+        max_error=3.0,
+        lr_magnitude_column="mag" if matcher == "lr" else None,
+        ml_color_columns=["mag", "color"] if matcher == "ml" else None,
+        macauff_flux_columns=["mag"] if matcher == "macauff" else None,
+    )
+    if not ray.is_initialized():
+        ray.init(ignore_reinit_error=True, logging_level=40)
+    fast_out = hats_native.hats_native_crossmatch(src1, src2, spec, engine="fast").sort("id")
+    ray_out = hats_native.hats_native_crossmatch(src1, src2, spec, engine="ray").sort("id")
+    assert ray_out.height == fast_out.height == 12
+    assert ray_out["id_2"].to_list() == fast_out["id_2"].to_list()

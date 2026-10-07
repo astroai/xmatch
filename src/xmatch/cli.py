@@ -621,8 +621,8 @@ def _parse_extra_distance_cols(raw):
             col, _, w = pair.partition(":")
             try:
                 result[col.strip()] = float(w.strip())
-            except ValueError:
-                logger.warning("Invalid weight in --extra-distance-cols '%s'; skipping.", pair)
+            except ValueError as exc:
+                raise CrossMatchError(f"Invalid weight in --extra-distance-cols '{pair}'") from exc
         else:
             result[pair] = 1.0
     return result
@@ -877,7 +877,7 @@ def _build_match_subparser() -> argparse.ArgumentParser:
         dest="min_free_gb",
         type=float,
         help="Fail fast when the cache root or output filesystem has less free space "
-        "than this (default 10.0; env XMATCH_MIN_FREE_GB overrides).",
+        "than this many GiB (default 10.0; env XMATCH_MIN_FREE_GB overrides).",
     )
 
     g_id = parser.add_argument_group("ID join")
@@ -1054,7 +1054,7 @@ def _build_sync_subparser() -> argparse.ArgumentParser:
         "--min-free-gb",
         dest="min_free_gb",
         type=float,
-        help="Fail fast when the cache root has less free space than this "
+        help="Fail fast when the cache root has less free space than this many GiB "
         "(default 10.0; env XMATCH_MIN_FREE_GB overrides).",
     )
     _add_global_options(parser)
@@ -2184,7 +2184,16 @@ def _split_subcommand(argv: Sequence[str]) -> tuple[str | None, list[str]]:
     Returns ``(None, list(argv))`` when no keyword is found, so callers
     can default to the ``match`` parser.
     """
+    skip_value = False
     for i, tok in enumerate(argv):
+        if skip_value:
+            skip_value = False
+            continue
+        if tok == "--config":
+            skip_value = True
+            continue
+        if tok == "--":
+            return None, list(argv)
         if tok.startswith("-"):
             continue
         if tok in SUBCOMMANDS:
@@ -2295,16 +2304,21 @@ def _diff_configs(bundled: dict[str, Any], user: dict[str, Any]) -> dict[str, An
         if name not in user_cats:
             report["missing_in_user"].append({"section_type": "catalogue", "name": name})
             continue
-        bund = bundled_cats[name] or {}
+        bundled_entry = bundled_cats[name] or {}
         usr = user_cats[name] or {}
         # Union of all fields appearing in either side, plus the known
         # structural / informational fields so we never silently skip
         # them on the other side.
-        keys = set(bund) | set(usr) | OUTDATED_CATALOGUE_FIELDS | INFORMATIONAL_CATALOGUE_FIELDS
+        keys = (
+            set(bundled_entry)
+            | set(usr)
+            | OUTDATED_CATALOGUE_FIELDS
+            | INFORMATIONAL_CATALOGUE_FIELDS
+        )
         for field in sorted(keys):
-            in_bund = field in bund
+            in_bund = field in bundled_entry
             in_user = field in usr
-            bund_v = bund.get(field)
+            bund_v = bundled_entry.get(field)
             user_v = usr.get(field)
             if (
                 (in_bund and not in_user)

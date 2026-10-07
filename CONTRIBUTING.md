@@ -2,6 +2,10 @@
 
 Thank you for contributing to `xmatch`!
 
+Before publishing, build the wheel and source archive with `uv build`, then run
+`pixi run python scripts/check_release.py`. This verifies current source bytes,
+package data, metadata, and the fixtures/helpers needed to run the archived tests.
+
 ## Development Setup
 
 We recommend [Pixi](https://pixi.sh) for a reproducible environment with all compiled dependencies (`polars`, `scipy`, `astropy`, `cdshealpix`, `ray`):
@@ -21,7 +25,7 @@ unset PYTHONPATH
 
 ## Linting, Formatting, and Tests
 
-Run the fast preflight check (lint, format check, and bytecode compilation) before committing:
+Run the fast preflight after a small change. It checks Ruff lint, formatting, Mypy, and bytecode compilation:
 
 ```bash
 pixi run preflight-push
@@ -34,17 +38,25 @@ pixi run format
 pixi run lint
 ```
 
-Run targeted unit tests or the full non-slow test suite:
+Run the release gate before opening a pull request. It runs the preflight and all tests not marked `slow` or `bench`:
+
+```bash
+pixi run ci-local
+```
+
+Run targeted tests while developing, or select the full suite explicitly when you need slow and benchmark tests:
 
 ```bash
 # Targeted module tests
 pixi run test tests/test_matchers.py -q
 
-# Full unit test suite (excluding network-dependent slow and benchmark tests)
-pixi run test -m "not slow and not bench"
+# Entire pytest suite, including tests excluded from ci-local
+pixi run test
 ```
+
+The offline `ci-local` gate does not establish that optional integrations, remote services, credentials, or every Python version work. Run the relevant integration checks separately when changing those paths. The checked Pixi environment uses Python 3.13.
 
 ## Pull Requests
 
 - Follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `perf:`, `refactor:`, `test:`).
-- Ensure `pixi run preflight-push` and relevant unit tests pass before opening a pull request against `astroai/xmatch`.
+- Ensure `pixi run ci-local` and any relevant optional integration checks pass before opening a pull request against `astroai/xmatch`.

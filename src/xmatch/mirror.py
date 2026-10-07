@@ -13,9 +13,11 @@ are incremental:
   (authoritative file list + sizes) and falls back to an HTML directory walk
   (``http.server``-style listings) with per-file HEAD probes for sizes.
 * **TAP full table** — keyset/``OFFSET`` pages (``--page-size``, default
-  100 000).  Re-sync probes each stored page's key window with a cheap
-  ``COUNT(*)`` and refetches only the pages whose window moved; the manifest
-  is the durable record, and unchanged sources cost zero page downloads.
+  100 000).  Incremental key windows require a stable, unique, non-null
+  ordering key. Re-sync uses ``COUNT(*)`` probes, which detect row-count
+  changes but cannot detect same-count value edits; use ``--force`` for mutable
+  tables or pin an immutable upstream release. Appended higher keys are fetched
+  from the tail.
   A hard ceiling (1.5 x ``estimated_size``, default 500 000) guards against
   accidental full-table pulls of giant TAP tables — those must be ingested
   as HATS.
@@ -36,8 +38,10 @@ import hashlib
 import io as _io
 import json
 import logging
+import math
 import os
 import re
+import secrets
 import shutil
 import tempfile
 import threading
@@ -175,12 +179,14 @@ def _parse_estimated_size(value: Any) -> int:
     """Catalogue ``estimated_size`` (int, numeric str, or None) -> int rows."""
     if isinstance(value, bool) or value is None:
         return DEFAULT_ESTIMATED_SIZE
-    if isinstance(value, (int, float)):
-        return int(value) if value > 0 else DEFAULT_ESTIMATED_SIZE
+    if isinstance(value, int):
+        return value if value > 0 else DEFAULT_ESTIMATED_SIZE
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) and value > 0 else DEFAULT_ESTIMATED_SIZE
     try:
         parsed = float(str(value))
-        return int(parsed) if parsed > 0 else DEFAULT_ESTIMATED_SIZE
-    except ValueError:
+        return int(parsed) if math.isfinite(parsed) and parsed > 0 else DEFAULT_ESTIMATED_SIZE
+    except (OverflowError, ValueError):
         return DEFAULT_ESTIMATED_SIZE
 
 
@@ -420,18 +426,7 @@ def _write_json(cache: Storage, rel: str, obj: dict[str, Any]) -> None:
     local = tmpdir / "manifest.json"
     try:
         local.write_text(json.dumps(obj, indent=2, sort_keys=True))
-        if isinstance(cache, LocalStorage):
-            target = Path(cache.root) / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.parent / f".{target.name}.{os.getpid()}.tmp"
-            try:
-                shutil.copy2(local, tmp)
-                tmp.replace(target)
-            except BaseException:
-                tmp.unlink(missing_ok=True)
-                raise
-        else:
-            cache.stage_out(local, rel)
+        cache.stage_out(local, rel)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -439,11 +434,11 @@ def _write_json(cache: Storage, rel: str, obj: dict[str, Any]) -> None:
 def _copy_tree_up(cache: Storage, local_dir: Path, rel: str) -> None:
     """Copy a local directory tree into the cache root at ``rel``.
 
-    The local tree is staged under ``rel + .tmp`` first; the live ``rel`` is
-    then moved aside to ``rel + .old`` and the tmp tree renamed into place,
-    so a crash never leaves the catalogue *absent* (the previous version is
-    recoverable from ``.old`` and the next run self-heals via the properties
-    check).
+    Both backends stage the complete tree beside the live path before
+    publication. VOSpace therefore needs a backend that supports moving
+    containers; file-by-file publication is unsafe. The rename operations
+    protect against transfer and promotion errors, while crash atomicity is
+    limited to the guarantees of the storage backend.
     """
     files = [p for p in sorted(local_dir.rglob("*")) if p.is_file()]
     if isinstance(cache, LocalStorage):
@@ -468,9 +463,90 @@ def _copy_tree_up(cache: Storage, local_dir: Path, rel: str) -> None:
             raise
         shutil.rmtree(backup, ignore_errors=True)
     else:
-        for p in files:
-            dest_rel = f"{rel}/{p.relative_to(local_dir)}"
-            cache.stage_out(p, dest_rel)
+        target_rel = rel.rstrip("/")
+        tmp_rel = target_rel + ".tmp"
+        backup_rel = target_rel + ".old"
+
+        # Recover a crash between moving the target aside and promoting the
+        # completed staging tree. If both paths exist, publication completed
+        # and only backup cleanup was interrupted.
+        if cache.exists(backup_rel):
+            if cache.exists(target_rel):
+                _remove_storage_tree(cache, backup_rel)
+            else:
+                cache.rename(backup_rel, target_rel)
+        # A failed cleanup aborts safely with the live tree still advertised.
+        if cache.exists(tmp_rel):
+            _remove_storage_tree(cache, tmp_rel)
+
+        cache.mkdir(tmp_rel)
+        try:
+            for path in files:
+                dest_rel = f"{tmp_rel}/{path.relative_to(local_dir)}"
+                cache.stage_out(path, dest_rel)
+        except BaseException:
+            try:
+                _remove_storage_tree(cache, tmp_rel)
+            except Exception:
+                logger.warning("Could not remove incomplete staged mirror %s", tmp_rel)
+            raise
+
+        had_target = cache.exists(target_rel)
+        if had_target:
+            try:
+                cache.rename(target_rel, backup_rel)
+            except BaseException:
+                try:
+                    _remove_storage_tree(cache, tmp_rel)
+                except Exception:
+                    logger.warning("Could not remove incomplete staged mirror %s", tmp_rel)
+                raise
+        try:
+            cache.rename(tmp_rel, target_rel)
+        except BaseException as publish_error:
+            try:
+                # A backend may fail after creating the destination. It is
+                # safe to remove it here because the prior tree is in backup.
+                if had_target and cache.exists(target_rel):
+                    _remove_storage_tree(cache, target_rel)
+                if had_target:
+                    cache.rename(backup_rel, target_rel)
+            except Exception as rollback_error:
+                raise OSError(
+                    f"failed to publish mirror {target_rel!r}; rollback also failed "
+                    f"({rollback_error}); previous mirror remains at {backup_rel!r}"
+                ) from publish_error
+            try:
+                if cache.exists(tmp_rel):
+                    _remove_storage_tree(cache, tmp_rel)
+            except Exception:
+                logger.warning("Could not remove incomplete staged mirror %s", tmp_rel)
+            raise
+
+        if had_target:
+            try:
+                _remove_storage_tree(cache, backup_rel)
+            except Exception:
+                # The new tree is complete and published; stale backup cleanup
+                # is best-effort and is retried before the next publication.
+                logger.warning("Could not remove old mirror backup %s", backup_rel)
+
+
+def _remove_storage_tree(cache: Storage, rel: str) -> None:
+    """Remove a file or container tree through the storage protocol.
+
+    VOSpace listings may echo a leaf's own basename and do not mark
+    containers. Treat that echo or an empty listing as a leaf; failed
+    recursive removal remains noisy rather than silently discarding an
+    advertised tree.
+    """
+    children = cache.list(rel)
+    if not children or children == [rel.rsplit("/", 1)[-1]]:
+        cache.rm(rel)
+        return
+    for child in children:
+        _remove_storage_tree(cache, f"{rel}/{child}")
+    cache.rm(rel)
 
 
 # --------------------------------------------------------------------------- #
@@ -685,12 +761,14 @@ def _mirror_tap(
     a mirror served by a different archive still lands where
     ``locate_mirrored(src)`` looks.
 
-    Cold sync fetches sequential OFFSET pages; re-sync probes each stored
-    page's key window with ``COUNT(*)`` and refetches only moved windows
-    (append-only sources additionally fetch the new tail).  The page parquet
-    files under ``<cache>/<name>/raw/pages/`` are the incremental store; the
-    HATS catalogue under ``<cache>/<name>/<version>/`` is rebuilt whenever a
-    page changed.
+    Cold sync fetches sequential OFFSET pages and requires a unique,
+    non-null ordering key when one is available. Re-sync probes stored windows
+    with ``COUNT(*)`` and refetches changed windows when each still fits one
+    page (append-only sources additionally fetch the new tail). Counts cannot
+    detect same-count value edits; use ``force`` for mutable tables. The page
+    Parquet files under ``<cache>/<name>/raw/pages/`` are the incremental
+    store; the HATS catalogue under ``<cache>/<name>/<version>/`` is rebuilt
+    whenever a page changed.
     """
     fetch = endpoint or src
     name = _safe_name(src.name)
@@ -702,16 +780,36 @@ def _mirror_tap(
     key = src.id_column or src.ra_column
     ceiling = int(_TAP_CEILING_FACTOR * estimated_size)
     service = _tap_service(fetch, auth_session)
+    fetched_page_files: dict[int, str] = {}
 
-    def fetch_page(query: str, idx: int) -> pl.DataFrame:
+    def page_rel(idx: int, entry: dict[str, Any] | None = None) -> str:
+        filename = (entry or {}).get("file", f"page_{idx:04d}.parquet")
+        if not isinstance(filename, str) or Path(filename).name != filename:
+            raise CrossMatchError(f"TAP page registry contains an invalid file name: {filename!r}")
+        return f"{raw}/pages/{filename}"
+
+    def fetch_page(query: str, idx: int, *, previous_key: Any = None) -> pl.DataFrame:
         bucket.acquire()
         df = _tap_run(fetch, service, query, maxrec=page_size)
         if df.height:
-            page_rel = f"{raw}/pages/page_{idx:04d}.parquet"
-            cache.write_parquet(df, page_rel)
+            if key:
+                keys = df[key]
+                if keys.null_count() or keys.is_duplicated().any():
+                    raise CrossMatchError(
+                        f"TAP table '{src.name}' needs a unique, non-null ordering key "
+                        "for incremental sync."
+                    )
+                if previous_key is not None and keys[0] <= previous_key:
+                    raise CrossMatchError(
+                        f"TAP table '{src.name}' needs a unique, non-null ordering key "
+                        "for incremental sync."
+                    )
+            filename = f"page_{idx:04d}.{secrets.token_hex(8)}.parquet"
+            fetched_page_files[idx] = filename
+            cache.write_parquet(df, f"{raw}/pages/{filename}")
             stats.pages += 1
             stats.files_downloaded += 1
-            stats.bytes_downloaded += cache.size(page_rel)
+            stats.bytes_downloaded += cache.size(f"{raw}/pages/{filename}")
             if progress_cb:
                 progress_cb(
                     f"sync {src.name}: page {idx:04d} fetched "
@@ -722,8 +820,12 @@ def _mirror_tap(
     def record_page(idx: int, df: pl.DataFrame) -> None:
         if not df.height:
             return
-        page_rel = f"{raw}/pages/page_{idx:04d}.parquet"
-        entry: dict[str, Any] = {"rows": df.height, "sha256": _file_sha256(cache, page_rel)}
+        file = fetched_page_files[idx]
+        entry: dict[str, Any] = {
+            "rows": df.height,
+            "sha256": _file_sha256(cache, f"{raw}/pages/{file}"),
+            "file": file,
+        }
         if key:
             keys = df[key].to_list()
             entry["first_key"] = keys[0]
@@ -733,16 +835,22 @@ def _mirror_tap(
     pages_manifest = manifest.get("pages")
     if not pages_manifest or force:
         # ---------------- cold (or forced) fetch: OFFSET pages ------------
+        manifest["pages"] = {}
         if progress_cb:
             progress_cb(f"sync {src.name}: fetching full table")
         offset = 0
+        previous_key = None
         while True:
             df = fetch_page(
-                _tap_page_query(fetch, offset=offset, limit=page_size), offset // page_size
+                _tap_page_query(fetch, offset=offset, limit=page_size),
+                offset // page_size,
+                previous_key=previous_key,
             )
             if df.is_empty():
                 break
             record_page(offset // page_size, df)
+            if key:
+                previous_key = df[key][-1]
             offset += page_size
             if offset >= ceiling:
                 raise CrossMatchError(
@@ -773,6 +881,12 @@ def _mirror_tap(
                 probe = _tap_run(fetch, service, _tap_count_query(fetch, window=window), maxrec=1)
                 n = probe["n"][0] if probe.height else 0
                 if int(n) != int(entry["rows"]):
+                    if int(n) > page_size:
+                        raise CrossMatchError(
+                            f"TAP table '{src.name}' changed so an ordering-key window now "
+                            f"contains more than {page_size} rows; re-run with --force to "
+                            "refresh the complete mirror safely."
+                        )
                     if progress_cb:
                         progress_cb(f"sync {src.name}: page {idx_str} changed")
                     df = fetch_page(
@@ -783,7 +897,6 @@ def _mirror_tap(
                         record_page(int(idx_str), df)
                     else:
                         # window vanished: drop the stored page + registry entry
-                        cache.rm(f"{raw}/pages/page_{int(idx_str):04d}.parquet")
                         pages.pop(idx_str, None)
                     changed = True
 
@@ -795,6 +908,7 @@ def _mirror_tap(
                     df = fetch_page(
                         _tap_page_query(fetch, after_key=lo, key=key, limit=page_size),
                         cont_idx,
+                        previous_key=lo,
                     )
                     if df.is_empty():
                         break
@@ -818,7 +932,20 @@ def _mirror_tap(
                 )
 
     if changed or force or not cache.exists(f"{prefix}/properties"):
-        _rebuild_tap_hats(cache, src, raw, prefix, hats_threshold=hats_threshold, stats=stats)
+        page_rels = [
+            page_rel(int(index), entry)
+            for index, entry in sorted(
+                manifest.get("pages", {}).items(), key=lambda item: int(item[0])
+            )
+        ]
+        _rebuild_tap_hats(
+            cache,
+            src,
+            page_rels,
+            prefix,
+            hats_threshold=hats_threshold,
+            stats=stats,
+        )
     manifest["version"] = version
     manifest["source"] = src.access_identifier
     manifest["page_size"] = page_size
@@ -826,6 +953,12 @@ def _mirror_tap(
     manifest["total_rows"] = _manifest_total_rows(manifest)
     manifest["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     _write_json(cache, manifest_rel, manifest)
+    live_pages = {
+        Path(page_rel(int(index), entry)).name for index, entry in manifest.get("pages", {}).items()
+    }
+    for old_page in cache.list(f"{raw}/pages"):
+        if old_page.endswith(".parquet") and old_page not in live_pages:
+            cache.rm(f"{raw}/pages/{old_page}")
     logger.info(
         "sync %s: %d bytes, %d files (%d skipped, %d failed, %d pages)",
         src.name,
@@ -974,7 +1107,7 @@ def _write_hats_native(
 def _rebuild_tap_hats(
     cache: Storage,
     src: CatalogueSource,
-    raw: str,
+    page_rels: list[str],
     prefix: str,
     *,
     hats_threshold: int,
@@ -982,15 +1115,15 @@ def _rebuild_tap_hats(
 ) -> None:
     """Re-convert the page store into the ``cache/<name>/<version>`` HATS cat."""
     frames = []
-    for name in sorted(cache.list(f"{raw}/pages"), key=lambda n: n):
+    for page_rel in page_rels:
         try:
-            frame = cache.read_parquet(f"{raw}/pages/{name}")
+            frame = cache.read_parquet(page_rel)
         except Exception as exc:  # noqa: BLE001
             # An unreadable page (torn write, corrupted transfer) must not
             # silently shrink the converted catalogue while the manifest
             # still counts its rows: surface it and count the failure.
             stats.failed += 1
-            logger.warning("sync %s: ignoring unreadable TAP page %s: %s", src.name, name, exc)
+            logger.warning("sync %s: ignoring unreadable TAP page %s: %s", src.name, page_rel, exc)
             continue
         if frame.height:
             frames.append(frame)

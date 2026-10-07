@@ -1,28 +1,23 @@
 #!/usr/bin/env python
-"""Benchmark xmatch engines: fast, zone, ray on synthetic catalogues.
+"""Correctness-checked throughput benchmark for spatial matching engines.
 
-Generates random star catalogues at sizes [1k, 5k, 20k, 100k] and runs each
-available engine with warm-up + timed iterations.  Ray is benchmarked only
-when Ray is installed and a local cluster can be started.
+The synthetic left and right catalogues share identical positions and stable
+row IDs. This is a deliberate self-match workload: every engine must return
+exactly the identity pair for each source before its timing is reported. It is
+useful for bounded regression checks, not a substitute for representative
+survey workloads.
 
-When --extra-cols is passed, synthetic photometry columns are added and each
-size also benchmarks N-dimensional cKDTree matching (spatial + photometry)
-against the spatial-only baseline, showing the overhead.
+Examples::
 
-Output: a formatted table of median times (seconds) and match counts.
-
-Usage::
-
-    python scripts/bench_engines.py              # default sizes
-    python scripts/bench_engines.py --sizes 1k,10k,100k,500k
-    python scripts/bench_engines.py --n-timed 5 --radius 2.0
-    python scripts/bench_engines.py --extra-cols g:0.5,r:0.3 --chunk-size 5000
+    pixi run python scripts/bench_engines.py --sizes 100,1k --n-warmup 0 --n-timed 1
+    pixi run python scripts/bench_engines.py --sizes 1k,10k --extra-cols g:0.5,r:0.3
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
+import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -30,281 +25,227 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-# Add the project root to sys.path so `xmatch` is importable.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
 from xmatch.matchers import MatchSpec, sky_match  # noqa: E402
 from xmatch.sources import CatalogueSource  # noqa: E402
 
-# --------------------------------------------------------------------------- #
-# helpers
-# --------------------------------------------------------------------------- #
 
-
-def _src(name="synth", ra="ra", dec="dec"):
-    return CatalogueSource(name=name, is_local=True, ra_column=ra, dec_column=dec)
+def _src() -> CatalogueSource:
+    return CatalogueSource(name="synthetic", is_local=True, ra_column="ra", dec_column="dec")
 
 
 def _make_catalogue(
     n_stars: int,
-    seed: int = 42,
-    density: float = 10.0,
-    phot_cols: dict[str, float] | None = None,
+    *,
+    seed: int,
+    density: float,
+    phot_cols: dict[str, float],
 ) -> pl.DataFrame:
-    """Generate *n_stars* random stars in a square patch (degrees).
-
-    *density* controls spatial star density: the patch side length is
-    ``sqrt(n_stars / density)`` degrees.
-
-    When *phot_cols* is provided, synthetic photometry columns are added
-    with normally-distributed values around a fixed mean (useful for
-    N-d matching benchmarks).
-    """
+    """Build a reproducible, valid-declination square patch with stable IDs."""
     rng = np.random.default_rng(seed)
-    side_deg = np.sqrt(float(n_stars) / max(density, 1e-6))
-    half = side_deg * 0.5
+    # Keep Dec in [-60, 60] even for large requested catalogues.
+    side_deg = min(math.sqrt(n_stars / density), 120.0)
+    return pl.DataFrame(
+        {
+            "id": np.arange(n_stars, dtype=np.int64),
+            "ra": rng.uniform(0.0, side_deg, n_stars),
+            "dec": rng.uniform(-side_deg / 2.0, side_deg / 2.0, n_stars),
+            **{name: rng.normal(15.0, 1.5, n_stars) for name in phot_cols},
+        }
+    )
 
-    cols = {
-        "ra": rng.uniform(-half, half, n_stars),
-        "dec": rng.uniform(-half, half, n_stars),
-    }
-    if phot_cols:
-        for col_name in phot_cols:
-            # Random magnitudes in a realistic range (10–20 mag).
-            cols[col_name] = rng.normal(15.0, 1.5, n_stars)
-    return pl.DataFrame(cols)
+
+def _pair_signature(result: pl.DataFrame) -> tuple[tuple[int, int], ...]:
+    if not {"id", "id_2"}.issubset(result.columns):
+        raise AssertionError(f"match result has no stable ID pair columns: {result.columns}")
+    return tuple(
+        sorted((int(left), int(right)) for left, right in result.select("id", "id_2").iter_rows())
+    )
 
 
 def _time_engine(
     engine: str,
-    left_lf: pl.LazyFrame,
-    right_lf: pl.LazyFrame,
-    left_src: CatalogueSource,
-    right_src: CatalogueSource,
+    frame: pl.LazyFrame,
+    source: CatalogueSource,
     spec: MatchSpec,
+    expected: tuple[tuple[int, int], ...],
     n_warmup: int,
     n_timed: int,
-) -> tuple[float, int]:
-    """Return ``(median_seconds, n_matches)`` for *engine*."""
-    times: list = []
-    n_matches = 0
-    for _ in range(n_warmup):
-        out = sky_match(left_src, right_src, left_lf, right_lf, spec, engine=engine).collect()
-        n_matches = out.height
-
-    for _ in range(n_timed):
-        t0 = time.perf_counter()
-        out = sky_match(left_src, right_src, left_lf, right_lf, spec, engine=engine).collect()
-        times.append(time.perf_counter() - t0)
-        n_matches = out.height
-
-    return float(np.median(times)), n_matches
-
-
-def _format_time(sec: float) -> str:
-    if sec < 0.001:
-        return f"{sec * 1e6:.0f} µs"
-    if sec < 1.0:
-        return f"{sec * 1e3:.1f} ms"
-    return f"{sec:.3f} s"
+) -> tuple[float, float, float, int]:
+    """Time repeated matches and reject missing, duplicate, or incorrect pairs."""
+    durations: list[float] = []
+    count = 0
+    for iteration in range(n_warmup + n_timed):
+        started = time.perf_counter()
+        result = sky_match(source, source, frame, frame, spec, engine=engine).collect()
+        elapsed = time.perf_counter() - started
+        signature = _pair_signature(result)
+        if signature != expected:
+            raise AssertionError(
+                f"{engine} returned {len(signature)} pairs; expected {len(expected)} identity pairs"
+            )
+        count = result.height
+        if iteration >= n_warmup:
+            durations.append(elapsed)
+    return float(np.median(durations)), min(durations), max(durations), count
 
 
-# --------------------------------------------------------------------------- #
-# main
-# --------------------------------------------------------------------------- #
+def _parse_sizes(raw: str) -> list[int]:
+    sizes = []
+    for token in raw.split(","):
+        value = token.strip().lower()
+        multiplier = 1
+        if value.endswith("k"):
+            multiplier, value = 1_000, value[:-1]
+        elif value.endswith("m"):
+            multiplier, value = 1_000_000, value[:-1]
+        try:
+            size = int(value) * multiplier
+        except ValueError as exc:
+            raise ValueError(f"invalid size token: {token!r}") from exc
+        if size <= 0:
+            raise ValueError(f"sizes must be positive: {token!r}")
+        sizes.append(size)
+    if not sizes:
+        raise ValueError("provide at least one size")
+    return sizes
+
+
+def _parse_extra_cols(raw: str | None) -> dict[str, float]:
+    result: dict[str, float] = {}
+    if raw is None:
+        return result
+    for token in raw.split(","):
+        name, separator, weight_text = token.strip().partition(":")
+        if not name or name in result:
+            raise ValueError(f"empty or duplicate extra column: {token!r}")
+        try:
+            weight = float(weight_text) if separator else 1.0
+        except ValueError as exc:
+            raise ValueError(f"invalid weight for {name!r}: {weight_text!r}") from exc
+        if not math.isfinite(weight) or weight <= 0:
+            raise ValueError(f"weight for {name!r} must be finite and positive")
+        result[name] = weight
+    return result
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Benchmark xmatch engines on synthetic catalogues."
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--sizes",
-        default="1k,5k,20k,100k",
-        help="Comma-separated catalogue sizes (k=×1000).",
+        "--sizes", default="1k,5k,20k,100k", help="Comma-separated sizes; k/m suffixes accepted."
     )
-    parser.add_argument("--radius", type=float, default=1.0, help="Match radius in arcsec.")
+    parser.add_argument("--radius", type=float, default=1.0, help="Match radius in arcseconds.")
     parser.add_argument("--n-warmup", type=int, default=1, help="Warm-up iterations per engine.")
     parser.add_argument("--n-timed", type=int, default=3, help="Timed iterations per engine.")
+    parser.add_argument("--chunk-size", type=int, help="Override N-D matching chunk size.")
+    parser.add_argument("--extra-cols", help="N-D benchmark columns, e.g. 'g:0.5,r:0.3'.")
     parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=None,
-        help="Override _scipy_match_nd chunk size (default: 50000). "
-        "Only affects N-d matching via the fast engine.",
-    )
-    parser.add_argument(
-        "--extra-cols",
-        default=None,
-        help="Comma-separated col:weight pairs for N-d matching benchmark "
-        "(e.g. 'g:0.5,r:0.3').  When set, each size also benchmarks "
-        "N-d cKDTree matching vs spatial-only baseline.",
+        "--density", type=float, default=10.0, help="Synthetic source density per square degree."
     )
     args = parser.parse_args()
 
-    # Apply chunk-size override to the matchers module before any matching.
-    from xmatch import matchers  # noqa: E402
+    try:
+        sizes = _parse_sizes(args.sizes)
+        phot_cols = _parse_extra_cols(args.extra_cols)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not math.isfinite(args.radius) or args.radius <= 0:
+        parser.error("--radius must be finite and positive")
+    if args.n_warmup < 0 or args.n_timed < 1:
+        parser.error("--n-warmup must be nonnegative and --n-timed must be positive")
+    if not math.isfinite(args.density) or args.density <= 0:
+        parser.error("--density must be finite and positive")
+    if args.chunk_size is not None and args.chunk_size < 1:
+        parser.error("--chunk-size must be positive")
 
+    from xmatch import matchers  # noqa: PLC0415
+
+    saved_chunk_size = matchers._ND_CHUNK_SIZE
     if args.chunk_size is not None:
         matchers._ND_CHUNK_SIZE = args.chunk_size
 
-    # Parse sizes.
-    sizes: list[int] = []
-    for tok in args.sizes.split(","):
-        tok = tok.strip().lower()
-        mult = 1
-        if tok.endswith("k"):
-            mult = 1_000
-            tok = tok[:-1]
-        elif tok.endswith("m"):
-            mult = 1_000_000
-            tok = tok[:-1]
-        try:
-            sizes.append(int(float(tok) * mult))
-        except ValueError:
-            print(f"Invalid size token: {tok!r}", file=sys.stderr)
-            return 1
-    if not sizes:
-        print("No sizes provided.", file=sys.stderr)
-        return 1
+    import ray  # noqa: PLC0415
 
-    spec = MatchSpec(radius_arcsec=args.radius, find="best")
-    left_src = right_src = _src()
+    engines = ["fast", "zone", "ray"]
+    started_ray = not ray.is_initialized()
+    if started_ray:
+        address = os.environ.get("RAY_ADDRESS")
+        ray.init(
+            address=address or None,
+            include_dashboard=False,
+            logging_level=40,
+            **({"num_cpus": 2} if not address else {}),
+        )
 
-    # Parse extra-cols into dict.
-    phot_cols: dict[str, float] = {}
-    if args.extra_cols:
-        for pair in args.extra_cols.split(","):
-            pair = pair.strip()
-            if not pair:
-                continue
-            if ":" in pair:
-                col, _, w = pair.partition(":")
-                with contextlib.suppress(ValueError):
-                    phot_cols[col.strip()] = float(w.strip())
-            else:
-                phot_cols[pair] = 1.0
-
-    nd_spec: MatchSpec | None = None
-    if phot_cols:
-        nd_spec = MatchSpec(
+    source = _src()
+    spec = MatchSpec(radius_arcsec=args.radius, find="best", fallback_policy="error")
+    nd_spec = (
+        MatchSpec(
             radius_arcsec=args.radius,
             find="best",
             extra_distance_cols=phot_cols,
+            fallback_policy="error",
         )
-
-    # Determine available engines.
-    engines = ["fast"]
+        if phot_cols
+        else None
+    )
+    failures = 0
     try:
-        import cdshealpix  # noqa: F401
+        print("Synthetic identity self-match; every timed run is checked against exact source IDs.")
+        print(f"Median and range in seconds; n={args.n_timed}; warmup={args.n_warmup}")
+        print(
+            f"{'Size':>9}  {'Engine':>16}  {'Median':>10}  {'Range':>19}  {'Pairs':>9}  {'Rows/s':>12}"
+        )
+        print("-" * 66)
+        for size in sizes:
+            frame = _make_catalogue(
+                size,
+                seed=size,
+                density=args.density,
+                phot_cols=phot_cols,
+            ).lazy()
+            expected = tuple((index, index) for index in range(size))
+            for engine in engines:
+                try:
+                    elapsed, minimum, maximum, count = _time_engine(
+                        engine, frame, source, spec, expected, args.n_warmup, args.n_timed
+                    )
+                    print(
+                        f"{size:>9,}  {engine:>16}  {elapsed:>9.4f}s  {minimum:>8.4f}–{maximum:<8.4f}s  {count:>9,}  {size / elapsed:>12,.0f}"
+                    )
+                except Exception as exc:
+                    failures += 1
+                    print(f"{size:>9,}  {engine:>16}  FAILED: {exc}", file=sys.stderr)
 
-        engines.append("zone")
-    except ImportError:
-        pass
-
-    ray_ok = False
-    try:
-        import ray  # noqa: F401
-
-        if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True, logging_level=40)
-        ray_ok = True
-        engines.append("ray")
-    except Exception:
-        pass
-
-    # Header.
-    len(phot_cols)
-    hdr_engine = f"{'Engine':>18}" if nd_spec else f"{'Engine':>6}"
-    print()
-    print(f"{'Size':>8}  {hdr_engine}  {'Time':>10}  {'Matches':>8}  {'rate':>10}")
-    print("-" * (61 + (6 if nd_spec else 0)))
-
-    for n in sizes:
-        df = _make_catalogue(n, seed=n, phot_cols=phot_cols)
-        lf = df.lazy()
-        indent = "" if not nd_spec else "      "
-        print(f"{n:>8,}  " + " " * (38 + (6 if nd_spec else 0)))
-
-        for eng in engines:
-            try:
-                elapsed, n_match = _time_engine(
-                    eng,
-                    lf,
-                    lf,
-                    left_src,
-                    right_src,
-                    spec,
-                    args.n_warmup,
-                    args.n_timed,
-                )
-                rate = n / elapsed if elapsed > 0 else 0
-                print(
-                    f"{indent:>8}  {eng:>6}  {_format_time(elapsed):>10}  "
-                    f"{n_match:>8,}  {rate:>8,.0f}/s"
-                )
-            except Exception as exc:
-                print(f"{indent:>8}  {eng:>6}  {'FAILED':>10}  ({exc})")
-
-        # N-d matching benchmark (fast engine only, at several chunk sizes).
-        # Spatial-only baseline is the "fast" engine row already printed above.
-        if nd_spec:
-            # Build chunk-size candidates; the configured size always appears.
-            cand = {matchers._ND_CHUNK_SIZE}  # user config / default
-            cand.add(min(5_000, n))  # small (many chunks)
-            if n > 20_000:
-                cand.add(n)  # no chunking
-            below = sorted(c for c in cand if 0 < c < n)  # distinct sizes < n
-            if any(c >= n for c in cand):
-                below.append(n)  # one "full" row
-            chunk_sizes = below
-
-            _saved = matchers._ND_CHUNK_SIZE  # restore after loop
-            try:
-                for cs in chunk_sizes:
-                    matchers._ND_CHUNK_SIZE = cs
-                    if cs >= n:
-                        label = "N-d (full: 1 chunk)"
-                    else:
-                        label = f"N-d ({cs // 1000}k chunk)"
+            if nd_spec is not None:
+                candidates = {matchers._ND_CHUNK_SIZE, min(5_000, size), size}
+                for chunk in sorted(c for c in candidates if c > 0):
+                    matchers._ND_CHUNK_SIZE = chunk
                     try:
-                        elapsed_nd, n_match_nd = _time_engine(
-                            "fast",
-                            lf,
-                            lf,
-                            left_src,
-                            right_src,
-                            nd_spec,
-                            args.n_warmup,
-                            args.n_timed,
+                        elapsed, minimum, maximum, count = _time_engine(
+                            "fast", frame, source, nd_spec, expected, args.n_warmup, args.n_timed
                         )
-                        rate_nd = n / elapsed_nd if elapsed_nd > 0 else 0
+                        label = f"N-D chunk={chunk:,}"
                         print(
-                            f"{indent:>8}  {label:>18}  "
-                            f"{_format_time(elapsed_nd):>10}  "
-                            f"{n_match_nd:>8,}  {rate_nd:>8,.0f}/s"
+                            f"{size:>9,}  {label:>16}  {elapsed:>9.4f}s  {minimum:>8.4f}–{maximum:<8.4f}s  {count:>9,}  {size / elapsed:>12,.0f}"
                         )
                     except Exception as exc:
-                        print(f"{indent:>8}  {label:>18}  {'FAILED':>10}  ({exc})")
-            finally:
-                matchers._ND_CHUNK_SIZE = _saved
+                        failures += 1
+                        print(f"{size:>9,}  N-D chunk={chunk:,} FAILED: {exc}", file=sys.stderr)
+            matchers._ND_CHUNK_SIZE = args.chunk_size or saved_chunk_size
+        print("-" * 66)
+        print(
+            f"Engines checked: {', '.join(engines)}; radius={args.radius:g} arcsec; failures={failures}"
+        )
+    finally:
+        matchers._ND_CHUNK_SIZE = saved_chunk_size
+        if started_ray and "ray" in sys.modules:
+            import ray  # noqa: PLC0415
 
-        # Blank line between sizes.
-        if n != sizes[-1]:
-            print()
-
-    print("-" * (61 + (6 if nd_spec else 0)))
-    print(f"Engines: {', '.join(engines)}")
-    print(f"Radius: {args.radius} arcsec, warmup={args.n_warmup}, timed={args.n_timed}")
-    if phot_cols:
-        print(f"N-d columns: {', '.join(f'{k}:{v}' for k, v in phot_cols.items())}")
-    print(f"N-d chunk size: {matchers._ND_CHUNK_SIZE:,}")
-    if ray_ok:
-        import ray  # noqa: F811
-
-        ray.shutdown()
-    return 0
+            ray.shutdown()
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

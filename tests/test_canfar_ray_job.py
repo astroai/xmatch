@@ -1,12 +1,13 @@
 """CANFAR ray-job script tests: POSIX-sh syntax + the dry-run contract.
 
 The script never touches the platform in these tests (``--dry-run`` exits
-before any ``canfar`` / ``astroai-workload`` call), so they run on any
+before any ``canfar`` / ``astroai`` call), so they run on any
 machine with ``bash``.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def test_canfar_ray_job_syntax() -> None:
 def test_canfar_ray_job_dry_run_output() -> None:
     """``--dry-run`` prints the plan, exits 0, never touches the platform."""
     res = subprocess.run(
-        ["bash", str(SCRIPT), "--dry-run"],
+        ["bash", str(SCRIPT), "--dry-run", "--command", "pixi run xmatch --help"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -36,12 +37,60 @@ def test_canfar_ray_job_dry_run_output() -> None:
     assert res.returncode == 0, res.stderr
     out = res.stdout
     assert "canfar ps" in out
-    assert "astroai-workload cluster ensure --workers 4 --cores 1 --ram 4" in out
-    assert "astroai-workload submit --cmd" in out
+    assert "astroai cluster start --min-workers 4 --max-workers 4 --cores 1 --ram 4" in out
+    assert "astroai jobs submit --cmd" in out
     assert "--wait" in out
     assert "--address" in out  # the submit line names its target truthfully
-    assert "RAY_ADDRESS" not in out  # no Slurm-era leftovers
+    assert "ASTROAI_RAY_JOBS_ADDRESS" not in out
     assert "Submitted batch job" not in out
+
+
+def test_canfar_ray_job_requires_bounded_command() -> None:
+    res = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 2
+    assert "--command is required" in res.stderr
+
+
+def test_canfar_ray_job_manager_uses_supported_resource_flags() -> None:
+    res = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--command",
+            "pixi run xmatch --help",
+            "--create-manager",
+            "images.canfar.net/astroai/ray-manager:latest",
+            "--manager-name",
+            "xmatch-test",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "canfar create --cpu 2 --memory 8 --name xmatch-test contributed" in res.stdout
+    assert "--cores 2" not in res.stdout
+    assert "--ram 8" not in res.stdout
+
+
+def test_canfar_ray_job_uses_current_address_environment_variable() -> None:
+    env = dict(os.environ, CANFAR_RAY_JOBS_ADDRESS="https://ray.example/jobs")
+    res = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--command", "pixi run xmatch --help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "skipped — CANFAR_RAY_JOBS_ADDRESS already set" in res.stdout
+    assert "https://ray.example/jobs" in res.stdout
 
 
 def test_canfar_ray_job_unknown_option_fails() -> None:

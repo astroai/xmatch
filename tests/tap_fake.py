@@ -235,4 +235,11 @@ class FakeTAPServer:
                 else:
                     self._send(404, "<oops/>")
 
+            def do_DELETE(self) -> None:  # noqa: N802 - http.server API
+                path = urllib.parse.urlparse(self.path).path
+                match = re.fullmatch(r"/tap/async/([0-9a-f]+)", path)
+                with server._lock:
+                    found = match is not None and server.jobs.pop(match.group(1), None) is not None
+                self._send(204 if found else 404, "")
+
         return Handler

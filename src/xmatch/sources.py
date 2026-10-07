@@ -17,6 +17,31 @@ from typing import Any
 import polars as pl
 
 from . import io_utils
+from .exceptions import CrossMatchError
+
+_POSITION_ERROR_UNIT_TO_ARCSEC = {
+    "arcsec": 1.0,
+    "mas": 1e-3,
+    "deg": 3600.0,
+    "arcmin": 60.0,
+}
+
+
+def position_error_to_arcsec_factor(units: object) -> float:
+    """Return the conversion factor for supported positional-error units."""
+    if units is None:
+        unit = "arcsec"
+    elif isinstance(units, str):
+        unit = units.strip().lower()
+    else:
+        unit = ""
+    try:
+        return _POSITION_ERROR_UNIT_TO_ARCSEC[unit]
+    except KeyError as exc:
+        raise CrossMatchError(
+            f"Unsupported positional-error unit {units!r}; use arcsec, mas, arcmin, or deg."
+        ) from exc
+
 
 ASTROMETRIC_COVARIANCE_KEYS = (
     "ra_error",

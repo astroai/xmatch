@@ -13,8 +13,7 @@ that the STILTS invocation
 * reports separations consistent with an independent great-circle calculation;
 * produces the right schema when invoked through the high-level
   :class:`xmatch.CrossMatch` API and writes an output file;
-* does not silently degrade into the :mod:`xmatch.astropy` fallback if STILTS
-  ever fails to launch in CI.
+* does not silently degrade into another engine if STILTS fails in CI.
 
 The synthetic catalogues are designed so the bulk of each catalogue lives on a
 wide rectangular grid (Dec ∈ [-30, 30], 0.5–0.6° spacing) far coarser than the
@@ -60,9 +59,9 @@ def _grid_positions(n: int, *, ra_phase: float) -> tuple[np.ndarray, np.ndarray]
     RA cells by ``ra_phase * 0.25°`` so no row coincides with a row of the left
     catalogue (the left grid lives on multiples of 0.5° in RA; the right grid
     lives at offsets {0.25° + k·0.5°}). With Dec capped at |30°|,
-    ``cos(dec) ≥ 0.866`` and the minimum great-circle separation between *any*
-    left-grid row and *any* right-grid row is at least ``~1559 arcsec`` --
-    guaranteed ≫ the 1.5″ match radius.
+    ``cos(dec) ≥ 0.866`` and same-Dec rows differ by at least ``~779 arcsec``
+    in RA; different-Dec rows differ by at least 0.6°. Thus every grid pair is
+    far outside the 1.5″ match radius.
     """
     idx = np.arange(n)
     ra = (idx % 100) * 0.5 + ra_phase * 0.25  # 0/0.25° → 49.5/49.75°
@@ -115,7 +114,7 @@ def pair() -> tuple[pl.DataFrame, pl.DataFrame, list[int]]:
         43,
         inject_ras=base_ras + ra_off,
         inject_decs=base_decs,
-        ra_phase=1.0,  # → right grid is offset by 0.5° in RA
+        ra_phase=1.0,  # → right grid is offset by 0.25° in RA
     )
     injected_ids = list(range(_N_BASE - _INJECT, _N_BASE))
     return left, right, injected_ids
@@ -136,9 +135,7 @@ def _great_circle_arcsec(
 # --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
-# Call the STILTS backend directly so a STILTS failure surfaces as a real test
-# failure -- matchers.sky_match() would catch any exception and silently
-# substitute the astropy engine, which would mask the regression.
+# Call the STILTS backend directly so its failures surface without engine fallback.
 def _stilts(left: pl.DataFrame, right: pl.DataFrame, spec: MatchSpec) -> pl.DataFrame:
     return stilts.stilts_sky_match(
         CatalogueSource(name="L", is_local=True, ra_column="ra", dec_column="dec"),
@@ -209,28 +206,18 @@ def test_stilts_sky_match_outer_join_keeps_unmatched_left(pair):
     assert sorted(matched_ids) == list(range(_N_BASE - _INJECT, _N_BASE))
 
 
-def test_stilts_high_level_crossmatch_streams_to_parquet(pair, tmp_path, monkeypatch):
+def test_stilts_high_level_crossmatch_streams_to_parquet(pair, tmp_path):
     """``LazyFrame`` inputs → :meth:`CrossMatch.crossmatch(lazy=True)` →
     ``sink_parquet(engine='streaming')``.
 
-    Exercises the polars streaming pipeline that backs xmatch's "results
-    stream straight to disk so large matches never need to fit in memory" claim
-    (see README.md). The match output is delivered as a ``LazyFrame`` and
-    sinked via polars' streaming executor; the result is never collected in
-    RAM.
+    STILTS materializes the matched table before xmatch wraps it in a
+    ``LazyFrame``. This checks the returned frame can be streamed to Parquet;
+    it does not assert that matching itself stays out of memory.
     """
     left, right, _ = pair
     left_lf = left.lazy()
     right_lf = right.lazy()
     cm = CrossMatch()
-
-    # Patch out the astropy engine so any silent fallback raises.
-    import xmatch.matchers as _matchers
-
-    def _raise_if_called(*_a, **_kw):  # pragma: no cover - only on regression
-        raise AssertionError("xmatch fell back to the astropy engine; STILTS did not run")
-
-    monkeypatch.setattr(_matchers, "_astropy_match", _raise_if_called)
 
     result_lf = cm.crossmatch(
         left_lf,
@@ -239,12 +226,12 @@ def test_stilts_high_level_crossmatch_streams_to_parquet(pair, tmp_path, monkeyp
         matcher="sky",
         find="best",
         engine="stilts",
+        fallback_policy="error",
         lazy=True,
     )
 
-    # Sanity-check that a streaming execution plan can be produced — polars
-    # raises ComputeError on plans that cannot be streamed, so a successful
-    # plan implies the result is streamable.
+    # Plan generation checks the Polars API, not whether STILTS matching
+    # avoided materializing its result.
     plan = result_lf.explain(engine="streaming")
     assert plan.strip()
 
@@ -387,6 +374,35 @@ def test_stilts_skyerr_rejects_outside_n_sigma(skyerr_pair):
     assert out.height == 0
 
 
+def test_stilts_skyerr_keeps_valid_pair_without_bin_engineer():
+    """The candidate-search scale must retain a pair inside its error bound."""
+    sigma_axis = _SKYERR_ERROR_AXIS
+    left = pl.DataFrame(
+        {
+            "source_id": [1],
+            "ra": [10.0],
+            "dec": [0.0],
+            "rae": [sigma_axis],
+            "dee": [sigma_axis],
+        }
+    )
+    right = pl.DataFrame(
+        {
+            "source_id": [2],
+            "ra": [10.0 + 0.4 / 3600.0],
+            "dec": [0.0],
+            "rae": [sigma_axis],
+            "dee": [sigma_axis],
+        }
+    )
+
+    out = _stilts_skyerr(left, right, max_error=0.5)
+
+    assert out.height == 1
+    assert out["source_id"].to_list() == [1]
+    assert out["source_id_2"].to_list() == [2]
+
+
 def test_stilts_skyerr_separations_match_reference(skyerr_pair):
     """``sep_arcsec`` reproduces an independent great-circle reference to
     numerical precision."""
@@ -403,9 +419,7 @@ def test_stilts_skyerr_separations_match_reference(skyerr_pair):
     assert (out["sep_arcsec"].to_numpy() <= 3.0 * 2 * _SKYERR_SIGMA).all()
 
 
-def test_stilts_skyerr_end_to_end_via_crossmatch_streams_to_parquet(
-    skyerr_pair, tmp_path, monkeypatch
-):
+def test_stilts_skyerr_end_to_end_via_crossmatch_streams_to_parquet(skyerr_pair, tmp_path):
     """LazyFrame inputs → ``CrossMatch.crossmatch(lazy=True, matcher='skyerr',
     max_error=3.0)`` → ``sink_parquet(engine='streaming')```."""
     left, right, injected_ids, _, _ = skyerr_pair
@@ -413,22 +427,22 @@ def test_stilts_skyerr_end_to_end_via_crossmatch_streams_to_parquet(
     right_lf = right.lazy()
     cm = CrossMatch()
 
-    import xmatch.matchers as _matchers
-
-    def _raise(*_a, **_kw):  # pragma: no cover - only on regression
-        raise AssertionError("xmatch fell back to astropy; STILTS did not run")
-
-    monkeypatch.setattr(_matchers, "_astropy_match", _raise)
-
     result_lf = cm.crossmatch(
         left_lf,
         right_lf,
         matcher="skyerr",
         max_error=3.0,
         engine="stilts",
+        fallback_policy="error",
+        ra_err_column_1="rae",
+        dec_err_column_1="dee",
+        ra_err_column_2="rae",
+        dec_err_column_2="dee",
+        pos_err_units_1="arcsec",
+        pos_err_units_2="arcsec",
         lazy=True,
     )
-    assert result_lf.explain(streaming=True).strip()
+    assert result_lf.explain(engine="streaming").strip()
 
     out_path = tmp_path / "skyerr.parquet"
     result_lf.sink_parquet(out_path, engine="streaming")

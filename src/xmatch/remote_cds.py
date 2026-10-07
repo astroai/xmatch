@@ -1,6 +1,7 @@
 """CDS backends: VizieR download and the CDS XMatch service (local vs remote)."""
 
 import logging
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -36,6 +37,28 @@ def download_from_cds(
     import astropy.units as u
     from astropy.coordinates import SkyCoord
 
+    if not src.access_identifier:
+        raise CrossMatchError(f"Missing access_identifier for CDS catalogue '{src.name}'.")
+    if ra is None or dec is None or radius_arcsec is None:
+        raise CrossMatchError(
+            f"A spatial region (ra/dec/radius) is required to download '{src.name}' from CDS."
+        )
+    try:
+        ra, dec, radius_arcsec = float(ra), float(dec), float(radius_arcsec)
+    except (TypeError, ValueError) as exc:
+        raise CrossMatchError("CDS cone search coordinates and radius must be numeric.") from exc
+    if (
+        not math.isfinite(ra)
+        or not math.isfinite(dec)
+        or not math.isfinite(radius_arcsec)
+        or not -90.0 <= dec <= 90.0
+        or not 0.0 <= radius_arcsec <= 648_000.0
+    ):
+        raise CrossMatchError(
+            "CDS cone search requires finite RA, Dec in [-90, 90], "
+            "and radius_arcsec in [0, 648000]."
+        )
+
     try:
         from astroquery.vizier import Vizier
     except ImportError as exc:
@@ -44,15 +67,8 @@ def download_from_cds(
             "Install it with `pip install 'xmatch[cds]'` or `pip install astroquery`."
         ) from exc
 
-    if not src.access_identifier:
-        raise CrossMatchError(f"Missing access_identifier for CDS catalogue '{src.name}'.")
-
     vizier = Vizier(columns=list(columns or src.default_columns or ["*"]), row_limit=-1)
-    if ra is None or dec is None or not radius_arcsec:
-        raise CrossMatchError(
-            f"A spatial region (ra/dec/radius) is required to download '{src.name}' from CDS."
-        )
-    center = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
+    center = SkyCoord(ra=ra % 360.0 * u.deg, dec=dec * u.deg, frame="icrs")
     if progress_cb is not None:
         progress_cb("querying VizieR")
     tables = vizier.query_region(
@@ -79,6 +95,28 @@ def cds_xmatch_local_remote(
     reliably joined back to the original local rows (no fragile float-equality
     merge on RA/Dec).
     """
+    if not remote_src.access_identifier:
+        raise CrossMatchError(f"Missing access_identifier for CDS catalogue '{remote_src.name}'.")
+    unsupported = []
+    if spec.matcher != "sky":
+        unsupported.append(f"matcher={spec.matcher!r}")
+    if spec.find != "all":
+        unsupported.append("find='best'")
+    if spec.join_type != "1and2":
+        unsupported.append(f"join_type={spec.join_type!r}")
+    if spec.probabilistic:
+        unsupported.append("probabilistic")
+    if spec.prior_columns:
+        unsupported.append("prior_columns")
+    if spec.extra_distance_cols:
+        unsupported.append("extra_distance_cols")
+    if spec.filter_expr:
+        unsupported.append("filter_expr")
+    if spec.target_epoch is not None or spec.pm_prior:
+        unsupported.append("proper-motion options")
+    if unsupported:
+        raise CrossMatchError("CDS XMatch cannot honor " + ", ".join(unsupported))
+
     import astropy.units as u
 
     try:
@@ -90,9 +128,6 @@ def cds_xmatch_local_remote(
         ) from exc
 
     from .io_utils import polars_to_astropy
-
-    if not remote_src.access_identifier:
-        raise CrossMatchError(f"Missing access_identifier for CDS catalogue '{remote_src.name}'.")
 
     local = local_lf.collect().with_row_index(_XMATCH_KEY)
     ra_col, dec_col = local_src.ra_column, local_src.dec_column
@@ -113,8 +148,9 @@ def cds_xmatch_local_remote(
 
     matched = astropy_table_to_polars(result_table)
     if _XMATCH_KEY not in matched.columns:
-        logger.warning("CDS XMatch result lacks surrogate id; returning raw service output.")
-        return matched
+        raise CrossMatchError(
+            "CDS XMatch result lacks its local-row identifier; cannot rejoin rows."
+        )
 
     # Join remote match columns back onto the full local rows via the surrogate id.
     matched = matched.with_columns(pl.col(_XMATCH_KEY).cast(local[_XMATCH_KEY].dtype))

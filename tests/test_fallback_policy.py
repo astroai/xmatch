@@ -68,6 +68,56 @@ def test_zone_strict_policy_fails_when_healpix_is_unavailable(
         )
 
 
+def test_auto_stilts_falls_back_for_unsupported_match_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xmatch import stilts
+
+    monkeypatch.setattr(stilts, "stilts_available", lambda _command: True)
+
+    def stilts_must_not_run(*args: object, **kwargs: object):
+        raise AssertionError("STILTS cannot implement this matcher")
+
+    monkeypatch.setattr(stilts, "stilts_sky_match", stilts_must_not_run)
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [0.1], "dee": [0.1]})
+    right = pl.DataFrame({"ra": [10.00005], "dec": [5.0], "rae": [0.1], "dee": [0.1]})
+    source_left = _source("left", ra_err_column="rae", dec_err_column="dee")
+    source_right = _source("right", ra_err_column="rae", dec_err_column="dee")
+
+    result = sky_match(
+        source_left,
+        source_right,
+        left.lazy(),
+        right.lazy(),
+        MatchSpec(matcher="skyellipse"),
+        engine="auto",
+    ).collect()
+
+    assert result.height == 1
+
+
+def test_stilts_strict_policy_rejects_unsupported_match_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xmatch import stilts
+
+    monkeypatch.setattr(stilts, "stilts_available", lambda _command: True)
+    left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [0.1], "dee": [0.1]})
+    right = pl.DataFrame({"ra": [10.00005], "dec": [5.0], "rae": [0.1], "dee": [0.1]})
+    source_left = _source("left", ra_err_column="rae", dec_err_column="dee")
+    source_right = _source("right", ra_err_column="rae", dec_err_column="dee")
+
+    with pytest.raises(CrossMatchError, match="cannot honor matcher='skyellipse'"):
+        sky_match(
+            source_left,
+            source_right,
+            left.lazy(),
+            right.lazy(),
+            MatchSpec(matcher="skyellipse", fallback_policy="error"),
+            engine="stilts",
+        )
+
+
 def test_torchsky_engine_adapts_nearest_match_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -122,15 +172,14 @@ def test_torchsky_skyerr_nan_sigma_is_not_accepted(
     monkeypatch.setattr("xmatch.matchers._load_torchsky_crossmatch", lambda: fake_crossmatch)
     left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [np.nan], "dee": [np.nan]})
     right = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [0.1], "dee": [0.1]})
-    left_idx, right_idx, _seps = _torchsky_match(
-        left,
-        right,
-        _source("left", ra_err_column="rae", dec_err_column="dee"),
-        _source("right", ra_err_column="rae", dec_err_column="dee"),
-        MatchSpec(matcher="skyerr", max_error=3.0),
-    )
-    assert left_idx.size == 0
-    assert right_idx.size == 0
+    with pytest.raises(CrossMatchError, match="non-finite or negative RA position error"):
+        _torchsky_match(
+            left,
+            right,
+            _source("left", ra_err_column="rae", dec_err_column="dee"),
+            _source("right", ra_err_column="rae", dec_err_column="dee"),
+            MatchSpec(matcher="skyerr", max_error=3.0),
+        )
 
 
 @pytest.mark.parametrize(

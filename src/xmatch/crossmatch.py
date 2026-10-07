@@ -31,8 +31,14 @@ import numpy as np
 import polars as pl
 
 from . import auth, io_utils
-from .astro_utils import coord_arrays, find_coord_columns, sky_extent, sky_extent_from_frame
-from .bayes import compute_nway_p_match
+from .astro_utils import (
+    coord_arrays,
+    find_coord_columns,
+    require_finite_coordinates,
+    sky_extent,
+    sky_extent_from_frame,
+)
+from .bayes import compute_nway_p_match, fit_empirical_kde
 from .discovery import (
     catalogue_entry_from_schema,
     endpoint_archive,
@@ -51,7 +57,7 @@ from .matchers import (
     id_join,
     sky_match,
 )
-from .request import MatchRequest
+from .request import MatchRequest, MatchSpec
 from .sources import ASTROMETRIC_COVARIANCE_KEYS, CatalogueSource
 from .user_config import bundled_config_path, load_merged_config
 
@@ -81,13 +87,31 @@ DEFAULT_RADIUS_ARCSEC = 1.0
 # Geometry/identity overrides the ray-union route honours per catalogue
 # (mirrors the MatchRequest.from_params side mapping; --columns-* filtering
 # is sequential-path output concern the union output does not implement).
-_SIDE_OVERRIDE_KEYS = ("ra_column", "dec_column", "id_column", "frame")
+_SIDE_OVERRIDE_KEYS = (
+    "ra_column",
+    "dec_column",
+    "id_column",
+    "frame",
+    "ra_err_column",
+    "dec_err_column",
+    "corr_column",
+    "astrometric_covariance_columns",
+    "pos_err_units",
+    "default_pos_error_arcsec",
+    "epoch",
+    "epoch_column",
+    "pm_ra_column",
+    "pm_dec_column",
+    "parallax_column",
+    "radial_velocity_column",
+    "endpoint",
+)
 
 
 def _side_overrides(params: dict[str, Any], side: int) -> dict[str, Any]:
     """Extract ``--<key>-<side>`` params as ``{key: value}`` for one catalogue."""
     suffix = f"_{side}"
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = {"endpoint": params["endpoint"]} if params.get("endpoint") else {}
     for key, value in params.items():
         if (
             key.endswith(suffix)
@@ -131,18 +155,12 @@ def _joined_column_name(
 
 def _angsep_deg(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
     """Great-circle separation in degrees."""
-    r1, d1, r2, d2 = np.radians((ra1, dec1, ra2, dec2))
-    return float(
-        np.degrees(
-            np.arccos(
-                np.clip(
-                    np.sin(d1) * np.sin(d2) + np.cos(d1) * np.cos(d2) * np.cos(r1 - r2),
-                    -1.0,
-                    1.0,
-                )
-            )
-        )
+    d1, d2 = np.radians((dec1, dec2))
+    h = (
+        np.sin(np.radians(dec1 - dec2) / 2.0) ** 2
+        + np.cos(d1) * np.cos(d2) * np.sin(np.radians(ra1 - ra2) / 2.0) ** 2
     )
+    return float(np.degrees(2.0 * np.arcsin(np.sqrt(np.clip(h, 0.0, 1.0)))))
 
 
 def _cone_filter_frame(
@@ -160,14 +178,13 @@ def _cone_filter_frame(
     partitions (with a tiny float epsilon).
     """
     dec_r = np.radians(dec_deg)
-    ra_r = np.radians(ra_deg)
     dec_expr = pl.col(dec_col).cast(pl.Float64)
     ra_expr = pl.col(ra_col).cast(pl.Float64)
-    dist = (
-        dec_expr.radians().sin() * np.sin(dec_r)
-        + dec_expr.radians().cos() * np.cos(dec_r) * (ra_expr.radians() - ra_r).cos()
-    ).arccos()
-    return frame.filter(dist <= np.radians(radius_deg) + 1e-9)
+    haversine = ((dec_expr - dec_deg).radians() / 2.0).sin().pow(
+        2
+    ) + dec_expr.radians().cos() * np.cos(dec_r) * ((ra_expr - ra_deg).radians() / 2.0).sin().pow(2)
+    dist = 2.0 * haversine.clip(0.0, 1.0).sqrt().arcsin()
+    return frame.filter(dist <= np.nextafter(np.radians(radius_deg), np.inf))
 
 
 def _try_mirrored_cone(
@@ -197,7 +214,7 @@ def _try_mirrored_cone(
     if str(root).startswith("vos:") or not Path(root).is_dir():
         return None  # vos: roots need staging; the ray-union engine owns those
     try:
-        from .hats_native import _ra_dec_columns, list_hats_pixels
+        from .hats_native import _ra_dec_columns, _read_properties, list_hats_pixels
         from .ray_union import _pixel_center_deg, _pixel_diagonal_deg
 
         hats_dir = Path(root) / rel
@@ -220,10 +237,15 @@ def _try_mirrored_cone(
         ra_col, dec_col = _ra_dec_columns(src, hats_dir)
         if ra_col not in schema or dec_col not in schema:
             return None
+        ring_ordering = _read_properties(hats_dir).get("hats_ordering", "NESTED").upper() == "RING"
         lazy_parts: list[pl.LazyFrame] = []
         for order, pix, part_path in partitions:
+            if ring_ordering:
+                from .ray_union import _cdshealpix
+
+                pix = int(_cdshealpix().from_ring(np.asarray([pix], dtype=np.uint64), order)[0])
             cen_ra, cen_dec = _pixel_center_deg(order, pix)
-            if _angsep_deg(cen_ra, cen_dec, ra, dec) > radius_deg + _pixel_diagonal_deg(order):
+            if _angsep_deg(cen_ra, cen_dec, ra, dec) > radius_deg + _pixel_diagonal_deg(order, pix):
                 continue
             if part_path.is_file():
                 lazy_parts.append(pl.scan_parquet(part_path))
@@ -876,7 +898,7 @@ class CrossMatch:
     ) -> pl.DataFrame | None:
         """Friends-of-Friends transitive closure across all catalogues.
 
-        Matches the first catalogue against every other catalogue pairwise,
+        Matches every pair of catalogues,
         then applies transitive closure: if source A matches B and B matches
         C (in different catalogues), {A, B, C} becomes a single **bundle** —
         one row in the output representing one physical object.
@@ -890,7 +912,8 @@ class CrossMatch:
         ----------
         catalogues : list of FrameInput
             2+ catalogues (paths, names, or in-memory frames).  Catalogue 1
-            acts as the spatial hub — all pairwise matches go through it.
+            selects the components retained in the output; each retained
+            component contains at least one catalogue-1 source.
         output_file : str or Path, optional
             Write result to file.
         radius_arcsec : float
@@ -932,8 +955,8 @@ class CrossMatch:
         sources: list[CatalogueSource] = []
         sources.append(self.resolve_source(req.cat1, req.side1.as_dict()))
         sources.append(self.resolve_source(req.cat2, req.side2.as_dict()))
-        for cat_input in catalogues[2:]:
-            sources.append(self.resolve_source(cat_input, {}))
+        for i, cat_input in enumerate(catalogues[2:], start=3):
+            sources.append(self.resolve_source(cat_input, _side_overrides(params, i)))
 
         _validate_coordinate_frames(
             sources, target_epoch=req.spec.target_epoch, id_join=req.id_join
@@ -947,12 +970,22 @@ class CrossMatch:
             downloaded = self._download_remote(first_src, req, prefix="1", progress_cb=progress_cb)
             first_src = first_src.with_frame(downloaded.lazy())
             sources[0] = first_src
+        elif first_src.access_method == "hats" and not first_src.is_local:
+            from . import hats_native
 
-        # Download remaining remote sources.
+            first_src = first_src.with_frame(hats_native.load_hats_all(first_src).lazy())
+            sources[0] = first_src
+
+        # Download or load remaining sources.
         for i, src in enumerate(sources):
-            if src.is_local or src.access_method == "hats":
+            if i == 0:
                 continue
-            if i <= 1:
+            if src.access_method == "hats" and not src.is_local:
+                from . import hats_native
+
+                sources[i] = src.with_frame(hats_native.load_hats_all(src).lazy())
+                continue
+            if src.is_local:
                 continue
             downloaded = self._download_remote(
                 src,
@@ -965,8 +998,57 @@ class CrossMatch:
             sources[i] = src.with_frame(downloaded.lazy())
 
         frames = [s.lazy().collect() for s in sources]
+        orig_cols = [list(f.columns) for f in frames]
+        if req.spec.target_epoch is not None:
+            from . import matchers as _matchers
 
-        # --- Pairwise matches: cat1 × each other catalogue -----------------
+            target_ep = float(req.spec.target_epoch)
+            empty_src = CatalogueSource(
+                name="_empty", is_local=True, ra_column="_ra", dec_column="_dec"
+            )
+            empty_df = pl.DataFrame(
+                {"_ra": pl.Series([], dtype=pl.Float64), "_dec": pl.Series([], dtype=pl.Float64)}
+            )
+            for i in range(n_total):
+                if req.spec.matcher == "skyerr":
+                    from .out_of_core import _align_epoch, _validate_sigma
+
+                    frames[i] = _align_epoch(
+                        frames[i].lazy(),
+                        sources[i],
+                        target_ep,
+                        propagate_covariance=True,
+                        pm_prior=req.spec.pm_prior,
+                        magnitude_column=req.spec.pm_prior_magnitude_column,
+                    ).collect()
+                    _validate_sigma(frames[i].lazy(), _matchers._EPOCH_SIGMA, sources[i])
+                else:
+                    frames[i], _ = _matchers._apply_proper_motion(
+                        frames[i],
+                        empty_df,
+                        sources[i],
+                        empty_src,
+                        target_ep,
+                        propagate_covariance=req.spec.matcher == "skyellipse",
+                        fallback_policy=req.spec.fallback_policy,
+                    )
+                    if req.spec.pm_prior:
+                        frames[i], _, sources[i], _ = _matchers._apply_pm_drift_prior(
+                            sources[i],
+                            empty_src,
+                            frames[i],
+                            empty_df,
+                            target_ep,
+                            magnitude_column=req.spec.pm_prior_magnitude_column,
+                        )
+
+        for frame, source in zip(frames, sources, strict=True):
+            require_finite_coordinates(
+                frame[source.ra_column or "ra"].to_numpy(),
+                frame[source.dec_column or "dec"].to_numpy(),
+                label=f"catalogue '{source.name}'",
+            )
+        # --- All cross-catalogue edges -----------------------------------
         # Build a union-find structure across all rows.
         # Node IDs: [0..N0) for cat0, [N0..N0+N1) for cat1, etc.
         from scipy.spatial import cKDTree
@@ -990,29 +1072,62 @@ class CrossMatch:
             if ra != rb:
                 parent[max(ra, rb)] = min(ra, rb)
 
-        # Match cat1 (index 0) against each other catalogue.
+        # All cross-catalogue edges are needed for genuine transitive closure.
         p_ra_col = sources[0].ra_column or "ra"
         p_dec_col = sources[0].dec_column or "dec"
-        p_ra = frames[0][p_ra_col].to_numpy().astype(float)
-        p_dec = frames[0][p_dec_col].to_numpy().astype(float)
-        p_xyz = _radec_to_xyz(p_ra, p_dec)
         chord_max = _arcsec_to_chord(radius_arcsec)
 
+        engine_choice = (req.engine or "auto").lower()
         n_edges = 0
-        for j in range(1, n_total):
-            s_ra = frames[j][sources[j].ra_column or "ra"].to_numpy().astype(float)
-            s_dec = frames[j][sources[j].dec_column or "dec"].to_numpy().astype(float)
-            s_xyz = _radec_to_xyz(s_ra, s_dec)
-            tree = cKDTree(s_xyz)
-            idx_lists = tree.query_ball_point(p_xyz, r=chord_max, workers=-1)
-            offset_j = offsets[j]
-            for pi, neighbors in enumerate(idx_lists):
-                if not neighbors:
-                    continue
-                node_p = offsets[0] + pi
-                for nb in neighbors:
-                    union(node_p, offset_j + int(nb))
-                    n_edges += 1
+        for i in range(n_total - 1):
+            for j in range(i + 1, n_total):
+                offset_j = offsets[j]
+                if engine_choice == "ray":
+                    from .ray_engine import ray_zone_match
+
+                    l_idx, r_idx, _ = ray_zone_match(
+                        frames[i],
+                        frames[j],
+                        sources[i],
+                        sources[j],
+                        replace(req.spec, find="all"),
+                    )
+                    for pi, nb in zip(l_idx.tolist(), r_idx.tolist(), strict=True):
+                        union(offsets[i] + int(pi), offset_j + int(nb))
+                        n_edges += 1
+                elif req.spec.matcher != "sky":
+                    from . import matchers as _matchers
+
+                    l_idx, r_idx, _ = _matchers._scipy_match(
+                        frames[i],
+                        frames[j],
+                        sources[i],
+                        sources[j],
+                        replace(req.spec, find="all"),
+                    )
+                    for pi, nb in zip(l_idx.tolist(), r_idx.tolist(), strict=True):
+                        union(offsets[i] + int(pi), offset_j + int(nb))
+                        n_edges += 1
+                else:
+                    p_ra = frames[i][sources[i].ra_column or "ra"].to_numpy().astype(float)
+                    p_dec = frames[i][sources[i].dec_column or "dec"].to_numpy().astype(float)
+                    p_xyz = _radec_to_xyz(p_ra, p_dec)
+                    s_ra = frames[j][sources[j].ra_column or "ra"].to_numpy().astype(float)
+                    s_dec = frames[j][sources[j].dec_column or "dec"].to_numpy().astype(float)
+                    if len(s_ra) == 0 or len(p_ra) == 0:
+                        continue
+                    s_xyz = _radec_to_xyz(s_ra, s_dec)
+                    tree = cKDTree(s_xyz)
+                    idx_lists = tree.query_ball_point(p_xyz, r=chord_max, workers=-1)
+                    for pi, neighbors in enumerate(idx_lists):
+                        if not neighbors:
+                            continue
+                        node_p = offsets[i] + pi
+                        for nb in neighbors:
+                            union(node_p, offset_j + int(nb))
+                            n_edges += 1
+
+        frames = [f.select(cols) for f, cols in zip(frames, orig_cols, strict=True)]
 
         logger.info(
             "FoF: %d edges across %d catalogues (%d total nodes).",
@@ -1157,17 +1272,59 @@ class CrossMatch:
         """
         if output_file is None:
             raise CrossMatchError("engine='ray-union' requires an output file (-o/--output .hats).")
+        unsupported = [
+            key
+            for key in (
+                "id_join",
+                "extra_distance_cols",
+                "prior_columns",
+                "probabilistic",
+                "filter_expr",
+                "columns_1",
+                "columns_2",
+                "memory_budget_bytes",
+                "ra",
+                "dec",
+                "radius_deg",
+                "region",
+            )
+            if params.get(key) is not None
+            and params.get(key) is not False
+            and params.get(key) != []
+            and params.get(key) != {}
+        ]
+        if unsupported:
+            raise CrossMatchError(
+                "engine='ray-union' does not support "
+                + ", ".join(unsupported)
+                + "; use a pairwise or sequential engine for these options."
+            )
         engine_choice = (params.get("engine") or "auto").lower()
         matcher = params.get("matcher") or "sky"
-        if matcher != "sky":
+        if matcher not in ("sky", "skyerr", "skyellipse"):
             raise CrossMatchError(
-                f"engine='ray-union' supports matcher='sky' only, got matcher='{matcher}'."
+                f"engine='ray-union' supports matcher in ('sky', 'skyerr', 'skyellipse'), got matcher='{matcher}'."
             )
-        if params.get("target_epoch") is not None or params.get("pm_prior"):
+        if params.get("pm_prior") and params.get("target_epoch") is None:
             raise CrossMatchError(
-                "engine='ray-union' does not support motion alignment or missing-motion priors; "
-                "align inputs explicitly or use the local candidate-release pipeline."
+                "engine='ray-union' does not support missing-motion priors without target_epoch; "
+                "set target_epoch or use the local candidate-release pipeline."
             )
+        if params.get("target_epoch") is not None:
+            pre_sources = [
+                self.resolve_source(cat, _side_overrides(params, i))
+                for i, cat in enumerate(catalogues, start=1)
+            ]
+            has_motion = any(
+                (s.epoch is not None or s.epoch_column is not None)
+                and ((s.pm_ra_column and s.pm_dec_column) or bool(params.get("pm_prior")))
+                for s in pre_sources
+            )
+            if not has_motion:
+                raise CrossMatchError(
+                    "engine='ray-union' motion alignment requires source epoch and "
+                    "proper-motion metadata (or pm_prior with epoch)."
+                )
         # engine='ray-union' *is* the union engine, so a default join type is
         # treated as the full outer join (only an explicit non-outer choice is
         # an error); engine='ray' needs --union/--join 1or2 to mean "union".
@@ -1285,9 +1442,20 @@ class CrossMatch:
                 # path — with no overrides.
                 sources: list[CatalogueSource] = []
                 for i, cat in enumerate(catalogues, start=1):
-                    overrides = _side_overrides(params, i) if i <= 2 else {}
+                    overrides = _side_overrides(params, i)
                     sources.append(self.resolve_source(cat, overrides))
                 _validate_coordinate_frames(sources, target_epoch=params.get("target_epoch"))
+                if params.get("target_epoch") is not None:
+                    has_motion = any(
+                        (s.epoch is not None or s.epoch_column is not None)
+                        and ((s.pm_ra_column and s.pm_dec_column) or bool(params.get("pm_prior")))
+                        for s in sources
+                    )
+                    if not has_motion:
+                        raise CrossMatchError(
+                            "engine='ray-union' motion alignment requires source epoch and "
+                            "proper-motion metadata (or pm_prior with epoch)."
+                        )
                 if not params.get("no_sync"):
                     sources = [
                         ensure_mirrored(
@@ -1335,6 +1503,12 @@ class CrossMatch:
                     max_tuples=params.get("max_tuples"),
                     cache_root=cache_root,
                     progress_cb=progress,
+                    matcher=matcher,
+                    max_error=float(params.get("max_error", 1.0)),
+                    target_epoch=params.get("target_epoch"),
+                    pm_prior=bool(params.get("pm_prior", False)),
+                    pm_prior_magnitude_column=params.get("pm_prior_magnitude_column"),
+                    fallback_policy=str(params.get("fallback_policy", "warn")),
                 )
                 self.last_ray_union_plan = ray_union.last_plan()  # for tests / doctor
                 if vos_out:
@@ -1386,8 +1560,16 @@ class CrossMatch:
                 **params,
             )
             return None
-        if engine_choice == "ray" and (
-            union_match or (params.get("join_type") or "1and2") in ("1or2", "all")
+        if (
+            engine_choice == "ray"
+            and (union_match or (params.get("join_type") or "1and2") in ("1or2", "all"))
+            and output_file is not None
+            and (str(output_file).endswith(".hats") or str(output_file).startswith("vos:"))
+            and (params.get("matcher") or "sky") in ("sky", "skyerr", "skyellipse")
+            and not params.get("extra_distance_cols")
+            and not params.get("prior_columns")
+            and not params.get("probabilistic")
+            and not any(isinstance(c, (pl.DataFrame, pl.LazyFrame)) for c in catalogues)
         ):
             self._ray_union_multi(
                 catalogues,
@@ -1438,8 +1620,8 @@ class CrossMatch:
         sources: list[CatalogueSource] = []
         sources.append(self.resolve_source(req.cat1, req.side1.as_dict()))
         sources.append(self.resolve_source(req.cat2, req.side2.as_dict()))
-        for cat_input in catalogues[2:]:
-            sources.append(self.resolve_source(cat_input, {}))
+        for i, cat_input in enumerate(catalogues[2:], start=3):
+            sources.append(self.resolve_source(cat_input, _side_overrides(params, i)))
 
         _validate_coordinate_frames(
             sources, target_epoch=req.spec.target_epoch, id_join=req.id_join
@@ -1654,7 +1836,8 @@ class CrossMatch:
             Maximum Cartesian-product tuples per primary source before
             truncating with a warning (default 10 000).
         chunk_size : int
-            Process tuples in batches of this size to bound memory.
+            Score tuples in batches of this size. Sources, candidate tuples
+            and result batches are materialized in memory.
         hats_threshold : int
             Max rows per HEALPix pixel for .hats output (default 100 000).
         **params
@@ -1673,9 +1856,30 @@ class CrossMatch:
                 "nway_match requires at least 2 catalogues, got %d" % len(catalogues)
             )
 
+        if not np.isfinite(radius_arcsec) or radius_arcsec <= 0:
+            raise CrossMatchError("nway_match radius_arcsec must be positive and finite")
+        for name, value, minimum in (
+            ("chunk_size", chunk_size, 1),
+            ("max_tuples_per_source", max_tuples_per_source, 0),
+        ):
+            if (
+                isinstance(value, bool)
+                or not np.isfinite(value)
+                or int(value) != value
+                or value < minimum
+            ):
+                raise CrossMatchError(f"{name} must be an integer >= {minimum}")
+
         # Resolve all sources and ensure they are local (download if remote).
-        sources = [self.resolve_source(cat_input, {}) for cat_input in catalogues]
-        _validate_coordinate_frames(sources)
+        sources = [
+            self.resolve_source(cat_input, _side_overrides(params, i))
+            for i, cat_input in enumerate(catalogues, start=1)
+        ]
+        target_epoch = params.get("target_epoch")
+        pm_prior = bool(params.get("pm_prior", False))
+        pm_prior_magnitude_column = params.get("pm_prior_magnitude_column")
+        fallback_policy = str(params.get("fallback_policy", "warn"))
+        _validate_coordinate_frames(sources, target_epoch=target_epoch)
         for i, src in enumerate(sources):
             if not src.is_local:
                 if src.access_method in ("tap", "cds_xmatch"):
@@ -1686,11 +1890,18 @@ class CrossMatch:
                         dec=params.get("dec"),
                         radius_deg=params.get("radius_deg"),
                         radius_arcsec=radius_arcsec,
+                        target_epoch=target_epoch,
+                        probabilistic=True,
+                        prior_columns=prior_columns,
                     )
                     downloaded = self._download_remote(
                         src, req, prefix=str(i + 1), progress_cb=progress_cb
                     )
                     src = src.with_frame(downloaded.lazy())
+                elif src.access_method == "hats":
+                    from . import hats_native
+
+                    src = src.with_frame(hats_native.load_hats_all(src).lazy())
                 else:
                     raise CrossMatchError(
                         f"Catalogue {i + 1} ('{src.name}') is not local; "
@@ -1699,40 +1910,105 @@ class CrossMatch:
             sources[i] = src
 
         frames = [s.lazy().collect() for s in sources]
+        orig_cols = [list(f.columns) for f in frames]
         n_cats = len(sources)
+
+        if target_epoch is not None:
+            from . import matchers as _matchers
+
+            target_ep = float(target_epoch)
+            empty_src = CatalogueSource(
+                name="_empty", is_local=True, ra_column="_ra", dec_column="_dec"
+            )
+            empty_df = pl.DataFrame(
+                {"_ra": pl.Series([], dtype=pl.Float64), "_dec": pl.Series([], dtype=pl.Float64)}
+            )
+            for i in range(n_cats):
+                frames[i], _ = _matchers._apply_proper_motion(
+                    frames[i],
+                    empty_df,
+                    sources[i],
+                    empty_src,
+                    target_ep,
+                    propagate_covariance=True,
+                    fallback_policy=fallback_policy,
+                )
+                if pm_prior:
+                    frames[i], _, sources[i], _ = _matchers._apply_pm_drift_prior(
+                        sources[i],
+                        empty_src,
+                        frames[i],
+                        empty_df,
+                        target_ep,
+                        magnitude_column=pm_prior_magnitude_column,
+                    )
+
+        for frame, source in zip(frames, sources, strict=True):
+            require_finite_coordinates(
+                frame[source.ra_column or "ra"].to_numpy(),
+                frame[source.dec_column or "dec"].to_numpy(),
+                label=f"catalogue '{source.name}'",
+            )
+        prior_kdes = []
+        for column in prior_columns or []:
+            if any(column not in frame.columns for frame in frames):
+                raise CrossMatchError(
+                    f"N-way prior column '{column}' must exist in every catalogue"
+                )
+            values = np.concatenate([frame[column].cast(pl.Float64).to_numpy() for frame in frames])
+            prior_kdes.append(fit_empirical_kde(values, np.empty(0)))
 
         # Collect pairwise spatial match indices (primary × each other cat).
         p_ra = sources[0].ra_column or "ra"
         p_dec = sources[0].dec_column or "dec"
-        all_pairs: list = []
+        engine_choice = (params.get("engine") or "auto").lower()
+        all_pairs: list[tuple[np.ndarray, np.ndarray]] = []
 
         for j in range(1, n_cats):
-            from scipy.spatial import cKDTree
+            if engine_choice == "ray":
+                from .ray_engine import ray_zone_match
 
-            l_ra_np = frames[0][p_ra].to_numpy()
-            l_dec_np = frames[0][p_dec].to_numpy()
-            r_ra_np = frames[j][sources[j].ra_column or "ra"].to_numpy()
-            r_dec_np = frames[j][sources[j].dec_column or "dec"].to_numpy()
-
-            l_xyz = _radec_to_xyz(l_ra_np, l_dec_np)
-            r_xyz = _radec_to_xyz(r_ra_np, r_dec_np)
-            chord_max = _arcsec_to_chord(radius_arcsec)
-            tree = cKDTree(r_xyz)
-            idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
-
-            p_idx_parts, o_idx_parts = [], []
-            for pi, neighbors in enumerate(idx_lists):
-                if neighbors:
-                    p_idx_parts.append(np.full(len(neighbors), pi, dtype=int))
-                    o_idx_parts.append(np.asarray(neighbors, dtype=int))
-            if p_idx_parts:
-                all_pairs.append((np.concatenate(p_idx_parts), np.concatenate(o_idx_parts)))
+                p_idx_j, o_idx_j, _ = ray_zone_match(
+                    frames[0],
+                    frames[j],
+                    sources[0],
+                    sources[j],
+                    MatchSpec(radius_arcsec=radius_arcsec, find="all"),
+                )
+                all_pairs.append((p_idx_j.astype(int), o_idx_j.astype(int)))
             else:
-                all_pairs.append((np.array([], int), np.array([], int)))
+                from scipy.spatial import cKDTree
+
+                l_ra_np = frames[0][p_ra].to_numpy()
+                l_dec_np = frames[0][p_dec].to_numpy()
+                r_ra_np = frames[j][sources[j].ra_column or "ra"].to_numpy()
+                r_dec_np = frames[j][sources[j].dec_column or "dec"].to_numpy()
+
+                if len(l_ra_np) == 0 or len(r_ra_np) == 0:
+                    all_pairs.append((np.array([], int), np.array([], int)))
+                    continue
+
+                l_xyz = _radec_to_xyz(l_ra_np, l_dec_np)
+                r_xyz = _radec_to_xyz(r_ra_np, r_dec_np)
+                chord_max = _arcsec_to_chord(radius_arcsec)
+                tree = cKDTree(r_xyz)
+                idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
+
+                p_idx_parts, o_idx_parts = [], []
+                for pi, neighbors in enumerate(idx_lists):
+                    if neighbors:
+                        p_idx_parts.append(np.full(len(neighbors), pi, dtype=int))
+                        o_idx_parts.append(np.asarray(neighbors, dtype=int))
+                if p_idx_parts:
+                    all_pairs.append((np.concatenate(p_idx_parts), np.concatenate(o_idx_parts)))
+                else:
+                    all_pairs.append((np.array([], int), np.array([], int)))
 
         # If any non-primary catalogue has no matches, return empty.
         if any(len(p[0]) == 0 for p in all_pairs):
-            empty = _build_empty_nway_result(frames, n_cats)
+            empty = _build_empty_nway_result(
+                [f.select(cols) for f, cols in zip(frames, orig_cols, strict=True)], n_cats
+            )
             if output_file:
                 io_utils.write_frame(
                     empty,
@@ -1744,34 +2020,53 @@ class CrossMatch:
                 return None
             return empty
 
-        # Pre-compute sigma arrays for all catalogues.
+        # Pre-compute sigma arrays for all catalogues before stripping temporary columns.
         cat_ra_names = [sources[i].ra_column or "ra" for i in range(n_cats)]
         cat_dec_names = [sources[i].dec_column or "dec" for i in range(n_cats)]
         sigmas_all = []
         for i, src in enumerate(sources):
-            sigma = _pos_sigma_arcsec(frames[i], src)
+            from . import matchers as _matchers
+
+            if _matchers._PROPAGATED_COV_EE in frames[i].columns:
+                covariance = _matchers._pos_covariance(frames[i], src)
+                sigma = np.sqrt(covariance[0] + covariance[1])
+            else:
+                sigma = _pos_sigma_arcsec(frames[i], src)
             if sigma is None:
-                sigma = np.full(frames[i].height, 0.5, dtype=float)
+                raise CrossMatchError(
+                    f"N-way catalogue '{src.name}' needs declared positional errors or an explicit default_pos_error_arcsec"
+                )
+            else:
+                # Gaussian weights need per-axis sigma, not radial RMS.
+                sigma = np.maximum(sigma / np.sqrt(2.0), 1e-6)
             sigmas_all.append(sigma)
+        frames = [f.select(cols) for f, cols in zip(frames, orig_cols, strict=True)]
+
+        # Pre-group candidate indices by primary index in O(N_pairs) time.
+        pairs_by_pi: list[dict[int, np.ndarray]] = []
+        for p_idx, o_idx in all_pairs:
+            order = np.argsort(p_idx, kind="stable")
+            p_sorted = p_idx[order]
+            o_sorted = o_idx[order]
+            uniq, first_pos = np.unique(p_sorted, return_index=True)
+            splits = np.split(o_sorted, first_pos[1:])
+            pairs_by_pi.append({int(k): v for k, v in zip(uniq, splits, strict=True)})
 
         # Chunked cartesian-product tuple iteration.
         n_primary = frames[0].height
-        result_chunks: list = []
+        chunk_batches: list[list] = []
         chunk_tuples: list = []
         total_tuples = 0
         truncated_sources = 0
 
         for pi in range(n_primary):
-            matches_per_cat = []
-            for cat_j in range(len(all_pairs)):
-                p_idx, o_idx = all_pairs[cat_j]
-                mask = p_idx == pi
-                matches_per_cat.append(o_idx[mask])
-            if any(len(m) == 0 for m in matches_per_cat):
+            matches_per_cat = [by_pi.get(pi) for by_pi in pairs_by_pi]
+            if any(m is None or len(m) == 0 for m in matches_per_cat):
                 continue
 
             prod_size = 1
             for m in matches_per_cat:
+                assert m is not None
                 prod_size *= len(m)
             if prod_size == 0:
                 continue
@@ -1786,61 +2081,28 @@ class CrossMatch:
                         max_tuples_per_source,
                     )
                 cap = max_tuples_per_source
-                for count, combo in enumerate(cartesian_product(*matches_per_cat)):
+                for count, combo in enumerate(cartesian_product(*matches_per_cat)):  # type: ignore[arg-type]
                     if count >= cap:
                         break
                     indices = [pi] + list(combo)
                     chunk_tuples.append(indices)
                     total_tuples += 1
                     if len(chunk_tuples) >= chunk_size:
-                        result_chunks.append(
-                            _process_nway_chunk(
-                                chunk_tuples,
-                                n_cats,
-                                frames,
-                                cat_ra_names,
-                                cat_dec_names,
-                                sigmas_all,
-                                radius_arcsec,
-                                prior_columns,
-                            )
-                        )
+                        chunk_batches.append(chunk_tuples)
                         chunk_tuples = []
             else:
-                for combo in cartesian_product(*matches_per_cat):
+                for combo in cartesian_product(*matches_per_cat):  # type: ignore[arg-type]
                     indices = [pi] + list(combo)
                     chunk_tuples.append(indices)
                     total_tuples += 1
                     if len(chunk_tuples) >= chunk_size:
-                        result_chunks.append(
-                            _process_nway_chunk(
-                                chunk_tuples,
-                                n_cats,
-                                frames,
-                                cat_ra_names,
-                                cat_dec_names,
-                                sigmas_all,
-                                radius_arcsec,
-                                prior_columns,
-                            )
-                        )
+                        chunk_batches.append(chunk_tuples)
                         chunk_tuples = []
 
         if chunk_tuples:
-            result_chunks.append(
-                _process_nway_chunk(
-                    chunk_tuples,
-                    n_cats,
-                    frames,
-                    cat_ra_names,
-                    cat_dec_names,
-                    sigmas_all,
-                    radius_arcsec,
-                    prior_columns,
-                )
-            )
+            chunk_batches.append(chunk_tuples)
 
-        if not result_chunks:
+        if not chunk_batches:
             empty = _build_empty_nway_result(frames, n_cats)
             if output_file:
                 io_utils.write_frame(
@@ -1852,6 +2114,85 @@ class CrossMatch:
                 )
                 return None
             return empty
+
+        if engine_choice == "ray":
+            try:
+                import ray  # noqa: PLC0415
+
+                if not ray.is_initialized():
+                    ray.init(ignore_reinit_error=True, log_to_driver=False)
+
+                @ray.remote
+                def _ray_nway_chunk(
+                    batch: list,
+                    n_c: int,
+                    frames_val: list,
+                    ra_names: list,
+                    dec_names: list,
+                    sigmas_val: list,
+                    rad_arcsec: float,
+                    priors: list | None,
+                    population_kdes: list,
+                ) -> pl.DataFrame:
+                    return _process_nway_chunk(
+                        batch,
+                        n_c,
+                        frames_val,
+                        ra_names,
+                        dec_names,
+                        sigmas_val,
+                        rad_arcsec,
+                        priors,
+                        population_kdes,
+                    )
+
+                frames_ref = ray.put(frames)
+                sigmas_ref = ray.put(sigmas_all)
+                futures = [
+                    _ray_nway_chunk.remote(
+                        batch,
+                        n_cats,
+                        frames_ref,
+                        cat_ra_names,
+                        cat_dec_names,
+                        sigmas_ref,
+                        radius_arcsec,
+                        prior_columns,
+                        prior_kdes,
+                    )
+                    for batch in chunk_batches
+                ]
+                result_chunks = list(ray.get(futures))
+            except ImportError:
+                result_chunks = [
+                    _process_nway_chunk(
+                        batch,
+                        n_cats,
+                        frames,
+                        cat_ra_names,
+                        cat_dec_names,
+                        sigmas_all,
+                        radius_arcsec,
+                        prior_columns,
+                        prior_kdes,
+                    )
+                    for batch in chunk_batches
+                ]
+        else:
+            result_chunks = [
+                _process_nway_chunk(
+                    batch,
+                    n_cats,
+                    frames,
+                    cat_ra_names,
+                    cat_dec_names,
+                    sigmas_all,
+                    radius_arcsec,
+                    prior_columns,
+                    prior_kdes,
+                )
+                for batch in chunk_batches
+            ]
 
         if truncated_sources:
             logger.info(
@@ -1868,6 +2209,7 @@ class CrossMatch:
             n_primary,
         )
         result = pl.concat(result_chunks, how="vertical")
+
         if output_file:
             io_utils.write_frame(
                 result,
@@ -2018,6 +2360,19 @@ class CrossMatch:
             remote.access_method == "cds_xmatch"
             and not req.id_join
             and req.spec.target_epoch is None
+            and not req.probabilistic
+            and not req.spec.prior_columns
+            and req.spec.matcher == "sky"
+            and req.spec.find == "all"
+            and req.spec.join_type == "1and2"
+            and not req.spec.extra_distance_cols
+            and not req.spec.filter_expr
+            and not req.side1.columns
+            and not req.side2.columns
+            and req.engine in (None, "auto")
+            and req.ra is None
+            and req.dec is None
+            and req.radius_deg is None
         ):
             from .remote_cds import cds_xmatch_local_remote
 
@@ -2051,6 +2406,19 @@ class CrossMatch:
             and src1.tap_url == src2.tap_url
             and not req.id_join
             and req.spec.target_epoch is None
+            and not req.probabilistic
+            and not req.spec.prior_columns
+            and req.spec.matcher == "sky"
+            and req.spec.find == "all"
+            and req.spec.join_type == "1and2"
+            and not req.spec.extra_distance_cols
+            and not req.spec.filter_expr
+            and not req.side1.columns
+            and not req.side2.columns
+            and req.engine in (None, "auto")
+            and req.ra is None
+            and req.dec is None
+            and req.radius_deg is None
         ):
             from .remote_tap import tap_self_join
 
@@ -2076,6 +2444,12 @@ class CrossMatch:
         ra = req.ra
         dec = req.dec
         radius_deg = req.radius_deg
+        if (
+            req.spec.matcher in {"skyerr", "skyellipse"} or req.spec.target_epoch is not None
+        ) and any(value is None for value in (ra, dec, radius_deg)):
+            raise CrossMatchError(
+                "Remote uncertainty/epoch matching needs an explicit region (ra, dec, radius_deg); unknown remote errors or motion cannot define a safe automatic halo"
+            )
         if region_from is not None and (ra is None or dec is None):
             # Use the polars-native aggregate version when given a LazyFrame so
             # the local table's RA/Dec columns never need to materialise.
@@ -2090,24 +2464,39 @@ class CrossMatch:
                 extent = None
             if extent:
                 ra, dec = extent["ra_center_deg"], extent["dec_center_deg"]
-                radius_deg = extent["radius_deg"] + req.spec.radius_arcsec / 3600.0
+                radius_deg = min(180.0, extent["radius_deg"] + req.spec.radius_arcsec / 3600.0)
         if ra is None or dec is None or radius_deg is None:
             raise CrossMatchError(
                 f"Downloading remote catalogue '{src.name}' needs a region "
                 f"(provide ra/dec and radius_deg)."
             )
 
+        require_finite_coordinates([ra], [dec], label="remote region")
+        if not np.isfinite(radius_deg) or not 0.0 < radius_deg <= 180.0:
+            raise CrossMatchError("remote region radius_deg must be finite and in (0, 180]")
+
         columns = (
             req.side1.columns if prefix == "1" else req.side2.columns if prefix == "2" else None
         )
-        required: list[str | None] = []
-        if req.spec.matcher in {"skyerr", "skyellipse"}:
+        # A projection must retain geometry and all inputs needed by the scorer.
+        # With no requested/default projection, SELECT * already includes them.
+        projection = columns if columns is not None else src.default_columns
+        required: list[str | None] = [src.ra_column, src.dec_column]
+        if req.id_join:
+            required.append(src.id_column)
+        if (
+            req.spec.matcher in {"skyerr", "skyellipse"}
+            or req.probabilistic
+            or req.spec.prior_columns
+        ):
             required.extend((src.ra_err_column, src.dec_err_column, src.corr_column))
+            if src.astrometric_covariance_columns:
+                required.extend(src.astrometric_covariance_columns.values())
+        required.extend(req.spec.prior_columns)
+        required.extend(req.spec.extra_distance_cols)
         if req.spec.target_epoch is not None:
             required.extend(
                 (
-                    src.ra_column,
-                    src.dec_column,
                     src.pm_ra_column,
                     src.pm_dec_column,
                     src.epoch_column,
@@ -2115,12 +2504,8 @@ class CrossMatch:
                     src.radial_velocity_column,
                 )
             )
-            if req.spec.matcher == "skyellipse" and src.astrometric_covariance_columns:
-                required.extend(src.astrometric_covariance_columns.values())
-        if required:
-            columns = list(
-                dict.fromkeys([*(columns or src.default_columns or []), *filter(None, required)])
-            )
+        if projection is not None:
+            columns = list(dict.fromkeys([*projection, *filter(None, required)]))
         mirrored = _try_mirrored_cone(src, columns, ra, dec, radius_deg)
         if mirrored is not None:
             return mirrored
@@ -2155,14 +2540,16 @@ class CrossMatch:
 # nway_match helpers (module-level for pickling safety)
 # --------------------------------------------------------------------------- #
 def _build_empty_nway_result(frames: list, n_cats: int) -> pl.DataFrame:
-    """Return an empty result frame with the correct schema for nway_match."""
-    cols = list(frames[0].columns)
+    """Return an empty N-way frame while retaining each measurement's dtype."""
+    schema = dict(frames[0].schema)
     for j in range(1, n_cats):
-        suffix = f"_{j + 1}"
-        for c in frames[j].columns:
-            cols.append(c + suffix if c in cols else c)
-    cols.append("p_match")
-    return pl.DataFrame(schema={c: pl.Float64 for c in cols}).clear()
+        for column, dtype in frames[j].schema.items():
+            name = column
+            while name in schema:
+                name += f"_{j + 1}"
+            schema[name] = dtype
+    schema[PMATCH_COLUMN] = pl.Float64
+    return pl.DataFrame(schema=schema)
 
 
 def _process_nway_chunk(
@@ -2174,6 +2561,7 @@ def _process_nway_chunk(
     sigmas_all: list,
     radius_arcsec: float,
     prior_columns: list | None,
+    prior_kdes: list | None = None,
 ) -> pl.DataFrame:
     """Process one chunk of N-way tuples: compute p_match and build frame."""
     # Extract per-catalogue index arrays from the chunk.
@@ -2207,6 +2595,7 @@ def _process_nway_chunk(
             sigmas,
             radius_arcsec,
             prior_columns=prior_data,
+            prior_kdes=prior_kdes,
         )
     else:
         p_match = compute_nway_p_match(ras, decs, sigmas, radius_arcsec)
@@ -2220,11 +2609,20 @@ def _process_nway_chunk(
         suffix = f"_{i + 1}" if i > 0 else ""
         part = f.gather(indices_per_cat[i])
         if suffix:
-            overlap = seen_columns & set(part.columns)
-            part = part.rename({c: f"{c}{suffix}" for c in overlap})
+            names = set(seen_columns)
+            renames = {}
+            for column in part.columns:
+                name = column
+                while name in names:
+                    name += suffix
+                names.add(name)
+                renames[column] = name
+            part = part.rename(renames)
         seen_columns.update(part.columns)
         result_parts.append(part)
 
-    result = pl.concat(result_parts, how="horizontal", strict=True)
+    result = result_parts[0].hstack(
+        [column for frame in result_parts[1:] for column in frame.get_columns()]
+    )
     result = result.with_columns(pl.Series(PMATCH_COLUMN, p_match))
     return result

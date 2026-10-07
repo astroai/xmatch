@@ -1,0 +1,104 @@
+name: Linux release gate
+
+on:
+  # ponytail: PR events cover feature branches; push verifies merged main.
+  push:
+    branches: [main]
+    tags: [v*]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  linux:
+    name: Ubuntu 24.04 / Python 3.13
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the locked Pixi environment
+        uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
+        with:
+          pixi-version: v0.81.0
+          run-install: true
+          locked: true
+          cache: true
+          cache-write: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+
+      - name: Run lint, type checks, and offline tests
+        run: pixi run ci-local
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.20"
+
+      - name: Install Python 3.13 for package builds
+        run: uv python install 3.13
+
+      - name: Build wheel and source distribution
+        run: uv build --python 3.13 --out-dir dist
+
+      - name: Verify release archive contents and metadata
+        run: pixi run --as-is python scripts/check_release.py --dist dist
+
+      - name: Install wheel without dependencies
+        run: |
+          mkdir -p "${RUNNER_TEMP}/xmatch-wheel"
+          uv pip install --python .pixi/envs/default/bin/python --target "${RUNNER_TEMP}/xmatch-wheel" --no-deps dist/*.whl
+
+      - name: Smoke-test the installed wheel and console script
+        env:
+          PYTHONPATH: ${{ runner.temp }}/xmatch-wheel
+        run: |
+          pixi run --as-is python -c 'import os; from pathlib import Path; import xmatch; root = Path(os.environ["PYTHONPATH"]).resolve(); path = Path(xmatch.__file__).resolve(); assert path.is_relative_to(root), (path, root); print(path)'
+          "${RUNNER_TEMP}/xmatch-wheel/bin/xmatch" --help
+      - name: Prepare verified release assets
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          pixi run --as-is python scripts/check_release.py --dist dist --tag "$GITHUB_REF_NAME"
+          cp "docs/release-${GITHUB_REF_NAME#v}.md" dist/RELEASE_NOTES.md
+          cd dist
+          sha256sum *.whl *.tar.gz > SHA256SUMS
+
+      - name: Preserve verified release assets
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dist
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      # ponytail: Attach the artifacts already tested by linux instead of rebuilding them.
+      - name: Publish verified release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --name release-dist --dir dist
+          cd dist
+          sha256sum --check SHA256SUMS
+          test "$(gh api "repos/$GH_REPO/commits/$GITHUB_REF_NAME" --jq .sha)" = "$GITHUB_SHA"
+          gh release create "$GITHUB_REF_NAME" *.whl *.tar.gz SHA256SUMS \
+            --verify-tag --title "xmatch $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md

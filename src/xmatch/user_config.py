@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -169,6 +171,22 @@ def append_catalogue_to_user_config(
             raise ConfigError(f"'catalogue_aliases' in {dest} must be a mapping.")
         aliases[alias.lower()] = name
 
-    with open(dest, "w") as fh:
-        yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=dest.parent,
+            prefix=f".{dest.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as fh:
+            temporary = Path(fh.name)
+            yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, dest)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return dest

@@ -403,12 +403,16 @@ def test_far_partner_rows_survive_as_singles(tmp_path: Path) -> None:
     assert (df["_src_cats"] == "2").sum() == 12
 
 
-def test_cone_pixels_expands_parent_pixels_to_all_children() -> None:
+def test_cone_ranges_cover_parent_pixels_and_all_children() -> None:
     """A cone_search parent (fully-inside subtree) must yield EVERY child at
     the target depth, not just the first one (regression: sibling cells were
     dropped, hiding partner partitions inside the cone)."""
     order, pix, radius, depth = 11, 7, 3.0, 6
-    got = sorted(ray_union._cone_pixels(order, pix, radius, depth))
+    got = sorted(
+        (depth, p)
+        for lo, hi in ray_union._cone_ranges(order, pix, radius, depth)
+        for p in range(lo, hi)
+    )
 
     import cdshealpix  # noqa: PLC0415
     from astropy import units as u  # noqa: PLC0415
@@ -591,7 +595,7 @@ def test_max_tuples_cap_full_product_under_cap_and_sep_cut() -> None:
         cat_labels=[2, 3],
     )
     assert len(seps) == 10, seps
-    expected = 0.00002 * np.arange(1, 11) * 3600.0  # 0.072" .. 0.72"
+    expected = 0.00002 * np.arange(10) * 3600.0  # includes the exact zero-distance match
     assert np.allclose(np.sort(seps), expected, atol=0.01), (np.sort(seps), expected)
 
 
@@ -844,9 +848,9 @@ def test_ray_init_falls_back_local_on_connection_error(tmp_path: Path, monkeypat
     calls: list[dict] = []
     real_init = ray.init
 
-    def fake_init(**kw) -> None:
+    def fake_init(**kw) -> object:
         calls.append(kw)
-        if kw.get("address"):
+        if kw.get("address") == "auto":
             raise ConnectionError("no running cluster")
         return real_init(**kw)
 
@@ -867,8 +871,9 @@ def test_ray_init_falls_back_local_on_connection_error(tmp_path: Path, monkeypat
             max_tuples=100_000,
         )
         assert calls[0]["address"] == "auto"
-        assert calls[1]["address"] is None
-        assert _read_output(out).height == 1  # the pair matched
+        assert [call["address"] for call in calls] == ["auto", "local"]
+        result = _read_output(out)
+        assert result.select("id", "id_2").rows() == [("a0", "b0")]
     finally:
         ray.shutdown()
 
@@ -985,3 +990,141 @@ def test_union_output_dir_convention_for_deep_pixels(tmp_path: Path) -> None:
     import hats  # noqa: PLC0415
 
     assert hats.read_hats(out).get_healpix_pixels(), "output must be readable"
+
+
+@pytest.mark.parametrize("matcher", ["skyerr", "skyellipse"])
+def test_ray_union_skyerr_and_skyellipse(tmp_path: Path, matcher: str) -> None:
+    """ray_union_match with matcher='skyerr' and 'skyellipse' filters pairs by
+    per-row N-sigma / 2-D Mahalanobis distance."""
+    # Row 0: 0.45" apart with ~1.0" errors -> matches under max_error=1.0
+    # Row 1: 0.80" apart with tiny 0.05" errors -> rejected under max_error=1.0
+    a = pl.DataFrame(
+        {
+            "id": ["a0", "a1"],
+            "ra": [10.0, 20.0],
+            "dec": [0.0, 0.0],
+            "rae": [1.0, 0.05],
+            "dee": [1.0, 0.05],
+            "corr": [0.0, 0.0],
+        }
+    )
+    b = pl.DataFrame(
+        {
+            "id": ["b0", "b1"],
+            "ra": [10.0 + 0.45 / 3600.0, 20.0 + 0.80 / 3600.0],
+            "dec": [0.0, 0.0],
+            "rae": [1.0, 0.05],
+            "dee": [1.0, 0.05],
+            "corr": [0.0, 0.0],
+        }
+    )
+    src_a = dataclasses_replace_err(_catalogue(tmp_path / f"a_{matcher}", "a", a))
+    src_b = dataclasses_replace_err(_catalogue(tmp_path / f"b_{matcher}", "b", b))
+    out = tmp_path / f"out_{matcher}.hats"
+    ray_union.ray_union_match(
+        [src_a, src_b],
+        sep_arcsec=2.0,
+        output_file=str(out),
+        matcher=matcher,
+        max_error=1.0,
+    )
+    df = _read_output(out)
+    # a0+b0 matched ("1+2"), a1 ("1") and b1 ("2") stayed unmatched singletons
+    assert sorted(df["_src_cats"].to_list()) == ["1", "1+2", "2"]
+
+
+def dataclasses_replace_err(src: CatalogueSource) -> CatalogueSource:
+    from dataclasses import replace
+
+    return replace(
+        src,
+        ra_err_column="rae",
+        dec_err_column="dee",
+        corr_column="corr",
+        pos_err_units="arcsec",
+    )
+
+
+def test_ray_union_target_epoch_and_pm_prior(tmp_path: Path) -> None:
+    """ray_union_match propagates proper motion to target_epoch and inflates
+    errors with pm_prior when a catalogue has epoch but no PM columns."""
+    from dataclasses import replace
+
+    # Source moves +100 mas/yr in RA over 16 years (2000 -> 2016) = +1.6 arcsec.
+    a = pl.DataFrame(
+        {
+            "id": ["a0"],
+            "ra": [10.0],
+            "dec": [0.0],
+            "pmra": [100.0],
+            "pmdec": [0.0],
+            "epoch": [2000.0],
+        }
+    )
+    b = pl.DataFrame(
+        {
+            "id": ["b0"],
+            "ra": [10.0 + 1.6 / 3600.0],
+            "dec": [0.0],
+            "epoch": [2016.0],
+        }
+    )
+    src_a = replace(
+        _catalogue(tmp_path / "a_pm", "a", a),
+        pm_ra_column="pmra",
+        pm_dec_column="pmdec",
+        epoch_column="epoch",
+        epoch=2000.0,
+    )
+    src_b = replace(
+        _catalogue(tmp_path / "b_pm", "b", b),
+        epoch_column="epoch",
+        epoch=2016.0,
+    )
+    out = tmp_path / "out_pm.hats"
+    ray_union.ray_union_match(
+        [src_a, src_b],
+        sep_arcsec=0.5,
+        output_file=str(out),
+        target_epoch=2016.0,
+        pm_prior=True,
+    )
+    df = _read_output(out)
+    assert df.height == 1
+    assert df["_src_cats"][0] == "1+2"
+
+
+def test_resume_invalidates_changed_input_and_preserves_existing_ray(tmp_path):
+    import ray
+
+    a = _pixeled_catalogue(
+        tmp_path / "a", "a", pl.DataFrame({"ra": [42.0], "dec": [5.0], "id": ["a"]}), 2
+    )
+    b = _pixeled_catalogue(
+        tmp_path / "b", "b", pl.DataFrame({"ra": [42.0], "dec": [5.0], "id": ["b"]}), 2
+    )
+    out = tmp_path / "out"
+    ray.init(ignore_reinit_error=True, num_cpus=2, logging_level=40)
+    try:
+        ray_union.ray_union_match([a, b], sep_arcsec=1.0, output_file=str(out))
+        assert ray.is_initialized(), "a library call must preserve the caller's Ray session"
+        assert _read_output(out)["_src_cats"].to_list() == ["1+2"]
+        file = hats_native.list_hats_pixels(b.path)[0][2]
+        pl.DataFrame({"ra": [43.0], "dec": [5.0], "id": ["b"]}).write_parquet(file)
+        ray_union.ray_union_match([a, b], sep_arcsec=1.0, output_file=str(out))
+        assert set(_read_output(out)["_src_cats"]) == {"1", "2"}
+    finally:
+        ray.shutdown()
+
+
+def test_resume_rejects_missing_or_corrupt_fingerprint(tmp_path):
+    from xmatch.exceptions import CrossMatchError
+
+    a = _pixeled_catalogue(tmp_path / "a", "a", pl.DataFrame({"ra": [42.0], "dec": [5.0]}), 2)
+    out = tmp_path / "out"
+    (out / "chunks").mkdir(parents=True)
+    pl.DataFrame({"sentinel": [1]}).write_parquet(out / "chunks" / "c0-00000.parquet")
+    (out / "resume.state").write_text("interrupted JSON")
+    with pytest.raises(CrossMatchError, match="fingerprint"):
+        ray_union.ray_union_match([a, a], sep_arcsec=1.0, output_file=str(out))
+    assert (out / "chunks" / "c0-00000.parquet").is_file()

@@ -66,11 +66,11 @@ def find_coord_columns(columns: Sequence[str]) -> tuple[str | None, str | None]:
 
 
 def validate_coordinates(ra: np.ndarray, dec: np.ndarray) -> None:
-    """Raise ``ValueError`` if RA/Dec arrays contain NaNs or out-of-range values."""
+    """Raise ``ValueError`` if RA/Dec arrays are non-finite or out of range."""
     ra = np.asarray(ra, dtype=float)
     dec = np.asarray(dec, dtype=float)
-    if np.isnan(ra).any() or np.isnan(dec).any():
-        raise ValueError("RA/Dec contain NaN values.")
+    if not np.isfinite(ra).all() or not np.isfinite(dec).all():
+        raise ValueError("RA/Dec contain non-finite values.")
     eps = 1e-9
     if ((ra < -eps) | (ra > 360 + eps)).any():
         raise ValueError("RA values outside [0, 360].")
@@ -382,23 +382,43 @@ def sky_extent_from_frame(
     if ra_col not in schema or dec_col not in schema:
         raise ValueError(f"Frame missing {ra_col} or {dec_col} (has: {schema.names()}).")
 
-    if lf.select(pl.len()).collect().item() == 0:
+    ra_expr = pl.col(ra_col).cast(pl.Float64, strict=False)
+    dec_expr = pl.col(dec_col).cast(pl.Float64, strict=False)
+    eps = 1e-9
+    validation = lf.select(
+        pl.len().alias("n_rows"),
+        (
+            ra_expr.is_null()
+            | ~ra_expr.is_finite()
+            | (ra_expr < -eps)
+            | (ra_expr > 360.0 + eps)
+            | dec_expr.is_null()
+            | ~dec_expr.is_finite()
+            | (dec_expr < -90.0 - eps)
+            | (dec_expr > 90.0 + eps)
+        )
+        .sum()
+        .alias("n_invalid"),
+    ).collect()
+    if validation["n_rows"][0] == 0:
         return None
+    if validation["n_invalid"][0] > 0:
+        raise ValueError(
+            f"RA/Dec contain {validation['n_invalid'][0]} non-finite or out-of-range row(s)."
+        )
 
     # Phase 1: mean-x/y/z unit-vector (handles RA=0/360 wrap and the poles).
     means = lf.select(
-        (pl.col(dec_col).radians().cos() * pl.col(ra_col).radians().cos()).mean().alias("x"),
-        (pl.col(dec_col).radians().cos() * pl.col(ra_col).radians().sin()).mean().alias("y"),
-        pl.col(dec_col).radians().sin().mean().alias("z"),
+        (dec_expr.radians().cos() * ra_expr.radians().cos()).mean().alias("x"),
+        (dec_expr.radians().cos() * ra_expr.radians().sin()).mean().alias("y"),
+        dec_expr.radians().sin().mean().alias("z"),
     ).collect()
 
     mx, my, mz = float(means["x"][0]), float(means["y"][0]), float(means["z"][0])
     norm = math.sqrt(mx * mx + my * my + mz * mz)
     if norm < 1e-12:  # antipodal spread; fall back to whole-sky equator mean
-        ra_mean = lf.select(pl.col(ra_col).drop_nulls().mean()).collect().item()
-        dec_mean = lf.select(pl.col(dec_col).drop_nulls().mean()).collect().item()
-        if ra_mean is None or dec_mean is None:
-            return None
+        ra_mean = lf.select(ra_expr.mean()).collect().item()
+        dec_mean = lf.select(dec_expr.mean()).collect().item()
         return {
             "ra_center_deg": float(ra_mean),
             "dec_center_deg": float(dec_mean),
@@ -414,8 +434,8 @@ def sky_extent_from_frame(
     cos_d = math.cos(math.radians(center_dec))
     ra0 = math.radians(center_ra)
     cos_sep_expr = (
-        sin_d * pl.col(dec_col).radians().sin()
-        + cos_d * pl.col(dec_col).radians().cos() * (pl.col(ra_col).radians() - ra0).cos()
+        sin_d * dec_expr.radians().sin()
+        + cos_d * dec_expr.radians().cos() * (ra_expr.radians() - ra0).cos()
     )
     cos_sep_max = lf.select(cos_sep_expr.min()).collect().item()
     radius_deg = math.degrees(math.acos(max(-1.0, min(1.0, float(cos_sep_max)))))

@@ -1,0 +1,5 @@
+include CHANGELOG.md CONTRIBUTING.md pixi.toml pixi.lock
+include .gitignore .pre-commit-config.yaml
+include tests/*.py tests/inputs/*.csv
+include docs/*.md docs/*.csv docs/*.png
+include scripts/*.py scripts/*.sh

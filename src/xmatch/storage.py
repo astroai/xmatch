@@ -8,14 +8,11 @@ root or a worker's fast scratch copy.
 
 ``LocalStorage`` is a plain pathlib-backed dir with atomic-ish writes
 (tmp + ``os.replace``). ``VOSpaceStorage`` shells the ``vos`` CLI
-(``vls``/``vcp``/``vput``/``vmkdir``) — the agreed boring path for CANFAR;
-falls back to the python ``vos`` package when the binary is missing, and
-raises :class:`ConfigError` when neither is available.
-
-VOSpace CLI flags are not verified against a live CANFAR endpoint (see
-``scripts/canfar-smoke.sh``), so the exact ``vos`` argv is kept in one
-place (:meth:`VOSpaceStorage._argv`) for a one-line adaptation on the
-target machine.
+(``vls``/``vcp``/``vput``/``vmkdir``), falls back to the python ``vos``
+package when the binary is missing, and raises :class:`ConfigError` when
+neither is available. The python client path has been exercised against live
+ARC VOSpace; the CLI flags remain unverified against a live endpoint, so
+their argv is kept in one place (:meth:`VOSpaceStorage._argv`).
 """
 
 from __future__ import annotations
@@ -24,6 +21,7 @@ import builtins
 import contextlib
 import logging
 import os
+import secrets
 import shutil
 import subprocess
 from pathlib import Path
@@ -96,8 +94,16 @@ def _safe_rel(rel: str) -> str:
 
 
 def _tmp_path(target: Path) -> Path:
-    """Same-directory tmp sibling with a pid-unique name (crash/concurrent-safe)."""
-    return target.parent / f".{target.name}.{os.getpid()}.tmp"
+    """Create a unique same-directory temporary file for atomic replacement."""
+    for _ in range(100):
+        path = target.parent / f".{target.name}.{secrets.token_hex(8)}.tmp"
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return path
+    raise FileExistsError(f"could not allocate a temporary file beside {target}")
 
 
 class LocalStorage(Storage):
@@ -114,7 +120,12 @@ class LocalStorage(Storage):
         rel = _safe_rel(rel)
         if not rel:
             return self.root
-        return self.root / rel
+        path = self.root / rel
+        try:
+            path.resolve().relative_to(self.root.resolve())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(f"storage rel escapes the root: {rel!r}") from exc
+        return path
 
     def exists(self, rel: str) -> bool:
         return self._path(rel).exists()
@@ -174,7 +185,9 @@ class LocalStorage(Storage):
 
     def rm(self, rel: str) -> None:
         path = self._path(rel)
-        if path.is_dir():
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
         elif path.exists():
             path.unlink()
@@ -187,10 +200,9 @@ class VOSpaceStorage(Storage):
     a ``vos`` binary on PATH wins, the python ``vos`` package is the
     fallback, and :class:`ConfigError` is raised when neither exists.
 
-    NOTE: VOSpace CLI flags (``vls -l`` size parsing, ``vmkdir -p``) are
-    verified against a live CANFAR endpoint by ``scripts/canfar-smoke.sh``;
-    the argv is centralised in :meth:`_argv` so a one-line adaptation on
-    the target machine is all that is needed.
+    The python client path has been exercised against live ARC VOSpace. The
+    CLI flags have not been verified against that endpoint; its argv is
+    centralized in :meth:`_argv`.
     """
 
     def __init__(self, root: str) -> None:
@@ -255,7 +267,7 @@ class VOSpaceStorage(Storage):
                     raise ConfigError(
                         f"Cannot access/create VOSpace root {self.root}: {mk.stderr.strip()}"
                     )
-        else:  # python-vos fallback (unverified API surface; adapted on CANFAR smoke)
+        else:  # python-vos fallback
             try:
                 self._client.get_node(self.root)  # type: ignore[union-attr]
             except Exception:
@@ -308,13 +320,19 @@ class VOSpaceStorage(Storage):
                 return []
             names = []
             for line in proc.stdout.splitlines():
-                name = line.strip().rsplit("/", 1)[-1].rstrip("/")
+                name = line.strip().rstrip("/").rsplit("/", 1)[-1]
                 if name and name not in names:
                     names.append(name)
             return sorted(names)
         try:
             nodes = self._client.listdir(self._uri(rel))  # type: ignore[union-attr]
-            return sorted(n.uri.rsplit("/", 1)[-1].rstrip("/") for n in nodes)
+            names = []
+            for node in nodes:
+                path = str(node if isinstance(node, str) else node.uri)
+                name = path.rstrip("/").rsplit("/", 1)[-1]
+                if name:
+                    names.append(name)
+            return sorted(names)
         except Exception:
             return []
 
@@ -373,16 +391,33 @@ class VOSpaceStorage(Storage):
             if proc.returncode != 0:
                 raise OSError(f"vos vmkdir failed: {proc.stderr.strip()}")
             return
+        uri = self._uri(rel)
         try:
-            self._client.mkdir(self._uri(rel))  # type: ignore[union-attr]
+            node = self._client.get_node(uri)  # type: ignore[union-attr]
+        except Exception:
+            node = None
+        if node is not None:
+            if getattr(node, "type", None) == "vos:ContainerNode":
+                return
+            raise OSError(f"vos mkdir failed: {uri} exists and is not a container")
+        try:
+            self._client.mkdir(uri)  # type: ignore[union-attr]
         except Exception as exc:
+            # A concurrent creator may win between get_node and mkdir. Match
+            # the CLI's `vmkdir -p` behavior only if the resulting node is a
+            # container; an existing data node is still an error.
+            try:
+                node = self._client.get_node(uri)  # type: ignore[union-attr]
+            except Exception:
+                raise OSError(f"vos mkdir failed: {exc}") from exc
+            if getattr(node, "type", None) == "vos:ContainerNode":
+                return
             raise OSError(f"vos mkdir failed: {exc}") from exc
 
     def _python_put(self, local: Path, rel: str) -> None:
         """Store a local file under ``rel`` via the python-vos fallback."""
-        # The python binding copies a local path to a vos: URI, creating
-        # intermediate containers as needed; exact method name checked on
-        # CANFAR smoke (fallback path is unexercised in CI).
+        # The copy method was verified in a live python-vos 3.7 ARC VOSpace
+        # smoke; CI covers the protocol through a fake client.
         try:
             self._client.copy(str(local), self._uri(rel))  # type: ignore[union-attr]
         except Exception as exc:
@@ -506,9 +541,9 @@ def assert_headroom(path: str | Path, min_free_gb: float, label: str) -> None:
     from .exceptions import CrossMatchError
 
     os.makedirs(str(path), exist_ok=True)
-    free_gb = shutil.disk_usage(str(path)).free / 1e9
-    if free_gb < min_free_gb:
+    free_gib = shutil.disk_usage(str(path)).free / 1024**3
+    if free_gib < min_free_gb:
         raise CrossMatchError(
-            f"{label} has only {free_gb:.1f} GiB free, below the --min-free-gb floor "
+            f"{label} has only {free_gib:.1f} GiB free, below the --min-free-gb floor "
             f"of {min_free_gb:g} GiB; refusing to start a sync/union it cannot fit."
         )

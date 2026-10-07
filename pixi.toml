@@ -6,12 +6,12 @@ platforms = ["osx-arm64", "linux-64"]
 [tasks]
 lint = "ruff check ."
 format = "ruff format ."
-preflight-push = "ruff check . && ruff format --check . && python -m compileall -q src/xmatch tests"
-ci-local = "pixi run preflight-push && python -m pytest tests/test_astro_utils.py tests/test_io_utils.py -q"
+preflight-push = "ruff check . && ruff format --check . && mypy src/xmatch tests scripts && python -m compileall -q src/xmatch tests scripts"
+ci-local = { cmd = "python -m pytest -m 'not slow and not bench' -q --strict-markers", depends-on = ["preflight-push"] }
 test = "python -m pytest"
 
 [dependencies]
-# Development targets Python 3.13 while codebase is 3.13/3.14 compatible.
+# Python 3.13 is the locked release runtime; 3.14 has separate targeted checks.
 python = "3.13.*"
 # hats → numba needs numpy<2.5 on conda-forge
 numpy = ">=2.4,<2.5"

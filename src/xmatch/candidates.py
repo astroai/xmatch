@@ -76,11 +76,25 @@ def write_candidate_release(
         raise ValueError(
             "candidate releases require ICRS coordinates; transform other frames first"
         )
-    if not math.isfinite(radius_arcsec) or not 0 < radius_arcsec <= 180 * 3600:
+    if (
+        isinstance(radius_arcsec, bool)
+        or not isinstance(radius_arcsec, (int, float))
+        or not math.isfinite(radius_arcsec)
+        or not 0 < radius_arcsec <= 180 * 3600
+    ):
         raise ValueError("radius_arcsec must be finite and in (0, 648000]")
-    if isinstance(memory_budget_bytes, bool) or memory_budget_bytes < 1024:
+    if (
+        isinstance(memory_budget_bytes, bool)
+        or not isinstance(memory_budget_bytes, int)
+        or memory_budget_bytes < 1024
+    ):
         raise ValueError("memory_budget_bytes must be at least 1024")
-    if target_epoch is not None and (not math.isfinite(target_epoch) or target_epoch <= 0):
+    if target_epoch is not None and (
+        isinstance(target_epoch, bool)
+        or not isinstance(target_epoch, (int, float))
+        or not math.isfinite(target_epoch)
+        or target_epoch <= 0
+    ):
         raise ValueError("target_epoch must be a finite positive Julian year")
     raw_namespaces = [source.release_namespace for source in sources]
     if any(not isinstance(value, str) or not value.strip() for value in raw_namespaces):
@@ -426,7 +440,12 @@ def normalize_candidate_hypotheses(
     pairs = raw_pairs.select(
         "source_id", "candidate_id", pl.col(log_weight_column).cast(pl.Float64).alias("log_weight")
     )
-    if math.isnan(no_match_log_weight) or no_match_log_weight == math.inf:
+    if (
+        isinstance(no_match_log_weight, bool)
+        or not isinstance(no_match_log_weight, (int, float))
+        or math.isnan(no_match_log_weight)
+        or no_match_log_weight == math.inf
+    ):
         raise ValueError("no-match log weight must be finite or negative infinity")
     if (
         inventory.select(

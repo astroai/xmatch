@@ -39,6 +39,8 @@ def test_validate_coordinates_rejects_nan_and_range():
         validate_coordinates(np.array([400.0]), np.array([0.0]))
     with pytest.raises(ValueError):
         validate_coordinates(np.array([10.0]), np.array([95.0]))
+    with pytest.raises(ValueError, match="non-finite"):
+        validate_coordinates(np.array([np.inf]), np.array([0.0]))
     validate_coordinates(np.array([10.0, 359.9]), np.array([-89.0, 5.0]))
 
 
@@ -85,6 +87,16 @@ def test_sky_extent_lazy_accepts_lazyframe():
 def test_sky_extent_lazy_empty_frame():
     frame = pl.DataFrame({"ra": [], "dec": []}, schema={"ra": pl.Float64, "dec": pl.Float64})
     assert sky_extent_from_frame(frame, "ra", "dec") is None
+
+
+@pytest.mark.parametrize(
+    "ra, dec",
+    [([np.nan], [0.0]), ([np.inf], [0.0]), ([1.0], [np.nan]), ([1.0], [91.0])],
+)
+def test_sky_extent_lazy_rejects_invalid_coordinates(ra, dec):
+    frame = pl.DataFrame({"ra": ra, "dec": dec})
+    with pytest.raises(ValueError, match="non-finite or out-of-range"):
+        sky_extent_from_frame(frame.lazy(), "ra", "dec")
 
 
 def test_proper_motion_prefers_torchsky_and_preserves_nan_semantics(monkeypatch):

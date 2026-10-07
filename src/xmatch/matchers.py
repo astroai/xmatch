@@ -30,8 +30,8 @@ Tier 3 — Bayesian probabilistic qualification: when ``MatchSpec.prior_columns`
 is non-empty (and the catalogue has those columns), every matched pair is
 re-scored with a Budavári-style hierarchical Bayes factor that combines:
 
-* a 2D Gaussian positional kernel with the joint (sigma_left + sigma_right)
-  per-row uncertainty, and
+* a 2D Gaussian positional kernel using equivalent isotropic per-axis
+  astrometric uncertainty, and
 * independent 1-D Gaussian-KDE prior densities on each requested magnitude /
   colour column, fit from a uniform random sample of both sides (capped at
   50 000 rows).
@@ -50,7 +50,11 @@ import numpy as np
 import polars as pl
 
 from .exceptions import CrossMatchError
-from .sources import ASTROMETRIC_COVARIANCE_KEYS, CatalogueSource
+from .sources import (
+    ASTROMETRIC_COVARIANCE_KEYS,
+    CatalogueSource,
+    position_error_to_arcsec_factor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +66,6 @@ _PROPAGATED_COV_NN = "_propagated_cov_nn_arcsec2"
 _PROPAGATED_COV_EN = "_propagated_cov_en_arcsec2"
 _PROPAGATED_COV_PREFIX = "_propagated_cov_"
 _EPOCH_SIGMA = "_xmatch_spill_epoch_sigma"
-
-_UNIT_TO_ARCSEC = {"arcsec": 1.0, "mas": 1e-3, "deg": 3600.0, "arcmin": 60.0}
 
 # Accepted match-criteria vocabularies.  Validated up front so a typo fails
 # loudly: an unknown ``join_type`` used to fall through :func:`_build_result`
@@ -119,9 +121,12 @@ class MatchSpec:
     macauff_flux_columns: list[str] = field(default_factory=list)
     join_type: str = "1and2"
     find: str = "best"  # "best" | "all"
-    # Bayesian-prior columns. When non-empty AND the catalogues carry those
-    # columns, a ``p_match`` column is appended to the matched result.
+    # Bayesian-prior columns. When non-empty and present in both catalogues,
+    # add empirical photometric KDE terms to the requested ``p_match`` score.
     prior_columns: list[str] = field(default_factory=list)
+    # Request a positional-only ``p_match`` score even with no photometric
+    # priors. Both catalogues must provide positional errors or explicit floors.
+    probabilistic: bool = False
     # Epoch to propagate coordinates to before spatial matching (Julian year).
     # Requires pm_ra_column / pm_dec_column + epoch metadata on the catalogue.
     # Target-epoch skyerr requires measured motion covariance or pm_prior;
@@ -161,6 +166,43 @@ class MatchSpec:
     fallback_policy: str = "warn"
 
     def __post_init__(self) -> None:
+        try:
+            self.radius_arcsec = float(self.radius_arcsec)
+            self.max_error = float(self.max_error)
+            self.lr_q = float(self.lr_q)
+            if self.target_epoch is not None:
+                self.target_epoch = float(self.target_epoch)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "radius_arcsec, max_error, lr_q, and target_epoch must be numeric"
+            ) from exc
+        if not math.isfinite(self.radius_arcsec) or not 0.0 < self.radius_arcsec <= 648_000.0:
+            raise ValueError("radius_arcsec must be finite and in (0, 648000]")
+        if not math.isfinite(self.max_error) or self.max_error <= 0.0:
+            raise ValueError("max_error must be finite and positive")
+        if not math.isfinite(self.lr_q) or not 0.0 <= self.lr_q <= 1.0:
+            raise ValueError("lr_q must be finite and in [0, 1]")
+        if self.target_epoch is not None and not math.isfinite(self.target_epoch):
+            raise ValueError("target_epoch must be finite")
+        if self.batch_size is not None and (
+            isinstance(self.batch_size, bool)
+            or not isinstance(self.batch_size, int)
+            or self.batch_size <= 0
+        ):
+            raise ValueError("batch_size must be a positive integer")
+        try:
+            self.extra_distance_cols = {
+                name: float(weight) for name, weight in self.extra_distance_cols.items()
+            }
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("extra_distance_cols must map column names to finite weights") from exc
+        if any(
+            not isinstance(name, str) or not name or not math.isfinite(weight) or weight < 0.0
+            for name, weight in self.extra_distance_cols.items()
+        ):
+            raise ValueError(
+                "extra_distance_cols must map nonempty names to finite nonnegative weights"
+            )
         if self.fallback_policy not in ("warn", "error"):
             raise ValueError("fallback_policy must be 'warn' or 'error'")
         if self.matcher not in _MATCHER_KINDS:
@@ -173,6 +215,8 @@ class MatchSpec:
             )
         if self.find not in _FIND_MODES:
             raise ValueError(f"find must be one of {sorted(_FIND_MODES)}, got {self.find!r}")
+        if not isinstance(self.probabilistic, bool):
+            raise ValueError("probabilistic must be a boolean")
 
 
 # --------------------------------------------------------------------------- #
@@ -295,31 +339,78 @@ def _has_error_info(src: CatalogueSource) -> bool:
     )
 
 
+def _positional_error_arrays(
+    df: pl.DataFrame, src: CatalogueSource
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert and validate declared RA/Dec errors before using them."""
+    factor = position_error_to_arcsec_factor(src.pos_err_units)
+    errors = tuple(
+        df[column].to_numpy().astype(float) * factor
+        for column in (src.ra_err_column, src.dec_err_column)
+    )
+    for axis, values in zip(("RA", "Dec"), errors, strict=True):
+        bad = ~np.isfinite(values) | (values < 0.0)
+        if bad.any():
+            row = int(np.flatnonzero(bad)[0])
+            raise CrossMatchError(
+                f"Catalogue '{src.name}' has a non-finite or negative {axis} position error "
+                f"at row {row}."
+            )
+    return errors[0], errors[1]
+
+
+def _default_pos_error(src: CatalogueSource) -> float | None:
+    if src.default_pos_error_arcsec is None:
+        return None
+    try:
+        error = float(src.default_pos_error_arcsec)
+    except (TypeError, ValueError) as exc:
+        raise CrossMatchError(
+            f"Catalogue '{src.name}' has a non-numeric default positional error."
+        ) from exc
+    if not math.isfinite(error) or error < 0.0:
+        raise CrossMatchError(
+            f"Catalogue '{src.name}' default positional error must be finite and nonnegative."
+        )
+    return error
+
+
+def _pm_drift_uncertainty(df: pl.DataFrame, src: CatalogueSource) -> np.ndarray | None:
+    if _PM_DRIFT_COLUMN not in df.columns:
+        return None
+    drift = df[_PM_DRIFT_COLUMN].to_numpy().astype(float)
+    bad = ~np.isfinite(drift) | (drift < 0.0)
+    if bad.any():
+        row = int(np.flatnonzero(bad)[0])
+        raise CrossMatchError(
+            f"Catalogue '{src.name}' has invalid PM drift uncertainty at row {row}."
+        )
+    return drift
+
+
 def _pos_sigma_arcsec(df: pl.DataFrame, src: CatalogueSource) -> np.ndarray | None:
     """Per-row radial RMS: evaluated epoch covariance or reference errors."""
-    factor = _UNIT_TO_ARCSEC.get((src.pos_err_units or "arcsec").lower(), 1.0)
-    floor = (
-        float(src.default_pos_error_arcsec) * np.sqrt(2)
-        if src.default_pos_error_arcsec is not None
-        else None
-    )
+    default_error = _default_pos_error(src)
+    floor = default_error * np.sqrt(2) if default_error is not None else None
     # Per-row PM drift: used in quadrature regardless of error-column path.
-    drift = None
-    if _PM_DRIFT_COLUMN in df.columns:
-        drift = np.nan_to_num(df[_PM_DRIFT_COLUMN].to_numpy().astype(float), nan=0.0)
+    drift = _pm_drift_uncertainty(df, src)
 
     if _EPOCH_SIGMA in df.columns:
         sigma = df[_EPOCH_SIGMA].to_numpy().astype(float)
         return np.hypot(sigma, drift) if drift is not None else sigma
     if src.ra_err_column in df.columns and src.dec_err_column in df.columns:
-        ra_e = df[src.ra_err_column].to_numpy().astype(float) * factor
-        de_e = df[src.dec_err_column].to_numpy().astype(float) * factor
+        ra_e, de_e = _positional_error_arrays(df, src)
         sigma = np.sqrt(ra_e**2 + de_e**2)
         if floor is not None:
-            sigma = np.maximum(np.nan_to_num(sigma, nan=floor), floor)
+            sigma = np.maximum(sigma, floor)
         if drift is not None:
             sigma = np.sqrt(sigma**2 + drift**2)
         return sigma
+    if src.astrometric_covariance_columns:
+        covariance = _pos_covariance(df, src)
+        if covariance is not None:
+            sigma_sq_ra, sigma_sq_dec, _rho = covariance
+            return np.sqrt(sigma_sq_ra + sigma_sq_dec)
     if floor is not None:
         sigma = np.full(df.height, floor)
         if drift is not None:
@@ -347,36 +438,63 @@ def _pos_covariance(
     All arrays have length ``df.height``.  Returns ``None`` when no error
     information is available on this side.
     """
-    factor = _UNIT_TO_ARCSEC.get((src.pos_err_units or "arcsec").lower(), 1.0)
-    floor = (
-        float(src.default_pos_error_arcsec) if src.default_pos_error_arcsec is not None else None
-    )
+    default_error = _default_pos_error(src)
+    floor = default_error if default_error is not None else None
     # Per-row PM drift: added in quadrature regardless of error-column path.
+    drift = _pm_drift_uncertainty(df, src)
     drift_sq = None
-    if _PM_DRIFT_COLUMN in df.columns:
-        drift_sq = np.nan_to_num(df[_PM_DRIFT_COLUMN].to_numpy().astype(float), nan=0.0) ** 2
+    if drift is not None:
+        # The drift prior is a radial RMS budget; distribute its variance over
+        # the two isotropic tangent-plane axes so the radial sigma is unchanged.
+        drift_sq = 0.5 * drift**2
 
     result = None
     if src.ra_err_column in df.columns and src.dec_err_column in df.columns:
-        ra_e = df[src.ra_err_column].to_numpy().astype(float) * factor
-        de_e = df[src.dec_err_column].to_numpy().astype(float) * factor
+        ra_e, de_e = _positional_error_arrays(df, src)
         sigma_sq_ra = ra_e**2
         sigma_sq_dec = de_e**2
         if floor is not None:
             floor_sq = floor * floor
-            sigma_sq_ra = np.maximum(np.nan_to_num(sigma_sq_ra, nan=floor_sq), floor_sq)
-            sigma_sq_dec = np.maximum(np.nan_to_num(sigma_sq_dec, nan=floor_sq), floor_sq)
+            sigma_sq_ra = np.maximum(sigma_sq_ra, floor_sq)
+            sigma_sq_dec = np.maximum(sigma_sq_dec, floor_sq)
         if drift_sq is not None:
             sigma_sq_ra = sigma_sq_ra + drift_sq
             sigma_sq_dec = sigma_sq_dec + drift_sq
         if src.corr_column and src.corr_column in df.columns:
-            rho = np.clip(
-                np.nan_to_num(df[src.corr_column].to_numpy().astype(float), nan=0.0),
-                -1.0,
-                1.0,
-            )
+            rho = df[src.corr_column].to_numpy().astype(float)
+            bad = ~np.isfinite(rho) | (np.abs(rho) > 1.0)
+            if bad.any():
+                row = int(np.flatnonzero(bad)[0])
+                raise CrossMatchError(
+                    f"Catalogue '{src.name}' has a non-finite or out-of-range "
+                    f"position-error correlation at row {row}; expected [-1, 1]."
+                )
         else:
             rho = np.zeros(df.height, dtype=float)
+        result = sigma_sq_ra, sigma_sq_dec, rho
+    elif src.astrometric_covariance_columns:
+        astrometric = _astrometric_covariance_mas(df, src)
+        if astrometric is None:
+            raise CrossMatchError(
+                f"Catalogue '{src.name}' is missing declared astrometric covariance columns."
+            )
+        covariance_mas, _valid_6d, valid_angular = astrometric
+        if not valid_angular.all():
+            row = int(np.flatnonzero(~valid_angular)[0])
+            raise CrossMatchError(
+                f"Catalogue '{src.name}' has invalid declared astrometric covariance at row {row}."
+            )
+        positional = covariance_mas[:, :2, :2] / 1_000_000.0
+        sigma_sq_ra = positional[:, 0, 0]
+        sigma_sq_dec = positional[:, 1, 1]
+        if floor is not None:
+            floor_sq = floor * floor
+            sigma_sq_ra = np.maximum(sigma_sq_ra, floor_sq)
+            sigma_sq_dec = np.maximum(sigma_sq_dec, floor_sq)
+        if drift_sq is not None:
+            sigma_sq_ra = sigma_sq_ra + drift_sq
+            sigma_sq_dec = sigma_sq_dec + drift_sq
+        rho = positional[:, 0, 1] / np.sqrt(positional[:, 0, 0] * positional[:, 1, 1])
         result = sigma_sq_ra, sigma_sq_dec, rho
     elif floor is not None:
         floor_sq = floor * floor
@@ -510,7 +628,12 @@ def _chord_to_arcsec(chord: np.ndarray) -> np.ndarray:
 
 
 def _arcsec_to_chord(arcsec: float) -> float:
-    return float(2.0 * np.sin(np.radians(float(arcsec) / 3600.0) * 0.5))
+    angle = float(arcsec)
+    if not np.isfinite(angle) or angle < 0.0:
+        raise ValueError("Angular search radius must be finite and nonnegative.")
+    # A spherical cap cannot extend beyond 180 degrees. Capping also prevents
+    # sin(angle/2) from shrinking again for larger uncertainty bounds.
+    return float(2.0 * np.sin(np.radians(min(angle, 648_000.0) / 3600.0) * 0.5))
 
 
 def _flatten_candidates(
@@ -626,6 +749,55 @@ def _skyerr_pair_filter(
         return left_idx, right_idx, seps
     scores = np.divide(seps, limit, out=np.full_like(seps, np.inf), where=limit > 0.0)
     return _best_per_primary(left_idx, right_idx, seps, scores)
+
+
+def _skyellipse_pair_filter(
+    left_idx: np.ndarray,
+    right_idx: np.ndarray,
+    seps: np.ndarray,
+    l_ra: np.ndarray,
+    l_dec: np.ndarray,
+    r_ra: np.ndarray,
+    r_dec: np.ndarray,
+    cov_l: tuple[np.ndarray, np.ndarray, np.ndarray],
+    cov_r: tuple[np.ndarray, np.ndarray, np.ndarray],
+    max_error: float,
+    *,
+    find: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply the per-pair 2-D Mahalanobis d² <= max_error² criterion.
+
+    Shared across ``fast``, ``zone``, and ``ray`` so every engine evaluates
+    identical error-ellipse geometry and tie-breaking.
+    """
+    if left_idx.size == 0:
+        return left_idx, right_idx, seps
+    sra2_l, sde2_l, rho_l = cov_l
+    sra2_r, sde2_r, rho_r = cov_r
+    mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
+    cos_dec = np.cos(np.radians(mean_dec))
+    delta_ra = ((l_ra[left_idx] - r_ra[right_idx] + 180.0) % 360.0 - 180.0) * 3600.0 * cos_dec
+    delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
+    d2 = _mahalanobis_pairwise(
+        delta_ra,
+        delta_dec,
+        sra2_l[left_idx],
+        sde2_l[left_idx],
+        rho_l[left_idx],
+        sra2_r[right_idx],
+        sde2_r[right_idx],
+        rho_r[right_idx],
+    )
+    keep = np.isfinite(d2) & (d2 <= max_error**2)
+    left_idx, right_idx, seps, d2 = (
+        left_idx[keep],
+        right_idx[keep],
+        seps[keep],
+        d2[keep],
+    )
+    if find == "best" and left_idx.size > 0:
+        return _best_per_primary(left_idx, right_idx, seps, d2)
+    return left_idx, right_idx, seps
 
 
 # --------------------------------------------------------------------------- #
@@ -1104,6 +1276,7 @@ def _build_nd_features(
     df: pl.DataFrame,
     extra_cols: dict[str, float],
     union_mean: dict[str, tuple[float, float]] | None = None,
+    union_df: pl.DataFrame | None = None,
 ) -> tuple[np.ndarray, dict[str, tuple[float, float]] | None]:
     """Build N-d feature array: [x, y, z] + z-score normalised columns.
 
@@ -1119,25 +1292,83 @@ def _build_nd_features(
     extra_parts: list = []
     stats: dict[str, tuple[float, float]] = {}
     for col, weight in extra_cols.items():
-        if col not in df.columns:
-            logger.warning("Extra distance column '%s' missing; skipping.", col)
-            continue
-        vals = df[col].to_numpy().astype(float)
+        frames = (df,) if union_df is None else (df, union_df)
+        if any(col not in frame.columns for frame in frames):
+            raise CrossMatchError(f"Requested extra distance column {col!r} is missing.")
+        try:
+            arrays = [frame[col].to_numpy().astype(float) for frame in frames]
+        except (TypeError, ValueError) as exc:
+            raise CrossMatchError(
+                f"Requested extra distance column {col!r} must contain numeric values."
+            ) from exc
+        if any(not np.isfinite(values).all() for values in arrays):
+            raise CrossMatchError(
+                f"Requested extra distance column {col!r} must contain only finite values."
+            )
+        vals = arrays[0]
         if union_mean is not None and col in union_mean:
             mean, std = union_mean[col]
         else:
-            mean = float(np.nanmean(vals))
-            std = float(np.nanstd(vals))
-            if std == 0 or not np.isfinite(std):
+            values = vals if len(arrays) == 1 else np.concatenate(arrays)
+            with np.errstate(over="ignore", invalid="ignore"):
+                mean = float(np.mean(values))
+                std = float(np.std(values))
+            if std == 0:
                 std = 1.0
+        if not np.isfinite(mean) or not np.isfinite(std) or std <= 0.0:
+            raise CrossMatchError(
+                f"Requested extra distance column {col!r} cannot be normalized finitely."
+            )
         stats[col] = (mean, std)
-        norm = np.nan_to_num((vals - mean) / std, nan=0.0) * weight
+        with np.errstate(over="ignore", invalid="ignore"):
+            norm = ((vals - mean) / std) * weight
+        if not np.isfinite(norm).all():
+            raise CrossMatchError(
+                f"Normalized extra distance column {col!r} must contain only finite values."
+            )
         extra_parts.append(norm.reshape(-1, 1))
 
-    if not extra_parts:
-        return xyz, None
     features = np.hstack([xyz] + extra_parts)
     return features, stats
+
+
+# Module-level configuration — tunable for benchmarking / memory tuning.
+_ND_CHUNK_SIZE = 50_000
+
+
+def _rank_nd_candidates(
+    left_idx: np.ndarray,
+    right_idx: np.ndarray,
+    seps: np.ndarray,
+    l_ra: np.ndarray,
+    l_dec: np.ndarray,
+    r_ra: np.ndarray,
+    r_dec: np.ndarray,
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+    spec: MatchSpec,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Select the N-dimensional nearest candidate per primary source.
+
+    Used by ``fast``, ``zone``, and ``ray`` whenever ``spec.extra_distance_cols``
+    is set with ``find="best"``.  Evaluates N-d Euclidean distance in chunks of
+    ``_ND_CHUNK_SIZE`` candidate pairs to bound memory.
+    """
+    if left_idx.size == 0 or not spec.extra_distance_cols or spec.find != "best":
+        return left_idx, right_idx, seps
+
+    l_feat, stats = _build_nd_features(l_ra, l_dec, left, spec.extra_distance_cols, union_df=right)
+    r_feat, _ = _build_nd_features(r_ra, r_dec, right, spec.extra_distance_cols, union_mean=stats)
+
+    n_pairs = left_idx.size
+    nd_dists = np.empty(n_pairs, dtype=float)
+    chunk_size = max(1, _ND_CHUNK_SIZE)
+    for start in range(0, n_pairs, chunk_size):
+        end = min(start + chunk_size, n_pairs)
+        diff = r_feat[right_idx[start:end]] - l_feat[left_idx[start:end]]
+        nd_dists[start:end] = np.linalg.norm(diff, axis=-1)
+
+    return _best_per_primary(left_idx, right_idx, seps, nd_dists)
 
 
 def _apply_match_filter(
@@ -1174,12 +1405,7 @@ def _apply_match_filter(
         keep = np.zeros(tmp.height, dtype=bool)
         keep[keep_indices] = True
     except Exception as exc:
-        logger.warning(
-            "Filter expression '%s' failed (%s); keeping all pairs.",
-            filter_expr,
-            exc,
-        )
-        return left_idx, right_idx, seps
+        raise CrossMatchError(f"Invalid filter_expr {filter_expr!r}: {exc}") from exc
 
     n_kept = int(np.sum(keep))
     if n_kept == 0:
@@ -1202,6 +1428,8 @@ def _scipy_match(
     left_src: CatalogueSource,
     right_src: CatalogueSource,
     spec: MatchSpec,
+    *,
+    workers: int = -1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     from scipy.spatial import cKDTree
@@ -1249,95 +1477,69 @@ def _scipy_match(
     if chord_max <= 0:
         return empty
 
-    # --- N-dimensional ranking (only affects find="best") ------------------
-    if spec.extra_distance_cols and spec.find == "best":
-        return _scipy_match_nd(
-            l_xyz,
-            r_xyz,
-            l_ra,
-            l_dec,
-            r_ra,
-            r_dec,
-            left,
-            right,
-            chord_max,
-            spec,
-        )
-
     tree = cKDTree(r_xyz)
-    # Likelihood Ratio: always retrieve ALL candidates so the scoring
-    # function can compute reliabilities across the full candidate set.
-    if spec.matcher in ("lr", "ml", "xgb", "auf", "macauff"):
-        idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
-        return _flatten_candidates(idx_lists, l_xyz, r_xyz)
+    # Likelihood Ratio / ML / XGB / AUF / macauff: retrieve ALL candidates so
+    # the scoring function can compute reliabilities across the full candidate set.
+    # ND ranking also needs every in-radius candidate; a nearest-k cap can drop
+    # the best photometric candidate in crowded fields.
+    if spec.matcher in ("lr", "ml", "xgb", "auf", "macauff") or (
+        spec.matcher == "sky" and spec.extra_distance_cols and spec.find == "best"
+    ):
+        idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=workers, return_sorted=True)
+        left_idx, right_idx, seps = _flatten_candidates(idx_lists, l_xyz, r_xyz)
+        if spec.extra_distance_cols and spec.find == "best":
+            return _rank_nd_candidates(
+                left_idx, right_idx, seps, l_ra, l_dec, r_ra, r_dec, left, right, spec
+            )
+        return left_idx, right_idx, seps
 
     if spec.matcher == "skyerr":
         # ``skyerr`` is a per-row criterion, so the global-chord candidate set
         # must be scored rather than reduced to the nearest candidate.
         assert lsig is not None and rsig is not None
-        idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
+        idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=workers, return_sorted=True)
         left_idx, right_idx, seps = _flatten_candidates(idx_lists, l_xyz, r_xyz)
-        return _skyerr_pair_filter(
+        left_idx, right_idx, seps = _skyerr_pair_filter(
             left_idx,
             right_idx,
             seps,
             lsig,
             rsig,
             spec.max_error,
-            find=spec.find,
+            find="all" if spec.extra_distance_cols else spec.find,
         )
+        if spec.extra_distance_cols and spec.find == "best":
+            return _rank_nd_candidates(
+                left_idx, right_idx, seps, l_ra, l_dec, r_ra, r_dec, left, right, spec
+            )
+        return left_idx, right_idx, seps
+
+    if spec.matcher == "skyellipse":
+        assert cov_l is not None and cov_r is not None
+        idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=workers, return_sorted=True)
+        left_idx, right_idx, seps = _flatten_candidates(idx_lists, l_xyz, r_xyz)
+        left_idx, right_idx, seps = _skyellipse_pair_filter(
+            left_idx,
+            right_idx,
+            seps,
+            l_ra,
+            l_dec,
+            r_ra,
+            r_dec,
+            cov_l,
+            cov_r,
+            spec.max_error,
+            find="all" if spec.extra_distance_cols else spec.find,
+        )
+        if spec.extra_distance_cols and spec.find == "best":
+            return _rank_nd_candidates(
+                left_idx, right_idx, seps, l_ra, l_dec, r_ra, r_dec, left, right, spec
+            )
+        return left_idx, right_idx, seps
+
     if spec.find == "best":
-        # --- skyellipse: query k>1 candidates, pick best by Mahalanobis d² --
-        if spec.matcher == "skyellipse":
-            assert cov_l is not None and cov_r is not None
-            k_candidates = min(max(10, int(spec.max_error * 2)), r_xyz.shape[0])
-            dist_sp, idx_sp = tree.query(
-                l_xyz,
-                k=min(k_candidates, r_xyz.shape[0]),
-                distance_upper_bound=chord_max,
-                workers=-1,
-            )
-            if k_candidates == 1:
-                dist_sp = dist_sp[:, None]
-                idx_sp = idx_sp[:, None]
-
-            sra2_l, sde2_l, rho_l = cov_l
-            sra2_r, sde2_r, rho_r = cov_r
-
-            valid_mask = np.isfinite(dist_sp) & (idx_sp < r_xyz.shape[0])
-            valid_i, valid_k = np.nonzero(valid_mask)
-
-            if len(valid_i) == 0:
-                return empty
-
-            candidates = idx_sp[valid_i, valid_k].astype(np.int64)
-
-            # Compute d² for each candidate.
-            mean_dec = 0.5 * (l_dec[valid_i] + r_dec[candidates])
-            cos_dec = np.cos(np.radians(mean_dec))
-            delta_ra = (l_ra[valid_i] - r_ra[candidates]) * 3600.0 * cos_dec
-            delta_dec = (l_dec[valid_i] - r_dec[candidates]) * 3600.0
-
-            d2 = _mahalanobis_pairwise(
-                delta_ra,
-                delta_dec,
-                sra2_l[valid_i],
-                sde2_l[valid_i],
-                rho_l[valid_i],
-                sra2_r[candidates],
-                sde2_r[candidates],
-                rho_r[candidates],
-            )
-
-            keep = d2 <= spec.max_error**2
-            if not np.any(keep):
-                return empty
-
-            candidate_seps = _chord_to_arcsec(dist_sp[valid_i[keep], valid_k[keep]])
-            return _best_per_primary(valid_i[keep], candidates[keep], candidate_seps, d2[keep])
-
         # --- plain sky: spatial-nearest match ------------------------------
-        dist, idx = tree.query(l_xyz, k=1, distance_upper_bound=chord_max, workers=-1)
+        dist, idx = tree.query(l_xyz, k=1, distance_upper_bound=chord_max, workers=workers)
         valid = np.isfinite(dist) & (idx < r_xyz.shape[0])
         left_idx = np.nonzero(valid)[0]
         right_idx = idx[valid].astype(np.int64)
@@ -1345,126 +1547,8 @@ def _scipy_match(
         return left_idx, right_idx, sep
 
     # find == "all": per-left list of matched right indices.
-    idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=-1)
-    left_idx, right_idx, sep = _flatten_candidates(idx_lists, l_xyz, r_xyz)
-
-    # --- skyellipse Mahalanobis post-filter (find="all") -------------------
-    if spec.matcher == "skyellipse" and left_idx.size > 0:
-        assert cov_l is not None and cov_r is not None
-        sra2_l, sde2_l, rho_l = cov_l
-        sra2_r, sde2_r, rho_r = cov_r
-        mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
-        cos_dec = np.cos(np.radians(mean_dec))
-        delta_ra = (l_ra[left_idx] - r_ra[right_idx]) * 3600.0 * cos_dec
-        delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
-        d2 = _mahalanobis_pairwise(
-            delta_ra,
-            delta_dec,
-            sra2_l[left_idx],
-            sde2_l[left_idx],
-            rho_l[left_idx],
-            sra2_r[right_idx],
-            sde2_r[right_idx],
-            rho_r[right_idx],
-        )
-        keep = d2 <= spec.max_error**2
-        left_idx, right_idx, sep = left_idx[keep], right_idx[keep], sep[keep]
-
-    return left_idx, right_idx, sep
-
-
-# Module-level configuration — tunable for benchmarking / memory tuning.
-_ND_CHUNK_SIZE = 50_000
-
-
-def _scipy_match_nd(
-    l_xyz: np.ndarray,
-    r_xyz: np.ndarray,
-    l_ra: np.ndarray,
-    l_dec: np.ndarray,
-    r_ra: np.ndarray,
-    r_dec: np.ndarray,
-    left: pl.DataFrame,
-    right: pl.DataFrame,
-    chord_max: float,
-    spec: MatchSpec,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """N-dimensional cKDTree match for find="best" (vectorised + chunked).
-
-    1. Query spatial cKDTree for up to *k_candidates* neighbours within
-       ``chord_max``.
-    2. Build N-d features (3-D spatial + z-score normalised extra columns).
-    3. Compute N-d distances via broadcasting in slices of *CHUNK_SIZE*
-       left rows, accumulating results incrementally — keeps the
-       ``(n_left, k, ndim)`` intermediate array bounded to ≈ *CHUNK_SIZE*
-       × k × ndim regardless of total catalogue size.
-    """
-    from scipy.spatial import cKDTree
-
-    CHUNK_SIZE = _ND_CHUNK_SIZE
-
-    empty = (np.array([], int), np.array([], int), np.array([], float))
-    n_left = l_xyz.shape[0]
-    n_right = r_xyz.shape[0]
-
-    # Step 1: spatial candidate retrieval.
-    k_candidates = min(max(10, int(spec.radius_arcsec * 2)), n_right)
-    spatial_tree = cKDTree(r_xyz)
-    dist_sp, idx_sp = spatial_tree.query(
-        l_xyz,
-        k=min(k_candidates, n_right),
-        distance_upper_bound=chord_max,
-        workers=-1,
-    )
-    if k_candidates == 1:
-        dist_sp = dist_sp[:, None]
-        idx_sp = idx_sp[:, None]
-    idx_sp.shape[1]  # actual k used
-
-    # Step 2: build N-d features once per side.
-    l_feat, stats = _build_nd_features(l_ra, l_dec, left, spec.extra_distance_cols)
-    r_feat, _ = _build_nd_features(r_ra, r_dec, right, spec.extra_distance_cols, union_mean=stats)
-
-    # Step 3: chunked vectorised N-d distance computation.
-    #          Process n_left in slices to bound memory at
-    #          O(CHUNK_SIZE × k × ndim).
-    left_idx_parts, right_idx_parts, sep_parts = [], [], []
-    for sl_start in range(0, n_left, CHUNK_SIZE):
-        sl_end = min(sl_start + CHUNK_SIZE, n_left)
-        sl = slice(sl_start, sl_end)
-        chunk_size = sl_end - sl_start
-
-        valid_chunk = np.isfinite(dist_sp[sl]) & (idx_sp[sl] < n_right)
-        if not np.any(valid_chunk):
-            continue
-
-        idx_safe = np.where(valid_chunk, idx_sp[sl], 0).astype(np.int64)
-        r_candidates = r_feat[idx_safe]  # (chunk, k, ndim)
-        l_expanded = l_feat[sl, None, :]  # (chunk, 1, ndim)
-        nd_dists = np.linalg.norm(r_candidates - l_expanded, axis=-1)  # (chunk, k)
-        nd_dists[~valid_chunk] = np.inf
-
-        best_k = np.argmin(nd_dists, axis=-1)  # (chunk,)
-        has_match = np.isfinite(nd_dists[np.arange(chunk_size), best_k])
-        if not np.any(has_match):
-            continue
-
-        chunk_left: np.ndarray = np.nonzero(has_match)[0].astype(np.int64) + sl_start
-        chunk_right = idx_sp[chunk_left, best_k[has_match]].astype(np.int64)
-        chunk_seps = _chord_to_arcsec(
-            np.linalg.norm(l_xyz[chunk_left] - r_xyz[chunk_right], axis=-1)
-        )
-        left_idx_parts.append(chunk_left)
-        right_idx_parts.append(chunk_right)
-        sep_parts.append(np.asarray(chunk_seps, dtype=float))
-
-    if not left_idx_parts:
-        return empty
-    return (
-        np.concatenate(left_idx_parts),
-        np.concatenate(right_idx_parts),
-        np.concatenate(sep_parts),
-    )
+    idx_lists = tree.query_ball_point(l_xyz, r=chord_max, workers=workers, return_sorted=True)
+    return _flatten_candidates(idx_lists, l_xyz, r_xyz)
 
 
 # --------------------------------------------------------------------------- #
@@ -1683,14 +1767,15 @@ def _engineer_ml_features_and_labels(
     Builds feature matrix *X* with columns:
 
     *  0  — normalised separation ``sep / sigma_combined``
-    *  1..k — z-scored absolute colour differences ``|col_L - col_R|``
+    *  1..k — standard-deviation-scaled absolute colour differences ``|col_L - col_R|``
     *  -1  — ``log1p(local_source_density)``
 
     Assigns pseudo-labels by marking the spatially-nearest candidate of
     each primary source as positive (1) and all others as negative (0).
 
-    When *add_synthetic_negatives* is True, random far-apart left/right
-    pairings (> 10× search radius) are appended as extra negative examples.
+    When *add_synthetic_negatives* is True, reproducibly sampled far-apart
+    left/right pairings (> 10× search radius) are appended as extra negative
+    examples.
 
     Returns
     ------
@@ -1776,8 +1861,11 @@ def _engineer_ml_features_and_labels(
     if add_synthetic_negatives:
         n_neg = min(n_pairs, left.height, right.height, 1000)
         if n_neg > 0:
-            neg_l_idx = np.random.choice(left.height, size=n_neg, replace=True)
-            neg_r_idx = np.random.choice(right.height, size=n_neg, replace=True)
+            # ponytail: keep stochastic sampling local and repeatable; engine
+            # call order must not affect scores or mutate NumPy's global RNG.
+            rng = np.random.default_rng(42)
+            neg_l_idx = rng.choice(left.height, size=n_neg, replace=True)
+            neg_r_idx = rng.choice(right.height, size=n_neg, replace=True)
             neg_l_xyz = l_xyz[neg_l_idx]
             neg_r_xyz = _radec_to_xyz(
                 right[right_src.ra_column].to_numpy().astype(float),
@@ -2726,17 +2814,7 @@ def _zone_match(
     query neighbour pixels within the cone radius — classic HATS-style
     partitioning. When ``cdshealpix`` is not importable we transparently
     downgrade to :func:`_scipy_match` and log a warning.
-
-    N-dimensional extra_distance_cols are delegated to :func:`_scipy_match`
-    since the N-d ranking loop is simpler without pixel sharding.
     """
-    if spec.extra_distance_cols or spec.matcher in ("lr", "ml", "xgb", "auf", "macauff"):
-        if spec.fallback_policy == "error":
-            raise CrossMatchError(
-                "engine='zone' cannot honor extra-distance or probabilistic matcher semantics"
-            )
-        logger.info("extra_distance_cols/LR/ML/AUF/macauff set; using Tier 1 cKDTree for matching.")
-        return _scipy_match(left, right, left_src, right_src, spec)
     try:
         import cdshealpix as hp  # noqa: F401
     except ImportError as exc:
@@ -2773,7 +2851,9 @@ def _zone_match_healpix(
     r_ra = right[right_src.ra_column].to_numpy().astype(float)
     r_dec = right[right_src.dec_column].to_numpy().astype(float)
 
-    if spec.matcher == "sky":
+    cov_l = cov_r = None
+    lsig = rsig = None
+    if spec.matcher in ("sky", "lr", "ml", "xgb", "auf", "macauff"):
         radius_deg = spec.radius_arcsec / 3600.0
         chord_max = _arcsec_to_chord(spec.radius_arcsec)
     elif spec.matcher == "skyellipse":
@@ -2843,6 +2923,9 @@ def _zone_match_healpix(
         reverse=True,
     )
     batch_size = spec.batch_size or len(pixel_items)
+    need_all_candidates = (
+        spec.find != "best" or spec.matcher != "sky" or bool(spec.extra_distance_cols)
+    )
 
     l_parts, r_parts, sep_parts = [], [], []
     for batch_start in range(0, len(pixel_items), max(1, batch_size)):
@@ -2853,17 +2936,27 @@ def _zone_match_healpix(
 
         for _l_pix_int, left_indices in batch_pixels:
             indices_arr = np.asarray(left_indices, dtype=np.int64)
-            # Cone search once per pixel (same for all points in pixel).
+            # Cone search once per pixel, inflated by the exact intra-batch angular
+            # spread around the representative point so boundary pairs are never missed.
             mid = len(left_indices) // 2
             rep_i = left_indices[mid]
+            batch_xyz = l_xyz[indices_arr]  # (n_pix, 3)
+            rep_xyz = l_xyz[rep_i]
+            batch_spread_rad = float(
+                np.max(
+                    2.0
+                    * np.arcsin(
+                        np.clip(np.linalg.norm(batch_xyz - rep_xyz, axis=-1) * 0.5, 0.0, 1.0)
+                    )
+                )
+            )
             npix = _cone_search_pixels(
                 hp,
                 float(np.radians(l_ra[rep_i])),
                 float(np.radians(l_dec[rep_i])),
-                float(np.radians(radius_deg)),
+                min(math.pi, float(np.radians(radius_deg)) + batch_spread_rad),
                 DEPTH,
             )
-            batch_xyz = l_xyz[indices_arr]  # (n_pix, 3)
 
             # --- margin caching: merge all neighbouring right pixels into one
             #     tree and query it once instead of querying each right pixel
@@ -2884,12 +2977,9 @@ def _zone_match_healpix(
             margin_global = np.concatenate(margin_global_parts)
             margin_tree = cKDTree(margin_xyz)
 
-            if spec.find == "best" and spec.matcher == "sky":
-                # Plain radius + find="best": the spatial-nearest candidate is
-                # the answer, so one candidate per row suffices.  ``skyerr``
-                # must NOT take this path: it has to see every candidate inside
-                # the global bound so the per-row filter can rank by
-                # ``sep / (sigma_l + sigma_r)`` (below).
+            if not need_all_candidates:
+                # Plain radius + find="best" without extra_distance_cols: the
+                # spatial-nearest candidate is the answer.
                 dist, local_idx = margin_tree.query(
                     batch_xyz,
                     k=1,
@@ -2904,31 +2994,6 @@ def _zone_match_healpix(
                     batch_l.append(np.array([k_idx], dtype=np.int64))
                     batch_r.append(np.array([global_r_index], dtype=np.int64))
                     batch_s.append(np.array([sep_arcsec], dtype=float))
-            elif spec.find == "best":
-                # skyellipse + find="best": a chord-nearest candidate can fail the
-                # Mahalanobis criterion while a slightly farther one passes it, so
-                # retrieve several candidates per primary row here and let the d²
-                # post-filter below select the best (mirrors the ``fast`` engine).
-                k_candidates = min(max(10, int(spec.max_error * 2)), margin_tree.n)
-                dist, local_idx = margin_tree.query(
-                    batch_xyz,
-                    k=k_candidates,
-                    distance_upper_bound=chord_max,
-                    workers=-1,
-                )
-                if k_candidates == 1:
-                    dist = dist[:, None]
-                    local_idx = local_idx[:, None]
-                valid = np.isfinite(dist) & (local_idx < margin_tree.n)
-                valid_l, valid_k = np.nonzero(valid)
-                if valid_l.size:
-                    k_indices = np.asarray(left_indices, dtype=np.int64)[valid_l]
-                    global_r_indices = margin_global[local_idx[valid_l, valid_k]].astype(np.int64)
-                    batch_l.append(k_indices)
-                    batch_r.append(global_r_indices)
-                    batch_s.append(
-                        np.asarray(_chord_to_arcsec(dist[valid_l, valid_k]), dtype=float)
-                    )
             else:
                 idx_lists = margin_tree.query_ball_point(
                     batch_xyz,
@@ -2966,34 +3031,28 @@ def _zone_match_healpix(
     right_idx = np.concatenate(r_parts)
     seps = np.concatenate(sep_parts)
 
+    # Sort deterministically by (left_idx, right_idx) to match _scipy_match order.
+    order = np.lexsort((right_idx, left_idx))
+    left_idx = left_idx[order]
+    right_idx = right_idx[order]
+    seps = seps[order]
+
     # --- skyellipse Mahalanobis post-filter ---------------------------------
     if spec.matcher == "skyellipse" and left_idx.size > 0:
         assert cov_l is not None and cov_r is not None
-        sra2_l, sde2_l, rho_l = cov_l
-        sra2_r, sde2_r, rho_r = cov_r
-        mean_dec = 0.5 * (l_dec[left_idx] + r_dec[right_idx])
-        cos_dec = np.cos(np.radians(mean_dec))
-        delta_ra = (l_ra[left_idx] - r_ra[right_idx]) * 3600.0 * cos_dec
-        delta_dec = (l_dec[left_idx] - r_dec[right_idx]) * 3600.0
-        d2 = _mahalanobis_pairwise(
-            delta_ra,
-            delta_dec,
-            sra2_l[left_idx],
-            sde2_l[left_idx],
-            rho_l[left_idx],
-            sra2_r[right_idx],
-            sde2_r[right_idx],
-            rho_r[right_idx],
+        left_idx, right_idx, seps = _skyellipse_pair_filter(
+            left_idx,
+            right_idx,
+            seps,
+            l_ra,
+            l_dec,
+            r_ra,
+            r_dec,
+            cov_l,
+            cov_r,
+            spec.max_error,
+            find="all" if spec.extra_distance_cols else spec.find,
         )
-        keep = d2 <= spec.max_error**2
-        left_idx, right_idx, seps, d2 = (
-            left_idx[keep],
-            right_idx[keep],
-            seps[keep],
-            d2[keep],
-        )
-        if spec.find == "best" and left_idx.size:
-            left_idx, right_idx, seps = _best_per_primary(left_idx, right_idx, seps, d2)
 
     # --- per-row skyerr N-sigma criterion -----------------------------------
     if spec.matcher == "skyerr" and left_idx.size > 0:
@@ -3005,7 +3064,13 @@ def _zone_match_healpix(
             lsig,
             rsig,
             spec.max_error,
-            find=spec.find,
+            find="all" if spec.extra_distance_cols else spec.find,
+        )
+
+    # --- N-dimensional ranking (when extra_distance_cols is set) ------------
+    if spec.extra_distance_cols and spec.find == "best" and left_idx.size > 0:
+        left_idx, right_idx, seps = _rank_nd_candidates(
+            left_idx, right_idx, seps, l_ra, l_dec, r_ra, r_dec, left, right, spec
         )
 
     return left_idx, right_idx, seps
@@ -3199,10 +3264,10 @@ def _bayesian_qualify(
 
     Returns ``None`` (no p_match) if either:
 
-    * the spec has no prior columns, or
+    * neither probabilistic scoring nor prior columns are requested, or
     * neither catalogue has the requested prior columns.
     """
-    if not spec.prior_columns:
+    if not spec.probabilistic and not spec.prior_columns:
         return None
     if left_idx.size == 0:
         return np.zeros(0, dtype=float)
@@ -3211,12 +3276,20 @@ def _bayesian_qualify(
 
     sigma_left = _pos_sigma_arcsec(left, left_src)
     sigma_right = _pos_sigma_arcsec(right, right_src)
-    # When a side has no per-row errors, fall back to a single 0.5 arcsec floor
-    # so the posterior still has a meaningful width.
-    if sigma_left is None:
-        sigma_left = np.full(left.height, 0.5, dtype=float)
-    if sigma_right is None:
-        sigma_right = np.full(right.height, 0.5, dtype=float)
+    if sigma_left is None or sigma_right is None:
+        missing = []
+        if sigma_left is None:
+            missing.append(left_src.name)
+        if sigma_right is None:
+            missing.append(right_src.name)
+        raise CrossMatchError(
+            "Bayesian p_match requires positional errors or default_pos_error_arcsec "
+            f"for catalogue(s): {', '.join(missing)}."
+        )
+    # `_pos_sigma_arcsec` returns radial RMS; the isotropic 2-D Gaussian uses
+    # the equivalent per-axis sigma.
+    sigma_left = sigma_left / math.sqrt(2.0)
+    sigma_right = sigma_right / math.sqrt(2.0)
     sig_l = sigma_left[left_idx]
     sig_r = sigma_right[right_idx]
 
@@ -3271,6 +3344,7 @@ def sky_match(
     java_opts: str | None = None,
     tmpdir: str | None = None,
     right_suffix: str = _RIGHT_SUFFIX,
+    _tree_workers: int = -1,
 ) -> pl.LazyFrame:
     """Run a positional crossmatch and return a lazy result frame."""
     _validate_coordinate_frames([left_src, right_src], target_epoch=spec.target_epoch)
@@ -3324,11 +3398,26 @@ def sky_match(
             if stilts.stilts_available(stilts_cmd_base)
             else "fast"
         )
-    if chosen == "stilts" and spec.matcher == "skyerr" and spec.target_epoch is not None:
-        raise CrossMatchError(
-            "engine='stilts' cannot consume evaluated target-epoch skyerr uncertainty; "
-            "use an in-process engine."
-        )
+    if chosen == "stilts":
+        unsupported = []
+        if spec.matcher not in {"sky", "skyerr"}:
+            unsupported.append(f"matcher={spec.matcher!r}")
+        if spec.matcher == "skyerr" and spec.target_epoch is not None:
+            unsupported.append("target-epoch skyerr uncertainty")
+        if spec.extra_distance_cols:
+            unsupported.append("extra_distance_cols")
+        if spec.prior_columns:
+            unsupported.append("prior_columns")
+        if spec.probabilistic:
+            unsupported.append("probabilistic scoring")
+        if spec.filter_expr:
+            unsupported.append("filter_expr")
+        if unsupported:
+            message = "engine='stilts' cannot honor " + ", ".join(unsupported)
+            if spec.fallback_policy == "error":
+                raise CrossMatchError(message)
+            logger.warning("%s; falling back to fast engine.", message)
+            chosen = "fast"
 
     # --- proper motion propagation (common to all engines) -----------------
     if spec.target_epoch is not None:
@@ -3390,27 +3479,6 @@ def sky_match(
         return frame
 
     if chosen == "stilts":
-        if spec.prior_columns:
-            if spec.fallback_policy == "error":
-                raise CrossMatchError(
-                    "engine='stilts' cannot provide Bayesian qualification under fallback_policy='error'"
-                )
-            logger.warning(
-                "STILTS engine selected — Bayesian probabilistic qualification "
-                "(prior_columns=%s) is skipped. Use engine='fast' or 'astropy' "
-                "for Tier-3 p_match output.",
-                spec.prior_columns,
-            )
-        if spec.filter_expr:
-            if spec.fallback_policy == "error":
-                raise CrossMatchError(
-                    "engine='stilts' cannot apply filter_expr under fallback_policy='error'"
-                )
-            logger.warning(
-                "STILTS engine selected — filter_expr='%s' is skipped. "
-                "Use engine='fast', 'astropy', or 'zone' for post-match filtering.",
-                spec.filter_expr,
-            )
         # Coordinate errors are input errors, not engine-fallback conditions.
         left = _collect_side(left_lf, left_src, "left")
         right = _collect_side(right_lf, right_src, "right")
@@ -3442,7 +3510,9 @@ def sky_match(
     elif chosen == "fast":
         left = _collect_side(left_lf, left_src, "left")
         right = _collect_side(right_lf, right_src, "right")
-        l_idx, r_idx, seps = _scipy_match(left, right, left_src, right_src, spec)
+        l_idx, r_idx, seps = _scipy_match(
+            left, right, left_src, right_src, spec, workers=_tree_workers
+        )
         logger.info("fast (cKDTree) sky match: %d matched pairs.", len(l_idx))
     elif chosen == "torchsky":
         left = _collect_side(left_lf, left_src, "left")

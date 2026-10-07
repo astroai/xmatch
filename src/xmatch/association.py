@@ -518,7 +518,7 @@ def write_association_release(
         )
 
     target = Path(directory)
-    if target.exists():
+    if target.exists() or target.is_symlink():
         raise FileExistsError(f"association release path already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
@@ -568,7 +568,7 @@ def write_association_release(
             handle.flush()
             os.fsync(handle.fileno())
 
-        if target.exists():
+        if target.exists() or target.is_symlink():
             raise FileExistsError(f"association release path already exists: {target}")
         # one local publisher owns a target path; concurrent object-store
         # publication should use the provider's conditional-create primitive.
@@ -966,7 +966,7 @@ def write_association_member_equivalence_release(
         raise ValueError("association releases are not direct parent/current lineage")
 
     target = Path(directory)
-    if target.exists():
+    if target.exists() or target.is_symlink():
         raise FileExistsError(f"association member equivalence path already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
@@ -1032,7 +1032,7 @@ def write_association_member_equivalence_release(
             handle.write(_canonical_json(manifest.to_dict()) + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
-        if target.exists():
+        if target.exists() or target.is_symlink():
             raise FileExistsError(f"association member equivalence path already exists: {target}")
         # one local publisher owns a target path; object stores need
         # their native conditional-create primitive for concurrent publication.
@@ -1594,7 +1594,7 @@ def write_association_component_release(
         parent_component_release_id = parent_manifest.component_release_id
 
     target = Path(directory)
-    if target.exists():
+    if target.exists() or target.is_symlink():
         raise FileExistsError(f"association component release path already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
@@ -1678,7 +1678,7 @@ def write_association_component_release(
             handle.flush()
             os.fsync(handle.fileno())
 
-        if target.exists():
+        if target.exists() or target.is_symlink():
             raise FileExistsError(f"association component release path already exists: {target}")
         # one local publisher owns a target path; concurrent object-store
         # publication should use the provider's conditional-create primitive.
@@ -2367,7 +2367,7 @@ def write_association_component_delta_release(
         member_equivalence_directory=member_equivalence_directory,
     )
     target = Path(directory)
-    if target.exists():
+    if target.exists() or target.is_symlink():
         raise FileExistsError(f"association component delta path already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
@@ -2398,7 +2398,7 @@ def write_association_component_delta_release(
             handle.write(_canonical_json(manifest.to_dict()) + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
-        if target.exists():
+        if target.exists() or target.is_symlink():
             raise FileExistsError(f"association component delta path already exists: {target}")
         # one local publisher owns a target path; object stores need
         # their native conditional-create operation for concurrent publication.
