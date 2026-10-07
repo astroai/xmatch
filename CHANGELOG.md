@@ -11,8 +11,8 @@ No changes yet.
 
 ## [0.5.0] — 2026-10-07
 
-Distributed from the private GitHub repository at tag `v0.5.0`; no PyPI package
-is published because another project owns the `xmatch` name.
+Available from the public [GitHub release at tag `v0.5.0`](https://github.com/astroai/xmatch/releases/tag/v0.5.0).
+No PyPI package is published because another project owns the `xmatch` name.
 
 ### Added
 

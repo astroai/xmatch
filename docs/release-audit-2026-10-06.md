@@ -1,12 +1,15 @@
 # Release audit — 2026-10-07
 
 This audit began from baseline `e2e4581` and records the 0.5.0 release evidence
-through CI commit `f86f5a6` and the live ESA check on 2026-10-07. Three Luna
-agents reviewed catalogue integrity, local/remote matching, and release
-documentation/tooling; the parent reviewed distributed execution and numerical
-correctness. The release is distributed from the existing private GitHub
-repository at tag `v0.5.0`. No PyPI package is published because another
-project owns the `xmatch` name.
+through the public release on 2026-10-07. The release was first published while
+the repository was private; the repository and release assets are now public.
+Three Luna agents reviewed catalogue integrity, local/remote matching, and
+release documentation/tooling; the parent reviewed distributed execution and
+numerical correctness. No PyPI package is published because another project
+owns the `xmatch` name. The merged
+[PR #204](https://github.com/astroai/xmatch/pull/204) and successful
+[Linux release gate](https://github.com/astroai/xmatch/actions/runs/37691455480)
+record the public v0.5.0 release checks.
 
 ## Scope
 
@@ -243,16 +246,20 @@ Polars type aliases. Codespell passes with a reduced list of scientific tokens.
 The tightened archive checker rejects undeclared wheel payloads and unexpected
 generated source-archive metadata. Five malformed-archive cases failed before
 the fix. All 16 current checker tests pass, including four tag-checker
-regressions added after the recorded CI run. The scaling analyzer self-check
-passes with Python assertions disabled.
+regressions. The scaling analyzer self-check passes with Python assertions
+disabled.
 
-The final local `ci-local` run passed 652 tests, with 9 skipped and 33
-deselected, 13 ERFA warnings, in 456.02 s. Ruff, formatting, Mypy over 69 files
-and compilation passed. The latest recorded Ubuntu run on `f86f5a6` passed all
-configured gates: 645 passed, 12 skipped and 33 deselected, including lint,
-typing, compilation, artifact checks and installed-wheel CLI verification.
-That Ubuntu result predates the four added checker regressions; no newer Ubuntu
-result is recorded.
+On the unchanged v0.5.0 source tree, the final local full suite passed 684
+tests, with 10 skipped and 13 warnings, in 489.60 s. Ruff, formatting, Mypy
+over 69 files and compilation passed. The GitHub Actions Linux release gate
+for tag `v0.5.0` passed with 649 passed, 12 skipped, 33 deselected, and 13
+ERFA warnings in 178.02 s; archive, metadata, and installed-wheel CLI checks
+also passed. Separate optional integrations passed on the same source tree:
+17 Torchsky tests, 23 Torchfits I/O tests, one Healpy oracle test, and two
+XGBoost/Ray parity tests. The complete run skipped the live ESA case when its
+reachability check failed; the unchanged live test passed separately (1 passed
+in 225.40 s), and its UWS job was deleted in 80.67 s. CANFAR measurements are
+in the [scaling report](https://github.com/astroai/xmatch/blob/v0.5.0/docs/canfar-scaling-2026-10-07.md).
 
 ## Compatibility and limits from the initial audit
 

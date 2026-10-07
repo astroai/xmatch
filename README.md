@@ -59,7 +59,7 @@ Requires Python $\ge 3.13$. The checked Pixi environment and local release gate 
 ### Recommended: Pixi
 
 ```bash
-# Clone the 0.5.0 release tag (the private repository requires access)
+# Clone the public 0.5.0 release tag
 git clone --branch v0.5.0 https://github.com/astroai/xmatch.git
 cd xmatch
 
@@ -73,9 +73,10 @@ pixi run ci-local
 
 ### Standard: Pip
 
-The 0.5.0 release is distributed from the private GitHub repository at tag
-`v0.5.0`; repository access is required. The PyPI name [`xmatch`](https://pypi.org/project/xmatch/)
-belongs to a different project, so this project is not published on PyPI.
+The source and release assets for version 0.5.0 are publicly available from
+[GitHub](https://github.com/astroai/xmatch/releases/tag/v0.5.0). The PyPI name
+[`xmatch`](https://pypi.org/project/xmatch/) belongs to a different project, so
+this project is not published on PyPI.
 
 ```bash
 git clone --branch v0.5.0 https://github.com/astroai/xmatch.git
