@@ -14,7 +14,7 @@ permissions:
 
 concurrency:
   group: linux-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   linux:
@@ -99,5 +99,6 @@ jobs:
           gh run download "$GITHUB_RUN_ID" --name release-dist --dir dist
           cd dist
           sha256sum --check SHA256SUMS
+          test "$(gh api "repos/$GH_REPO/commits/$GITHUB_REF_NAME" --jq .sha)" = "$GITHUB_SHA"
           gh release create "$GITHUB_REF_NAME" *.whl *.tar.gz SHA256SUMS \
             --verify-tag --title "xmatch $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
