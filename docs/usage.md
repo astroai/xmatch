@@ -34,9 +34,9 @@ cd xmatch
 python -m pip install ".[cds,hats-ray,torchfits,ml]"
 ```
 
-The PyPI name `xmatch` belongs to another project. This repository is private,
-so installation from its checkout requires repository access. Do not use
-`pip install xmatch` for this project.
+The PyPI name `xmatch` belongs to another project. The source repository and
+[v0.5.0 GitHub release](https://github.com/astroai/xmatch/releases/tag/v0.5.0)
+are public. Do not use `pip install xmatch` for this project.
 
 #### Optional Dependency Extras
 
