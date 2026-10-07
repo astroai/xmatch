@@ -18,6 +18,7 @@ Results are printed as a compact terminal table at the end of the suite.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import numpy as np
 import polars as pl
@@ -58,7 +59,12 @@ def _available_engines() -> list[str]:
         import scipy  # noqa: F401
 
         engines.append("fast")
-        engines.append("zone")  # falls back to fast if cdshealpix missing
+        try:
+            import cdshealpix  # noqa: F401
+
+            engines.append("zone")
+        except ImportError:
+            pass
     except ImportError:
         pass
     _known_engines[:] = engines
@@ -90,12 +96,13 @@ def _time_match(
     Returns ``(median_seconds, result_frame, n_left_rows, n_right_rows)``.
     """
     # Collect source frames once so _record doesn't re-materialise.
-    left = left_src.lazy().collect()
-    right = right_src.lazy().collect()
+    left = left_src.lazy().collect().with_row_index("_bench_left_row")
+    right = right_src.lazy().collect().with_row_index("_bench_right_row")
     left_n, right_n = left.height, right.height
 
     # Re-wrap as lazy for sky_match (it calls .collect() internally).
     left_lf, right_lf = left.lazy(), right.lazy()
+    spec = replace(spec, fallback_policy="error")
 
     result = None
     for _ in range(n_warmup):
@@ -132,8 +139,6 @@ def _raw_astropy_match(
         right[right_src.ra_column].to_numpy() * u.deg,
         right[right_src.dec_column].to_numpy() * u.deg,
     )
-    spec.radius_arcsec * u.arcsec
-
     for _ in range(n_warmup):
         idx, sep2d, _ = lcoord.match_to_catalog_sky(rcoord)
 
@@ -164,6 +169,18 @@ def _record(
     right_n: int,
     spec: MatchSpec,
 ) -> None:
+    baseline = next(
+        (
+            entry["result"]
+            for entry in BENCH_RESULTS
+            if entry["scenario"] == scenario
+            and entry["radius"] == spec.radius_arcsec
+            and entry["engine"] == "astropy"
+        ),
+        None,
+    )
+    if engine != "astropy" and baseline is not None:
+        _assert_match_agreement(baseline, result)
     n = result.height
     sep_max = float(result["sep_arcsec"].max()) if n else 0.0
     BENCH_RESULTS.append(
@@ -181,6 +198,19 @@ def _record(
     )
 
 
+def _assert_match_agreement(baseline: pl.DataFrame, result: pl.DataFrame) -> None:
+    """Check primary coverage and nearest distance; equally near ties may differ."""
+    reference = baseline.sort("_bench_left_row")
+    actual = result.sort("_bench_left_row")
+    assert actual["_bench_left_row"].to_list() == reference["_bench_left_row"].to_list()
+    np.testing.assert_allclose(
+        actual["sep_arcsec"].to_numpy(),
+        reference["sep_arcsec"].to_numpy(),
+        rtol=0.0,
+        atol=1e-6,
+    )
+
+
 def _record_raw(
     scenario: str,
     spec: MatchSpec,
@@ -188,6 +218,14 @@ def _record_raw(
     elapsed: float,
     n_matches: int,
 ) -> None:
+    baseline_counts = [
+        entry["matches"]
+        for entry in BENCH_RESULTS
+        if entry["scenario"] == scenario
+        and entry["radius"] == spec.radius_arcsec
+        and entry["engine"] == "astropy"
+    ]
+    assert not baseline_counts or n_matches == baseline_counts[0]
     BENCH_RESULTS.append(
         {
             "scenario": scenario,
@@ -217,11 +255,8 @@ def test_bench_gaia_self(radius_arcsec: float, find: str, gaia_csv, request):
         elapsed, result, left_n, right_n = _time_match(src, src, spec, engine)
         _record("Gaia self", src, src, engine, elapsed, result, left_n, right_n, spec)
 
-    try:
-        elapsed, n = _raw_astropy_match(src, src, spec)
-        _record_raw("Gaia self", spec, "astropy-raw", elapsed, n)
-    except Exception:
-        pass
+    elapsed, n = _raw_astropy_match(src, src, spec)
+    _record_raw("Gaia self", spec, "astropy-raw", elapsed, n)
 
 
 @pytest.mark.skipif(not _HAVE_ASTROQUERY, reason="astroquery not installed")
@@ -246,11 +281,8 @@ def test_bench_gaia_x_allwise(radius_arcsec: float, gaia_csv, allwise_csv, reque
             spec,
         )
 
-    try:
-        elapsed, n = _raw_astropy_match(left_src, right_src, spec)
-        _record_raw("Gaia x AllWISE", spec, "astropy-raw", elapsed, n)
-    except Exception:
-        pass
+    elapsed, n = _raw_astropy_match(left_src, right_src, spec)
+    _record_raw("Gaia x AllWISE", spec, "astropy-raw", elapsed, n)
 
 
 @pytest.mark.skipif(not _HAVE_ASTROQUERY, reason="astroquery not installed")
@@ -266,11 +298,8 @@ def test_bench_gaia_x_usno(gaia_csv, usno_csv, request):
             "Gaia x USNO-B", left_src, right_src, engine, elapsed, result, left_n, right_n, spec
         )
 
-    try:
-        elapsed, n = _raw_astropy_match(left_src, right_src, spec)
-        _record_raw("Gaia x USNO-B", spec, "astropy-raw", elapsed, n)
-    except Exception:
-        pass
+    elapsed, n = _raw_astropy_match(left_src, right_src, spec)
+    _record_raw("Gaia x USNO-B", spec, "astropy-raw", elapsed, n)
 
 
 @pytest.mark.skipif(not _HAVE_ASTROQUERY, reason="astroquery not installed")
@@ -283,8 +312,5 @@ def test_bench_allwise_self(allwise_csv, request):
         elapsed, result, left_n, right_n = _time_match(src, src, spec, engine)
         _record("AllWISE self", src, src, engine, elapsed, result, left_n, right_n, spec)
 
-    try:
-        elapsed, n = _raw_astropy_match(src, src, spec)
-        _record_raw("AllWISE self", spec, "astropy-raw", elapsed, n)
-    except Exception:
-        pass
+    elapsed, n = _raw_astropy_match(src, src, spec)
+    _record_raw("AllWISE self", spec, "astropy-raw", elapsed, n)

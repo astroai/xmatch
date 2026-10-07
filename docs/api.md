@@ -6,7 +6,7 @@ Stable public surface only. Anything not exported from `xmatch.__init__` is cons
 
 ## Top-Level Entry Points (`xmatch.CrossMatch`)
 
-`CrossMatch` is the central orchestrator. It parses configuration, manages remote archive discovery, handles coordinate conversions, and dispatches to the optimal local or distributed engine.
+`CrossMatch` resolves configured catalogues, manages remote archive access, validates declared coordinate-frame compatibility, and dispatches requests to matching engines. It does not transform coordinates between frames.
 
 ```python
 from xmatch import CrossMatch
@@ -38,7 +38,7 @@ def crossmatch_request(self, req: MatchRequest) -> pl.DataFrame | pl.LazyFrame |
 ```
 
 **Parameters**:
-- `req` (`MatchRequest`): Fully validated request dataclass containing input sources, matching specifications, engine choices, and column overrides.
+- `req` (`MatchRequest`): Typed request dataclass containing input sources, matching specifications, engine choices, and column overrides; runtime validation also depends on source metadata and selected engine.
 
 **Returns**:
 - `pl.DataFrame` (eager, default) or `pl.LazyFrame` (when `req.lazy=True`). Returns `None` when `req.output_file` is provided and results are streamed to disk.
@@ -52,29 +52,39 @@ Classic spread-arguments entry point.
 ```python
 def crossmatch(
     self,
-    cat1: FrameInput,
-    cat2: FrameInput,
+    catalogue_1_input: FrameInput,
+    catalogue_2_input: FrameInput,
     output_file: str | Path | None = None,
+    *,
     lazy: bool = False,
-    radius_arcsec: float = 1.0,
-    matcher: str = "sky",
-    engine: str = "auto",
-    join_type: str = "1and2",
-    find: str = "best",
+    progress_cb: Callable[[str], None] | None = None,
     **params: Any,
 ) -> pl.DataFrame | pl.LazyFrame | None
 ```
 
+This compatibility API takes matching options as keyword parameters; it has no
+`spec=` parameter. Use `crossmatch_request(MatchRequest(..., spec=...))` when
+you already have a `MatchSpec` or need typed per-side metadata.
+
+```python
+request = MatchRequest(
+    cat1="cat_a.parquet",
+    cat2="cat_b.parquet",
+    spec=MatchSpec(radius_arcsec=1.5, matcher="sky", find="best"),
+)
+result = cm.crossmatch_request(request)
+```
+
 **Key Parameters**:
 - `cat1`, `cat2` (`str | Path | pl.DataFrame | pl.LazyFrame`): Input catalogues. Can be local file paths (`.parquet`, `.csv`, `.tsv`, `.fits`), HATS directory paths, remote TAP catalogue names (e.g. `"gaia"`, `"des"`), or in-memory Polars frames.
-- `output_file` (`str | Path | None`): Destination path (`.parquet`, `.csv`, `.tsv`, `.fits`, `.hats`, or `vos:` URI). Streams results via Polars streaming sinks.
+- `output_file` (`str | Path | None`): Destination file/tree supported by the selected writer. Some sinks stream serialization, but that does not mean the matching step is bounded-memory.
 - `lazy` (`bool`): If `True`, returns an uncollected `pl.LazyFrame`.
 - `radius_arcsec` (`float`): Spatial matching radius in arcseconds.
 - `matcher` (`str`): Match algorithm: `"sky"`, `"skyerr"`, `"skyellipse"`, `"lr"`, `"ml"`, `"xgb"`, `"auf"`, `"macauff"`.
 - `engine` (`str`): Spatial engine: `"auto"`, `"fast"`, `"zone"`, `"ray"`, `"ray-union"`, `"astropy"`, `"stilts"`, `"torchsky"`.
 - `join_type` (`str`): Relational join mode: `"1and2"` (inner), `"all1"` (left), `"all2"` (right), `"1or2"` or `"all"` (full outer), `"1not2"` (left anti), `"2not1"` (right anti).
 - `find` (`str`): Candidate selection policy: `"best"` (nearest/top-ranked match) or `"all"` (all pairs within radius).
-- `**params`: Per-side coordinate column overrides (`ra_column1`, `dec_column1`), remote cone constraints (`ra`, `dec`, `radius_deg`), and algorithm-specific parameters.
+- `**params`: Matching parameters (`radius_arcsec`, `matcher`, `engine`, `join_type`, `find`, etc.), side overrides such as `ra_column_1` / `dec_column_1`, remote cone constraints (`ra`, `dec`, `radius_deg`), and spill controls.
 
 ---
 
@@ -119,8 +129,9 @@ def union_match(
 ) -> pl.DataFrame | pl.LazyFrame | None
 ```
 
-- When full-sky remote surveys are passed without a cone constraint (`ra`, `dec`, `radius_deg`), `union_match` automatically routes to `engine="ray-union"`, mirroring the full tables into HATS and producing a distributed partitioned master HATS catalogue.
-- Supports `engine="ray"` across all matchers (`sky`, `skyerr`, `skyellipse`, `lr`, `ml`, `xgb`, `auf`, `macauff`) and output formats, and `engine="ray-union"` for distributed HATS output with `matcher="sky"`, `matcher="skyerr"`, or `matcher="skyellipse"`, `target_epoch`, and `pm_prior`.
+- With all-remote inputs, no cone constraint, `engine="auto"`, and an output path, `union_match` routes to `engine="ray-union"`; this produces a full-sky full-outer HATS tree.
+- `ray-union` supports `sky`, `skyerr`, and `skyellipse` and HATS output only. It rejects region constraints and unsupported filters, ID joins, scores, and extra columns. Compressed interval planning handles mixed-order/RING inputs and distributed tasks apply measured per-source uncertainty or epoch-motion halos; planning may scan additional partitions. The separate pairwise native HATS path materializes globally for adaptive, RING, mixed-order, and epoch-aligned cases. `engine="ray"` distributes pairwise candidate search, while its caller still materializes inputs and collects results on the coordinator.
+- HATS union outputs include non-null `_union_ra` and `_union_dec` routing coordinates from the lowest-indexed catalogue member in each row; output tree metadata declares NESTED ordering and those columns as the spatial coordinates.
 
 ---
 
@@ -143,7 +154,7 @@ def nway_match(
 ) -> pl.DataFrame | None
 ```
 
-Evaluates Cartesian candidate tuples $c_1 \times c_2 \times \dots \times c_N$ inside the spatial radius and scores each joint tuple with positional and photometric KDE Bayes factors, emitting a joint `p_match` posterior in $[0, 1]$. Supports `engine="ray"` for distributed HEALPix candidate discovery and parallel `@ray.remote` chunk tuple scoring, as well as `target_epoch`, `pm_prior`, and HATS catalogue inputs.
+Resolves and materializes the input frames, finds primary-to-each-secondary candidate pairs inside the spatial radius, then iterates the per-primary Cartesian product in chunks (optionally capped per source). Positional scores require declared errors or explicit per-catalogue error floors. Each `prior_columns` entry must exist in every catalogue and represent a comparable quantity; its midpoint-KDE ratio is an empirical heuristic. `engine="ray"` distributes candidate discovery, but inputs and resulting tuples are assembled on the coordinator. `p_match` uses equal prior odds and is not calibrated for population prevalence or local sky density. Positional covariance is reduced to an isotropic effective sigma; KDEs are fitted on an unconditional source sample capped at 50,000 values per requested column. See [score assumptions](algorithms.md#8-bayesian-pairwise-qualification-and-n-way-scores).
 
 ---
 
@@ -163,7 +174,7 @@ def fof_match(
 ) -> pl.DataFrame | None
 ```
 
-Supports `engine="ray"` for distributed pairwise edge discovery, `target_epoch`, `pm_prior`, and HATS catalogue inputs.
+Searches cross-catalogue edges for every pair of catalogues before forming connected components. Only components containing a source from the first catalogue are emitted; isolated first-catalogue sources are retained, while secondary-only components are omitted. `engine="ray"` distributes pairwise edge discovery, but input frames and component output are still assembled on the coordinator. Numeric attributes are averaged, and nonnumeric attributes use the first value.
 
 **Output Columns**:
 - `bundle_id`: Unique integer assigned to the connected component.
@@ -188,8 +199,8 @@ Consolidated request dataclass.
 | `id_join` | `bool` | `False` | Switch from spatial matching to a relational ID join. |
 | `id_column_1`, `id_column_2` | `str | None` | `None` | Custom ID column names for ID join. |
 | `side1`, `side2` | `SideOverrides` | `SideOverrides()` | Per-side column overrides. |
-| `ra`, `dec`, `radius_deg` | `float | None` | `None` | Bounding cone for remote TAP/CDS downloads. |
-| `probabilistic` | `bool` | `False` | Append Budavári-style `p_match` posterior column. |
+| `ra`, `dec`, `radius_deg` | `float | None` | `None` | Explicit cone for remote TAP/CDS downloads. Required for two-remote `find="best"` and remote `skyerr`, `skyellipse`, or `target_epoch` requests, whose uncertainty/motion halo cannot be safely inferred. |
+| `probabilistic` | `bool` | `False` | Enable positional-only `p_match`. A nonempty `MatchSpec.prior_columns` also enables scoring and adds photometric KDE terms. Both catalogues need declared positional errors or an explicit per-side `default_pos_error_arcsec`. |
 
 ### `MatchSpec`
 
@@ -203,29 +214,26 @@ Defines the algorithm criteria:
 | `join_type` | `str` | `"1and2"` | `"1and2"`, `"1or2"`, `"all1"`, `"all2"`, `"1not2"`, `"2not1"`, `"all"`. |
 | `find` | `str` | `"best"` | `"best"` (nearest/top-ranked) or `"all"` (all pairs within radius). |
 | `target_epoch` | `float | None` | `None` | Julian-year epoch for proper-motion propagation. |
-| `pm_prior` | `bool` | `False` | Enable probabilistic PM drift prior (Wilson 2023). |
+| `pm_prior` | `bool` | `False` | Enable the assumed, Wilson (2023)-inspired PM drift uncertainty model. |
 | `pm_prior_magnitude_column` | `str | None` | `None` | Magnitude column for Wilson (2023) distance-proxy scaling. |
-| `filter_expr` | `str | None` | `None` | Polars SQL WHERE clause for post-match filtering. |
-| `extra_distance_cols` | `dict[str, float]` | `{}` | Extra columns & weights for $N$-dimensional cKDTree ranking. |
-| `batch_size` | `int | None` | `None` | HEALPix pixel batch size for out-of-core memory management. |
+| `filter_expr` | `str | None` | `None` | Polars SQL WHERE clause for filtering candidate pairs; malformed expressions and unknown columns raise `CrossMatchError`. |
+| `extra_distance_cols` | `dict[str, float]` | `{}` | Extra columns & weights for $N$-dimensional `find="best"` ranking; declared columns must exist on both sides and contain numeric finite values, or `CrossMatchError` is raised. |
+| `batch_size` | `int | None` | `None` | Number of HEALPix pixel groups per batch in zone matching; not a general process-memory limit. |
 | `lr_magnitude_column` | `str | None` | `None` | Secondary magnitude column for Likelihood Ratio (`matcher="lr"`). |
 | `lr_q` | `float` | `0.8` | Prior probability of counterpart detection in primary survey. |
 | `ml_color_columns` | `list[str]` | `[]` | Colour/magnitude feature columns for RF/XGB matchers. |
 | `ml_model_path` | `str | None` | `None` | Save/load path for Random Forest model artifact (`.joblib`). |
 | `xgb_model_path` | `str | None` | `None` | Save/load path for XGBoost model artifact (`.joblib`). |
 | `macauff_flux_columns` | `list[str]` | `[]` | Multi-band flux columns for `matcher="macauff"`. |
-| `prior_columns` | `list[str]` | `[]` | Photometric columns for Bayesian KDE prior (`p_match`). |
+| `prior_columns` | `list[str]` | `[]` | Nonempty columns enable Bayesian scoring and add heuristic photometric KDE terms; columns must exist in both catalogues and represent comparable quantities. |
 
 ### `SideOverrides`
 
-```python
-@dataclass
-class SideOverrides:
-    ra_column: str | None = None
-    dec_column: str | None = None
-    id_column: str | None = None
-    columns: list[str] | None = None
-```
+`SideOverrides` includes `ra_column`, `dec_column`, `id_column`, `columns`,
+`ra_err_column`, `dec_err_column`, `corr_column`,
+`astrometric_covariance_columns`, `pos_err_units`, `default_pos_error_arcsec`,
+`epoch`, `epoch_column`, `pm_ra_column`, `pm_dec_column`,
+`parallax_column`, `radial_velocity_column`, `endpoint`, and `frame`.
 
 ---
 
@@ -235,48 +243,44 @@ class SideOverrides:
 
 | Engine | Primary Backend | Threading / Scaling | Memory Overhead | Supported Algorithms & Features |
 |---|---|---|---|---|
-| **`fast`** | `scipy.spatial.cKDTree` | OpenMP multi-threaded (`workers=-1`) | Minimal (3D unit vectors) | All 8 matchers (`sky`, `skyerr`, `skyellipse`, `lr`, `ml`, `xgb`, `auf`, `macauff`), `extra_distance_cols`, `probabilistic=True`, `target_epoch`, `pm_prior`, `nway_match`, `fof_match`. |
-| **`zone`** | `cdshealpix` + `cKDTree` | Single-machine HEALPix sharding | Bounded per pixel | Full feature parity with `fast`; partitions data into HEALPix pixels with exact boundary neighbour expansion. |
-| **`ray`** | Ray cluster | Multi-node / Multi-process Ray tasks | Distributed | Full feature parity with `fast` across flat files, in-memory frames, and HATS inputs (`sky`, `skyerr`, `skyellipse`, `lr`, `ml`, `xgb`, `auf`, `macauff`, `extra_distance_cols`, `probabilistic=True`, `target_epoch`, `pm_prior`, `nway_match`, `fof_match`). |
-| **`ray-union`** | Ray cluster | Distributed star-shaped join | Resumable chunk storage | Distributed full-outer-join union producing full HATS partition trees with `matcher="sky"`, `"skyerr"`, or `"skyellipse"`, `target_epoch`, and `pm_prior`. |
-| **`astropy`** | Astropy `SkyCoord` | Single-threaded Python | High (object trees) | Pure-Python fallback; used when SciPy or C extensions are unavailable. |
-| **`stilts`** | STILTS `tmatch2` | External Java subprocess | Managed by JVM | `sky`, `skyerr`, `skyellipse`; requires Java and `stilts` CLI tool. |
-| **`torchsky`** | PyTorch / Torchsky | GPU / Vectorized Tensor ops | Fixed PyTorch RSS | Tensor-native candidate pruning; requires `torchsky`. |
+| **`fast`** | `scipy.spatial.cKDTree` | Single-process spatial queries (SciPy may use native parallelism where requested) | Holds coordinate arrays and candidate/result data | General local pairwise engine; matcher requirements still apply. |
+| **`zone`** | `cdshealpix` + `cKDTree` | HEALPix pixel groups on one machine | Pixel batching; total memory depends on input/result path | Zone-based candidate queries; `batch_size` is not a process-memory cap. |
+| **`ray`** | Ray | Distributed HEALPix candidate queries | Coordinator holds input frames and assembles final result | Pairwise work only; it is not an out-of-core flat-file pipeline. |
+| **`ray-union`** | Ray + HATS | Full-sky union to HATS output | Distributed interval plan; may read extra partitions for conservative halos | Supports `sky`, `skyerr`, `skyellipse`; handles mixed-order/RING layouts and uncertainty/epoch halos. |
+| **`astropy`** | Astropy `SkyCoord` | Astropy sky-coordinate queries | Depends on input and candidate counts | Alternative local geometry backend. |
+| **`stilts`** | STILTS `tmatch2` | External Java subprocess | Managed by JVM | Requires Java and a working `stilts` executable; matcher support depends on requested options. |
+| **`torchsky`** | PyTorch / Torchsky | Tensor-based candidate search | Depends on tensors and returned candidates | Requires a separately installed compatible Torchsky checkout; no PyPI distribution is available. Tested with the sibling 0.4 development source installed editable. |
 
 ---
 
 ### Technical Deep Dive: Astropy vs. SciPy cKDTree
 
-Understanding why `engine="fast"` (`scipy.spatial.cKDTree`) is preferred over `engine="astropy"`:
+`fast` and `astropy` provide alternative local spatial-query implementations. Their relative performance depends on data size, candidate density, hardware, and installed libraries; measure on representative data with [`scripts/bench_engines.py`](../scripts/bench_engines.py).
 
 ```mermaid
 flowchart TD
     subgraph Astropy Engine
         A1["RA/Dec Arrays"] --> A2["astropy.units.deg"]
         A2 --> A3["SkyCoord Objects"]
-        A3 --> A4["astropy internal KDTree<br/>(Single-threaded Python wrapper)"]
-        A4 --> A5["Angle / Quantity Seperations"]
+        A3 --> A4["Astropy sky-coordinate query"]
+        A4 --> A5["Angle / Quantity Separations"]
     end
-    
+
     subgraph SciPy cKDTree (fast Engine)
         B1["RA/Dec Arrays"] --> B2["Vectorized 3D Unit Sphere<br/>x = cos(δ)cos(α), y = cos(δ)sin(α), z = sin(δ)"]
-        B2 --> B3["scipy.spatial.cKDTree<br/>(C++ with OpenMP workers=-1)"]
+        B2 --> B3["scipy.spatial.cKDTree"]
         B3 --> B4["Chord length d = 2·sin(θ/2)<br/>Zero Python Object Allocations"]
     end
 ```
 
-1. **Object Allocation & Memory**:
-   - **Astropy**: Constructs `SkyCoord` instances containing `UnitSphericalRepresentation` objects, generating high-overhead Python object trees.
-   - **SciPy (`fast`)**: Directly computes raw 3D Cartesian coordinates on the unit sphere $[x, y, z]$ as contiguous $N \times 3$ NumPy float64 buffers. Zero Python wrapper objects are allocated per source.
-2. **Parallelism & Performance**:
-   - **Astropy**: Executes single-threaded Python traversal through `match_to_catalog_sky` or `search_around_sky`.
-   - **SciPy (`fast`)**: The C++ implementation of `cKDTree` natively leverages OpenMP parallel search (`workers=-1`), querying all CPU cores concurrently. Benchmarks confirm **3–5× speedups** on modern multi-core systems.
+1. **Coordinate representation**: Astropy uses `SkyCoord`; the fast path constructs unit-sphere Cartesian arrays for SciPy's `cKDTree`. Costs depend on input and candidate counts.
+2. **Parallelism & Performance**: Runtime and threading depend on the selected query path and native libraries. No fixed speedup or memory-per-row estimate applies across input sizes and candidate densities.
 3. **Exact Spherical to Chord Distance Mapping**:
    - The angular separation $\theta$ on the celestial sphere corresponds to the 3D Euclidean chord length $d$:
      $$d = 2 \sin\left(\frac{\theta}{2}\right), \quad \theta = 2 \arcsin\left(\frac{d}{2}\right)$$
-   - The `fast` engine transforms search radii via exact, bit-level chord conversions, ensuring bit-level parity with spherical geometry.
+   - The `fast` engine maps unit-sphere angular search radii to Euclidean chord radii; returned separations are great-circle angles.
 4. **N-Dimensional Multimodal Ranking**:
-   - `cKDTree` natively supports $N$-dimensional spaces. When `extra_distance_cols` is configured, `fast` can rank spatial candidates using combined spatial distance and z-score normalized photometry or proper motions.
+   - When `extra_distance_cols` is configured, `fast` finds all spatial candidates with `cKDTree`, then ranks them using combined spatial distance and z-score normalized photometry or proper motions.
 
 ---
 
@@ -311,8 +315,8 @@ from xmatch.mirror import mirror_catalogue, TokenBucket
 from xmatch.storage import open_storage
 ```
 
-- **Remote HATS Replication**: Synchronizes remote HATS directories over HTTP or `vos:` into the local cache (`~/.cache/xmatch` or `/arc/projects/hats`). Skips unchanged partitions based on server size probes.
-- **TAP Keyset Pagination**: Downloads full TAP catalogues in deterministic keyset/offset pages with local resume manifests (`sync.json`).
+- **Remote HATS Replication**: Synchronizes remote HATS directories over HTTP or `vos:` into the local cache (`~/.cache/xmatch` or `/arc/projects/hats`). It hashes remote partition content for each sync attempt; this detects same-size edits but requires reading partition bytes and can add substantial network I/O.
+- **TAP Keyset Pagination**: Downloads TAP catalogues with local resume manifests (`sync.json`) and requires a unique, non-null stable key. Page-window row counts do not detect same-count edits; `--force` requests a full refresh. Append-only growth is detected using a maximum-key probe.
 - **TokenBucket Rate Limiter**: Thread-safe per-host rate limiting handling HTTP 429/503 responses with exponential backoff.
 
 ---

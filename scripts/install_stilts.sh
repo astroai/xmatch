@@ -1,124 +1,57 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Create a `stilts` wrapper from an installed TOPCAT application bundle.
+set -euo pipefail
 
-# Script to create a 'stilts' command that uses the JAR from a local TOPCAT installation.
-
-# Configuration
-INSTALL_DIR="$HOME/bin"
-STILTS_SCRIPT_PATH="$INSTALL_DIR/stilts"
 TOPCAT_APP_NAME="TOPCAT.app"
-SEARCH_DIRS=("/Applications") # Add other likely locations if needed
+INSTALL_DIR="${STILTS_INSTALL_DIR:-$HOME/bin}"
+STILTS_SCRIPT_PATH="${INSTALL_DIR}/stilts"
+IFS=: read -r -a SEARCH_DIRS <<< "${TOPCAT_SEARCH_DIRS:-/Applications}"
 
-# --- Function to find TOPCAT JAR ---
 find_topcat_jar() {
-    local search_dir
-    local topcat_path
-    local jar_path_full
-    local jar_path_lite
-
-    echo "Searching for $TOPCAT_APP_NAME in ${SEARCH_DIRS[@]}..."
-
+    local search_dir topcat_path jar_path
     for search_dir in "${SEARCH_DIRS[@]}"; do
-        topcat_path=$(find "$search_dir" -maxdepth 2 -name "$TOPCAT_APP_NAME" -type d -print -quit)
-        if [ -n "$topcat_path" ]; then
-            echo "Found TOPCAT at: $topcat_path"
-
-            # Look for topcat-full.jar first, then topcat-lite.jar
-            jar_path_full=$(find "$topcat_path/Contents/Resources/" -name "topcat-extra.jar" -print -quit)
-            if [ -f "$jar_path_full" ]; then
-                echo "Using JAR: $jar_path_full"
-                echo "$jar_path_full" # Return the path
+        [[ -d "$search_dir" ]] || continue
+        for topcat_path in "$search_dir/$TOPCAT_APP_NAME" "$search_dir"/*/"$TOPCAT_APP_NAME"; do
+            [[ -d "$topcat_path" ]] || continue
+            printf 'Found TOPCAT at: %s\n' "$topcat_path" >&2
+            jar_path=$(find "$topcat_path/Contents/Resources" -type f -name 'topcat-extra.jar' -print -quit 2>/dev/null || true)
+            if [[ -z "$jar_path" ]]; then
+                jar_path=$(find "$topcat_path/Contents/Resources" -type f -name 'topcat-lite.jar' -print -quit 2>/dev/null || true)
+            fi
+            if [[ -n "$jar_path" ]]; then
+                printf 'Using JAR: %s\n' "$jar_path" >&2
+                printf '%s\n' "$jar_path"
                 return 0
             fi
-
-            jar_path_lite=$(find "$topcat_path/Contents/Resources/" -name "topcat-lite.jar" -print -quit)
-             if [ -f "$jar_path_lite" ]; then
-                echo "Using JAR (lite): $jar_path_lite"
-                echo "$jar_path_lite" # Return the path
-                return 0
-            fi
-
-            echo "Error: Found TOPCAT app, but could not find topcat-full.jar or topcat-lite.jar inside."
-            echo "Looked in: $topcat_path/Contents/Resources/"
+            printf 'Error: TOPCAT has no topcat-extra.jar or topcat-lite.jar: %s\n' "$topcat_path" >&2
             return 1
-        fi
+        done
     done
-
-    echo "Error: Could not find $TOPCAT_APP_NAME in ${SEARCH_DIRS[@]}."
-    echo "Please ensure TOPCAT is installed in a standard location or adjust SEARCH_DIRS in the script."
+    printf 'Error: Could not find %s in configured search directories: %s\n' \
+        "$TOPCAT_APP_NAME" "${SEARCH_DIRS[*]}" >&2
     return 1
 }
-# --- End Function ---
 
-
-# Find the TOPCAT JAR path
-TOPCAT_JAR_PATH=$(find_topcat_jar)
-if [ $? -ne 0 ]; then
-    exit 1
-fi
-if [ -z "$TOPCAT_JAR_PATH" ]; then
-    echo "Error: Failed to get TOPCAT JAR path."
-    exit 1
-fi
-
-# Ensure installation directory exists
+TOPCAT_JAR_PATH=$(find_topcat_jar) || exit 1
 mkdir -p "$INSTALL_DIR"
-if [ $? -ne 0 ]; then
-  echo "Error: Failed to create installation directory $INSTALL_DIR"
-  exit 1
-fi
+printf -v JAR_PATH_QUOTED '%q' "$TOPCAT_JAR_PATH"
 
-
-# Create wrapper script
-echo "Creating wrapper script at $STILTS_SCRIPT_PATH..."
-# Use the located TOPCAT_JAR_PATH in the wrapper script
-cat << EOF > "$STILTS_SCRIPT_PATH"
-#!/bin/bash
-# Wrapper script for STILTS, using the TOPCAT JAR
-# Executes the TOPCAT JAR file, passing all arguments
-
-# Path to the TOPCAT JAR determined during installation
-JAR_PATH="$TOPCAT_JAR_PATH"
-
-# Check if Java is available
-if ! command -v java &> /dev/null; then
-    echo "Error: Java command not found. Please install Java."
+cat > "$STILTS_SCRIPT_PATH" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+JAR_PATH=$JAR_PATH_QUOTED
+if ! command -v java >/dev/null 2>&1; then
+    echo "Error: Java command not found. Install Java to run STILTS." >&2
     exit 1
 fi
-
-# Check if JAR file exists
-if [ ! -f "\$JAR_PATH" ]; then
-    echo "Error: TOPCAT JAR file not found at \$JAR_PATH"
-    echo "The TOPCAT application may have been moved or deleted."
+if [[ ! -f "\$JAR_PATH" ]]; then
+    echo "Error: TOPCAT JAR file not found at \$JAR_PATH" >&2
     exit 1
 fi
-
-# Execute STILTS functionality via TOPCAT JAR
-# Add -stilts flag to invoke STILTS mode
-echo "Running command via TOPCAT JAR: java -jar \"\$JAR_PATH\" -stilts \$@" >&2 # Debug output to stderr
 exec java -jar "\$JAR_PATH" -stilts "\$@"
 EOF
-
-# Make wrapper script executable
 chmod +x "$STILTS_SCRIPT_PATH"
-if [ $? -ne 0 ]; then
-  echo "Error: Failed to make wrapper script executable."
-  # No JAR to clean up in this version
-  exit 1
-fi
-echo "Created executable wrapper script at $STILTS_SCRIPT_PATH"
-
-# Check if INSTALL_DIR is in PATH and advise if not
+printf 'Created executable wrapper: %s\n' "$STILTS_SCRIPT_PATH"
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-  echo ""
-  echo "Warning: Installation directory $INSTALL_DIR is not in your PATH."
-  echo "To run the 'stilts' command easily, add the following line to your ~/.zshrc file:"
-  echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
-  echo "Then, restart your terminal or run 'source ~/.zshrc'."
-else
-    echo ""
-    echo "$INSTALL_DIR is already in your PATH."
+    printf 'Add this directory to PATH to run `stilts`: %s\n' "$INSTALL_DIR"
 fi
-
-echo ""
-echo "STILTS wrapper script using TOPCAT JAR created successfully!"
-echo "You can now try running: stilts -help"

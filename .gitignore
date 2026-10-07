@@ -18,7 +18,6 @@ env/
 ENV/
 .env
 .venv
-env/
 env.bak/
 venv.bak/
 
@@ -69,5 +68,3 @@ cache/
 .pixi/
 .mypy_cache/
 .ruff_cache/
-
-

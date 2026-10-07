@@ -109,7 +109,8 @@ def _get_ray_pixel_batch():
                 batch_xyz,
                 k=1,
                 distance_upper_bound=chord_max,
-                workers=-1,
+                # ponytail: one CPU per Ray task; parallelize across pixels.
+                workers=1,
             )
             valid = np.isfinite(dist) & (local_idx < margin_tree.n)
             if not np.any(valid):
@@ -123,7 +124,7 @@ def _get_ray_pixel_batch():
         idx_lists = margin_tree.query_ball_point(
             batch_xyz,
             r=chord_max,
-            workers=-1,
+            workers=1,
         )
         l_parts, r_parts, sep_parts = [], [], []
         for k, neighbors in enumerate(idx_lists):
@@ -239,20 +240,14 @@ def ray_zone_match(
     if not ray.is_initialized():
         # Join the cluster in $RAY_ADDRESS when one is running (CANFAR:
         # a ray-manager session — see scripts/canfar-ray-job.sh); with the env unset this
-        # starts a fresh local cluster exactly as before.  A dead address
-        # (ConnectionError) falls back to local — same pattern as
-        # ray_union.ray_union_match.
+        # starts a fresh local cluster. An explicit address must never be
+        # silently replaced by a local cluster under strict fallback policy.
         try:
             ray.init(
                 address=os.environ.get("RAY_ADDRESS") or None,
                 ignore_reinit_error=True,
                 logging_level=logging.WARNING,
             )
-        except ConnectionError:
-            # ray.init honours $RAY_ADDRESS for address=None too, so a dead
-            # cluster address must be cleared before the local fallback.
-            os.environ.pop("RAY_ADDRESS", None)
-            ray.init(address=None, ignore_reinit_error=True, logging_level=logging.WARNING)
         except Exception as exc:
             if spec.fallback_policy == "error":
                 raise CrossMatchError(

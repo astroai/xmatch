@@ -1,0 +1,66 @@
+name: Linux release gate
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Ubuntu 24.04 / Python 3.13
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Pixi
+        uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
+        with:
+          pixi-version: v0.81.0
+          run-install: false
+          cache: true
+          cache-write: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+
+      - name: Install the locked environment
+        run: pixi install --locked
+
+      - name: Run lint, type checks, and offline tests
+        run: pixi run ci-local
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.20"
+
+      - name: Install Python 3.13 for package builds
+        run: uv python install 3.13
+
+      - name: Build wheel and source distribution
+        run: uv build --python 3.13 --out-dir dist
+
+      - name: Verify release archive contents and metadata
+        run: pixi run --as-is python scripts/check_release.py --dist dist
+
+      - name: Install wheel without dependencies
+        run: |
+          mkdir -p "${RUNNER_TEMP}/xmatch-wheel"
+          uv pip install --python .pixi/envs/default/bin/python --target "${RUNNER_TEMP}/xmatch-wheel" --no-deps dist/*.whl
+
+      - name: Smoke-test the installed wheel and console script
+        env:
+          PYTHONPATH: ${{ runner.temp }}/xmatch-wheel
+        run: |
+          pixi run --as-is python -c 'import os; from pathlib import Path; import xmatch; root = Path(os.environ["PYTHONPATH"]).resolve(); path = Path(xmatch.__file__).resolve(); assert path.is_relative_to(root), (path, root); print(path)'
+          "${RUNNER_TEMP}/xmatch-wheel/bin/xmatch" --help

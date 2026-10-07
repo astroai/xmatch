@@ -10,6 +10,7 @@ from xmatch.astro_utils import (
     propagate_proper_motion_with_jacobian,
     propagate_space_motion_with_jacobian,
 )
+from xmatch.exceptions import CrossMatchError
 from xmatch.matchers import MatchSpec, sky_match
 from xmatch.sources import CatalogueSource
 
@@ -198,8 +199,8 @@ def test_torchsky_engine_skyerr_matches_fast() -> None:
     )
 
 
-def test_torchsky_skyerr_nan_sigma_does_not_match() -> None:
-    """Unknown positional error is not an infinite acceptance radius."""
+def test_torchsky_skyerr_rejects_nan_sigma() -> None:
+    """An unknown declared positional error is rejected explicitly."""
     left = pl.DataFrame(
         {
             "left_id": [0],
@@ -237,7 +238,5 @@ def test_torchsky_skyerr_nan_sigma_does_not_match() -> None:
         ra_err_column="ra_err",
         dec_err_column="dec_err",
     )
-    out = sky_match(
-        left_src, right_src, left.lazy(), right.lazy(), spec, engine="torchsky"
-    ).collect()
-    assert out.height == 0
+    with pytest.raises(CrossMatchError, match="non-finite or negative RA position error"):
+        sky_match(left_src, right_src, left.lazy(), right.lazy(), spec, engine="torchsky").collect()

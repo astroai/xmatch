@@ -81,6 +81,18 @@ def test_release_rejects_malformed_parent_before_writing(tmp_path) -> None:
     assert not target.exists()
 
 
+def test_release_does_not_replace_broken_symlink_target(tmp_path) -> None:
+    records = _records()
+    target = tmp_path / "release"
+    target.symlink_to(tmp_path / "missing-release")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        write_association_release(records, target, provenance=records[0].provenance)
+
+    assert target.is_symlink()
+    assert not (tmp_path / "missing-release").exists()
+
+
 def test_release_rejects_unsorted_or_duplicate_records_without_partial_publish(tmp_path) -> None:
     records = _records()
     target = tmp_path / "bad"

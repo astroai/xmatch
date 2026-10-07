@@ -7647,7 +7647,6 @@ packages:
   - hats>=0.7 ; extra == 'hats-ray'
   - ray>=2.50 ; extra == 'hats-ray'
   - cdshealpix>=0.8 ; extra == 'hats-ray'
-  - torchsky>=0.4.0.dev0 ; extra == 'torchsky'
   - ray>=2.50 ; extra == 'ray'
   - cdshealpix>=0.8 ; extra == 'ray'
   - scikit-learn ; extra == 'ml'

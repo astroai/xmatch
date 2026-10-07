@@ -8,21 +8,21 @@
 # this script is a thin driver over the platform CLIs:
 #
 #   1. preflight — `canfar` client present and authenticated (`canfar ps`)
-#   2. cluster   — `astroai-workload cluster ensure` launches N worker
-#                  sessions through the ray-manager (idempotent; skipped
-#                  when ASTROAI_RAY_JOBS_ADDRESS / --address is already set)
-#   3. submit    — `astroai-workload submit --cmd "$CMD" --wait` runs the
+#   2. cluster   — `astroai cluster start` configures the ray-manager and
+#                  launches N worker sessions (skipped when
+#                  CANFAR_RAY_JOBS_ADDRESS / --address is already set)
+#   3. submit    — `astroai jobs submit --cmd "$CMD" --wait` runs the
 #                  command on the Ray Jobs API; the script's exit code is
 #                  the job's
 #
 # The ray-manager session itself is started from the AstroAI hub ("Start
 # batch compute") or with:
-#   canfar create --name xmatch-ray contributed images.canfar.net/astroai/ray-manager:<tag>
+#   canfar create --cpu 2 --memory 8 --name xmatch-ray contributed images.canfar.net/astroai/ray-manager:<tag>
 # (or pass --create-manager IMAGE to have this script create it first).
 #
 # Usage (from any AstroAI/CANFAR session with the platform CLIs on PATH):
 #   scripts/canfar-ray-job.sh \
-#       --command "pixi run xmatch match gaia desils --union -o full.hats --retries 2"
+#       --command "pixi run python scripts/bench_ray_union.py --rows 100000 --repeat 1 --warmup 0 --work-dir /arc/projects/hats/xmatch-bench-unique"
 #
 # IMPORTANT — the union cache must be visible to every worker pod.  On the
 # platform the defaults are already shared: the mirrored-HATS cache root is
@@ -36,26 +36,26 @@
 # breaks remote workers' reads.
 #
 # Options:
-#   --command CMD        command to run as the Ray Job (shell string)
-#   --workers N          ray-worker sessions to launch (default 4)
+#   --command CMD        required command to run as the Ray Job (shell string)
+#   --workers N          min/max ray-worker sessions to keep (default 4)
 #   --cores N            CPUs per worker (default 1)
 #   --ram GiB            RAM per worker (default 4)
 #   --cpus N             entrypoint CPUs for the job (default 2)
 #   --memory GiB         entrypoint memory reservation (optional)
 #   --env KEY=VALUE      environment for the job (repeatable)
 #   --cwd DIR            job working directory, uploaded to the head
-#                        (tracked files only — Ray respects .gitignore,
-#                        including nested files, so .pixi/ is skipped).
+#                        (non-ignored files, including untracked files —
+#                        inspect it for secrets; .gitignore applies).
 #                        Default: none — on the platform (webterm, /arc
 #                        mounted) the command is self-located into the
 #                        current directory instead, so nothing uploads,
 #                        the installed pixi env is reused and outputs
 #                        land in the repo.  From a laptop, self-locate:
 #                        --command "bash -lc 'cd /arc/... && pixi run ...'"
-#   --create-manager IMG create the ray-manager session first
+#   --create-manager IMG create a 2-CPU/8-GiB ray-manager session first
 #   --manager-name NAME  manager session name (default xmatch-ray)
-#   --manager URL        manager connect URL (cluster ensure --address)
-#   --address URL        Jobs API URL (skip cluster ensure)
+#   --manager URL        manager connect URL (cluster start --address)
+#   --address URL        Jobs API URL (skip cluster start)
 #   --dry-run            print exactly what would run; runs nothing
 
 set -eu
@@ -65,7 +65,7 @@ CORES=1
 RAM=4
 CPUS=2
 MEMORY=""
-CMD='pixi run xmatch match gaia desils --union -o full.hats --retries 2'
+CMD=""
 ENVS=""
 CWD=""
 CREATE_MANAGER=""
@@ -75,7 +75,7 @@ ADDRESS=""
 DRY_RUN=0
 
 usage() {
-    sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^set -eu$/p' "$0" | sed -e '/^set -eu$/d' -e 's/^# \{0,1\}//'
 }
 
 # shell-quote a string for display / safe eval (single quotes, POSIX-safe)
@@ -130,6 +130,12 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ -z "$CMD" ]; then
+    echo "error: --command is required; pass a bounded workload explicitly" >&2
+    usage
+    exit 2
+fi
+
 # Job working directory.  On the platform (webterm; /arc mounted) the repo
 # at $(pwd) already lives on the head pod via the shared /arc volume — so
 # default to SELF-LOCATING the command (`bash -c 'cd <pwd> && CMD'`): zero
@@ -144,13 +150,13 @@ if [ -z "$CWD" ]; then
         echo "note: no self-locating default (needs pixi.toml + the /arc mount);" >&2
         echo "  the job would run in the head's default working directory." >&2
         echo "  Run this from the repo on the manager, pass --cwd (uploads this" >&2
-        echo "  copy; tracked files only — .pixi is excluded via its nested" >&2
-        echo "  .gitignore), or self-locate:" >&2
+        echo "  copy's non-ignored files, including untracked files; inspect it" >&2
+        echo "  for secrets), or self-locate:" >&2
         echo "  --command \"bash -lc 'cd /abs/manager/path && pixi run ...'\"" >&2
     fi
 elif [ ! -f "$CWD/.gitignore" ]; then
     echo "note: --cwd $CWD has no .gitignore — Ray uploads everything in it" >&2
-    echo "  (secrets included).  Add a .gitignore or use a self-locating command." >&2
+    echo "  (including secrets). Add a .gitignore or use a self-locating command." >&2
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -158,21 +164,21 @@ if [ "$DRY_RUN" -eq 1 ]; then
     echo "preflight:"
     echo "  canfar ps >/dev/null"
     if [ -n "$CREATE_MANAGER" ]; then
-        echo "  canfar create --name $MGR_NAME contributed $(shq "$CREATE_MANAGER")"
+        echo "  canfar create --cpu 2 --memory 8 --name $MGR_NAME contributed $(shq "$CREATE_MANAGER")"
     fi
     echo "cluster:"
     if [ -n "$ADDRESS" ]; then
         echo "  (skipped — using --address $(shq "$ADDRESS"))"
-    elif [ -n "${ASTROAI_RAY_JOBS_ADDRESS:-}" ]; then
-        echo "  (skipped — ASTROAI_RAY_JOBS_ADDRESS already set)"
+    elif [ -n "${CANFAR_RAY_JOBS_ADDRESS:-}" ]; then
+        echo "  (skipped — CANFAR_RAY_JOBS_ADDRESS already set)"
     else
-        echo "  astroai-workload cluster ensure --workers $WORKERS --cores $CORES --ram $RAM${MANAGER:+ --address $(shq "$MANAGER")}"
+        echo "  astroai cluster start --min-workers $WORKERS --max-workers $WORKERS --cores $CORES --ram $RAM${MANAGER:+ --address $(shq "$MANAGER")}"
     fi
     RUN_CMD="$CMD"
     [ -n "$SELF_LOCATE" ] && RUN_CMD="$SELF_LOCATE"
-    ADDR_DISP="${ADDRESS:-${ASTROAI_RAY_JOBS_ADDRESS:-<resolved by cluster ensure>}}"
+    ADDR_DISP="${ADDRESS:-${CANFAR_RAY_JOBS_ADDRESS:-<resolved by cluster start>}}"
     echo "submit:"
-    echo "  astroai-workload submit --cmd $(shq "$RUN_CMD") --cpus $CPUS --address $(shq "$ADDR_DISP")${MEMORY:+ --memory $(shq "$MEMORY")}${CWD:+ --cwd $(shq "$CWD")} --wait$ENVS"
+    echo "  astroai jobs submit --cmd $(shq "$RUN_CMD") --cpus $CPUS --address $(shq "$ADDR_DISP")${MEMORY:+ --memory $(shq "$MEMORY")}${CWD:+ --cwd $(shq "$CWD")} --wait$ENVS"
     exit 0
 fi
 
@@ -183,10 +189,9 @@ command -v canfar >/dev/null 2>&1 || {
     echo "  canfar client (PyPI 'canfar') and log in with 'canfar login'" >&2
     exit 1
 }
-command -v astroai-workload >/dev/null 2>&1 || {
-    echo "error: 'astroai-workload' not found on PATH" >&2
-    echo "  it ships in the ray-manager/ray-worker images and AstroAI" >&2
-    echo "  sessions; standalone: pip install astroai-workload" >&2
+command -v astroai >/dev/null 2>&1 || {
+    echo "error: 'astroai' not found on PATH" >&2
+    echo "  run this from an AstroAI session with canfar-lab installed" >&2
     exit 1
 }
 canfar ps >/dev/null 2>&1 || {
@@ -195,38 +200,38 @@ canfar ps >/dev/null 2>&1 || {
 }
 
 # ---------------------------------------------------------------- cluster
-if [ -z "$ADDRESS" ] && [ -z "${ASTROAI_RAY_JOBS_ADDRESS:-}" ]; then
+if [ -z "$ADDRESS" ] && [ -z "${CANFAR_RAY_JOBS_ADDRESS:-}" ]; then
     if [ -n "$CREATE_MANAGER" ]; then
         echo "creating ray-manager session '$MGR_NAME' from $CREATE_MANAGER"
-        canfar create --name "$MGR_NAME" contributed "$CREATE_MANAGER"
+        canfar create --cpu 2 --memory 8 --name "$MGR_NAME" contributed "$CREATE_MANAGER"
     fi
-    echo "ensuring ray cluster ($WORKERS worker(s), ${CORES}c/${RAM}GiB each)"
-    set -- astroai-workload cluster ensure --workers "$WORKERS" \
+    echo "starting ray cluster ($WORKERS worker(s), ${CORES}c/${RAM}GiB each)"
+    set -- astroai cluster start --min-workers "$WORKERS" --max-workers "$WORKERS" \
         --cores "$CORES" --ram "$RAM"
     [ -n "$MANAGER" ] && set -- "$@" --address "$MANAGER"
-    ensure_out=$("$@" 2>&1) || {
-        echo "$ensure_out" >&2
-        echo "error: cluster ensure failed — is a ray-manager session running?" >&2
-        echo "  start one from the AstroAI hub, or: canfar create --name $MGR_NAME" >&2
+    start_out=$("$@" 2>&1) || {
+        echo "$start_out" >&2
+        echo "error: cluster start failed — is a ray-manager session running?" >&2
+        echo "  start one from the AstroAI hub, or: canfar create --cpu 2 --memory 8 --name $MGR_NAME" >&2
         echo "  contributed images.canfar.net/astroai/ray-manager:<tag>" >&2
         exit 1
     }
-    ADDRESS=$(printf '%s\n' "$ensure_out" | sed -n 's/^export ASTROAI_RAY_JOBS_ADDRESS=//p' | tail -n 1)
+    ADDRESS=$(printf '%s\n' "$start_out" | sed -n 's/^export CANFAR_RAY_JOBS_ADDRESS=//p' | tail -n 1)
     if [ -z "$ADDRESS" ]; then
-        echo "$ensure_out" >&2
-        echo "error: could not read the Jobs address from 'cluster ensure' output" >&2
+        echo "$start_out" >&2
+        echo "error: could not read the Jobs address from 'cluster start' output" >&2
         exit 1
     fi
-    echo "$ensure_out"
+    echo "$start_out"
 else
-    ADDRESS="${ADDRESS:-${ASTROAI_RAY_JOBS_ADDRESS}}"
+    ADDRESS="${ADDRESS:-${CANFAR_RAY_JOBS_ADDRESS:-}}"
     echo "using jobs address: $ADDRESS"
 fi
 
 # ---------------------------------------------------------------- submit
 RUN_CMD="$CMD"
 [ -n "$SELF_LOCATE" ] && RUN_CMD="$SELF_LOCATE"
-set -- astroai-workload submit --cmd "$RUN_CMD" --cpus "$CPUS" \
+set -- astroai jobs submit --cmd "$RUN_CMD" --cpus "$CPUS" \
     --address "$ADDRESS" --wait
 [ -n "$MEMORY" ] && set -- "$@" --memory "$MEMORY"
 [ -n "$CWD" ] && set -- "$@" --cwd "$CWD"

@@ -1,13 +1,18 @@
 """Remote backends exercised with mocks (no network access)."""
 
+import re
 import sys
 import types
 from pathlib import Path
 
+import astropy.units as u
+import numpy as np
 import polars as pl
 import pytest
+from astropy.coordinates import SkyCoord
 
 from xmatch import CrossMatch
+from xmatch.exceptions import CrossMatchError
 from xmatch.matchers import MatchSpec
 from xmatch.request import MatchRequest
 from xmatch.sources import CatalogueSource
@@ -206,6 +211,122 @@ def test_download_remote_requires_region_when_no_local(cm):
         cm._download_remote(src, req, prefix="1")  # no ra/dec/radius and no local extent
 
 
+def test_datalab_cone_box_is_a_conservative_spherical_bound():
+    from xmatch.remote_tap import _cone_predicate
+
+    # Independent spherical geometry check: this source is inside the 1 deg
+    # cone despite being 180 deg away in RA because the cone reaches the pole.
+    centre = SkyCoord(0.0 * u.deg, 89.9 * u.deg, frame="icrs")
+    near_pole = SkyCoord(180.0 * u.deg, 89.5 * u.deg, frame="icrs")
+    assert centre.separation(near_pole).deg < 1.0
+    pole_query = _cone_predicate('"ra"', '"dec"', 0.0, 89.9, 1.0, box=True)
+    assert 't."ra"' not in pole_query
+    assert 't."dec" BETWEEN 88.9 AND 90.0' in pole_query
+
+    # Sample the boundary with Astropy, independently checking the exact
+    # tangent-meridian longitude bound for a cap that does not reach a pole.
+    centre = SkyCoord(10.0 * u.deg, 60.0 * u.deg, frame="icrs")
+    bearings = np.linspace(0.0, 360.0, 3601) * u.deg
+    boundary = centre.directional_offset_by(bearings, 20.0 * u.deg)
+    offsets = (boundary.ra.deg - centre.ra.deg + 180.0) % 360.0 - 180.0
+    max_offset = float(np.max(np.abs(offsets)))
+    tangent_bound = np.degrees(np.arcsin(np.sin(np.radians(20.0)) / np.cos(np.radians(60.0))))
+    assert max_offset <= tangent_bound + 1e-6
+    box_query = _cone_predicate('"ra"', '"dec"', 10.0, 60.0, 20.0, box=True)
+    limits = re.search(r'>= ([\d.]+) OR t\."ra" <= ([\d.]+)', box_query)
+    assert limits is not None
+    ra_lo, ra_hi = map(float, limits.groups())
+    assert np.all((boundary.ra.deg >= ra_lo) | (boundary.ra.deg <= ra_hi))
+
+    wrap_query = _cone_predicate('"ra"', '"dec"', 0.1, 0.0, 1.0, box=True)
+    assert 't."ra" >= 359.1 OR t."ra" <= 1.1' in wrap_query
+
+
+@pytest.mark.parametrize(
+    "region",
+    [
+        {"ra": 10.0},
+        {"ra": "invalid", "dec": 0.0, "radius_deg": 1.0},
+        {"ra": float("nan"), "dec": 0.0, "radius_deg": 1.0},
+        {"ra": 10.0, "dec": 91.0, "radius_deg": 1.0},
+        {"ra": 10.0, "dec": 0.0, "radius_deg": -1.0},
+    ],
+)
+def test_tap_download_rejects_partial_or_invalid_cone_before_network(monkeypatch, region):
+    import xmatch.remote_tap as rt
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("invalid cone input reached the TAP service")
+
+    monkeypatch.setattr(rt, "get_tap_service", no_network)
+    src = CatalogueSource(
+        name="test",
+        is_local=False,
+        tap_url="https://example.invalid/tap",
+        access_identifier="schema.table",
+        ra_column="ra",
+        dec_column="dec",
+    )
+    with pytest.raises(CrossMatchError, match="TAP cone search"):
+        rt.download_from_tap(src, **region)
+
+
+@pytest.mark.parametrize(
+    "region",
+    [
+        {"ra": None, "dec": 0.0, "radius_arcsec": 1.0},
+        {"ra": "invalid", "dec": 0.0, "radius_arcsec": 1.0},
+        {"ra": 10.0, "dec": 91.0, "radius_arcsec": 1.0},
+        {"ra": 10.0, "dec": 0.0, "radius_arcsec": np.inf},
+        {"ra": 10.0, "dec": 0.0, "radius_arcsec": 648_001.0},
+    ],
+)
+def test_cds_download_rejects_invalid_region_before_network(region):
+    import xmatch.remote_cds as rc
+
+    src = CatalogueSource(
+        name="viz",
+        is_local=False,
+        access_identifier="I/355/gaiadr3",
+        access_method="cds",
+    )
+    with pytest.raises(CrossMatchError, match="CDS|spatial region"):
+        rc.download_from_cds(src, **region)
+
+
+def test_cds_download_normalizes_ra_before_query(monkeypatch):
+    from astropy.table import Table
+
+    import xmatch.remote_cds as rc
+
+    captured = {}
+
+    class FakeVizier:
+        def __init__(self, **kwargs):
+            pass
+
+        def query_region(self, center, *, radius, catalog):
+            captured["ra"] = center.ra.deg
+            captured["radius"] = radius.to_value(u.arcsec)
+            captured["catalog"] = catalog
+            return [Table({"source_id": [1]})]
+
+    fake_module = types.ModuleType("astroquery.vizier")
+    fake_module.Vizier = FakeVizier
+    monkeypatch.setitem(sys.modules, "astroquery.vizier", fake_module)
+    src = CatalogueSource(
+        name="viz",
+        is_local=False,
+        access_identifier="I/355/gaiadr3",
+        access_method="cds",
+    )
+
+    out = rc.download_from_cds(src, ra=370.0, dec=0.0, radius_arcsec=1.0)
+
+    assert captured == {"ra": 10.0, "radius": 1.0, "catalog": "I/355/gaiadr3"}
+    assert out["source_id"].to_list() == [1]
+
+
 def test_tap_self_join_builds_query_and_parses(monkeypatch):
     from astropy.table import Table
 
@@ -218,7 +339,7 @@ def test_tap_self_join_builds_query_and_parses(monkeypatch):
 
     def fake_execute(service, query, maxrec=None):
         captured["query"] = query
-        return Table({"a_ra": [10.0], "b_ra": [10.0], "best_sep_arcsec": [0.1]})
+        return Table({"a_ra": [10.0], "b_ra": [10.0], "all_sep_arcsec": [0.1]})
 
     monkeypatch.setattr(rt, "get_tap_service", fake_get_service)
     monkeypatch.setattr(rt, "execute_tap_query", fake_execute)
@@ -243,8 +364,9 @@ def test_tap_self_join_builds_query_and_parses(monkeypatch):
         access_identifier="t2",
         default_columns=["ra", "dec"],
     )
-    out = rt.tap_self_join(s1, s2, MatchSpec(radius_arcsec=1.0))
+    out = rt.tap_self_join(s1, s2, MatchSpec(radius_arcsec=1.0, find="all"))
     assert "CONTAINS" in captured["query"]
+    assert "all_sep_arcsec" in captured["query"]
     assert out.height == 1
 
 
@@ -271,11 +393,68 @@ def test_cds_xmatch_local_remote_rejoins_on_surrogate_id(monkeypatch):
     local = pl.DataFrame({"ra": [10.0, 80.0], "dec": [5.0, 5.0], "my_id": [101, 102]})
 
     out = rc.cds_xmatch_local_remote(
-        local_src, remote_src, local.lazy(), MatchSpec(radius_arcsec=2.0)
+        local_src, remote_src, local.lazy(), MatchSpec(radius_arcsec=2.0, find="all")
     )
     assert out.height == 1
     assert out["my_id"][0] == 101  # original local column preserved
     assert "remote_mag" in out.columns
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        MatchSpec(radius_arcsec=1.0),
+        MatchSpec(radius_arcsec=1.0, find="all", matcher="skyerr"),
+        MatchSpec(radius_arcsec=1.0, find="all", join_type="1or2"),
+        MatchSpec(radius_arcsec=1.0, find="all", prior_columns=["mag"]),
+        MatchSpec(radius_arcsec=1.0, find="all", probabilistic=True),
+    ],
+)
+def test_tap_self_join_rejects_unsupported_semantics_before_network(monkeypatch, spec):
+    import xmatch.remote_tap as rt
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("unsupported TAP self-join reached the service")
+
+    monkeypatch.setattr(rt, "get_tap_service", no_network)
+    src = CatalogueSource(
+        name="tap",
+        is_local=False,
+        tap_url="https://example.invalid/tap",
+        access_identifier="schema.table",
+        ra_column="ra",
+        dec_column="dec",
+    )
+    with pytest.raises(CrossMatchError, match="tap_self_join cannot honor"):
+        rt.tap_self_join(src, src, spec)
+
+
+def test_cds_xmatch_rejects_unsupported_semantics_before_importing_optional_client():
+    import xmatch.remote_cds as rc
+
+    local_src = CatalogueSource(name="local", is_local=True, ra_column="ra", dec_column="dec")
+    remote_src = CatalogueSource(name="viz", is_local=False, access_identifier="I/355/gaiadr3")
+    with pytest.raises(CrossMatchError, match="CDS XMatch cannot honor"):
+        rc.cds_xmatch_local_remote(
+            local_src,
+            remote_src,
+            pl.DataFrame({"ra": [1.0], "dec": [0.0]}).lazy(),
+            MatchSpec(radius_arcsec=1.0),
+        )
+
+
+def test_tap_without_projection_selects_all_columns():
+    from xmatch.remote_tap import _select_columns
+
+    src = CatalogueSource(
+        name="tap",
+        is_local=False,
+        tap_url="https://example.invalid/tap",
+        access_identifier="schema.table",
+        ra_column="ra",
+        dec_column="dec",
+    )
+    assert _select_columns(src, None) == "*"
 
 
 def _write_fake_mirror(cm, tmp_path, rows):
@@ -307,6 +486,11 @@ def test_mirrored_hats_cone_serves_download_without_tap(cm, monkeypatch, tmp_pat
                 "RA_ICRS": [10.0, 10.00015, 80.0],
                 "DE_ICRS": [5.0, 5.00015, -30.0],
                 "Source": [1, 999, 2],
+                "pmRA": [0.0, 0.0, 0.0],
+                "pmDE": [0.0, 0.0, 0.0],
+                "Plx": [0.0, 0.0, 0.0],
+                "RV": [0.0, 0.0, 0.0],
+                "Gmag": [18.0, 19.0, 20.0],
             }
         ),
     )
@@ -339,4 +523,4 @@ def test_mirrored_cone_falls_back_to_tap_when_column_missing(cm, monkeypatch, tm
     local = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     cm.crossmatch(local, "gaia_cds", radius_arcsec=1.0, columns_2=["ra", "dec", "source_id"])
 
-    assert captured["columns"] == ["ra", "dec", "source_id"]
+    assert {"ra", "dec", "source_id", "RA_ICRS", "DE_ICRS"}.issubset(captured["columns"])

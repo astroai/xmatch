@@ -87,12 +87,21 @@ covariance with the existing motion Jacobians; missing covariance fails explicit
 Physical covariance currently conditions on radial velocity: a source must declare
 `release_metadata["radial_velocity_uncertainty"] = "deterministic"` for this path.
 It does not propagate an unknown RV variance or promise a full six-parameter
-covariance model. Jacobian transport requires the optional torchsky backend.
+covariance model. Jacobian transport requires a separately installed compatible
+Torchsky checkout; no PyPI distribution or xmatch extra is available. The
+integration was tested with the sibling Torchsky 0.4 development source
+installed editable and Torchfits 1.0.0 from PyPI.
 An explicitly requested missing-motion prior remains an assumed population
 model, distinct from measured covariance, and is not supported by spill execution.
-The distributed `ray-union` driver supports `target_epoch` and `pm_prior` when
-sources declare epoch and proper-motion columns, and rejects unannotated motion
-requests before writing output. Direct eager and spill entry
+The distributed `ray-union` driver supports `target_epoch` when sources declare
+reference epochs and either finite proper motions for rows that need
+propagation or an explicit missing-motion prior. It rejects unannotated motion
+requests before writing output. Distributed union uses compressed interval
+planning for mixed-order and RING inputs, then applies measured per-source
+uncertainty or epoch-motion halos in distributed tasks. Planner scans can read
+additional partitions, so remote or very large inputs can incur substantial
+I/O. The separate pairwise native HATS path materializes inputs globally for
+adaptive, RING, mixed-order, or epoch-aligned matching. Direct eager and spill entry
 points also validate declared frames instead of comparing incompatible coordinates.
 
 ```python
@@ -125,4 +134,3 @@ records. `construct_association_components(..., additional_members=inventory)`
 can retain isolated sources under an explicit included-decision policy. Its
 union-find state is O(number of members); components are graph work units,
 not automatically adopted celestial objects.
-

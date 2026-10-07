@@ -7,38 +7,33 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
-        args: [--unsafe]
       - id: check-toml
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: debug-statements
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.10
+    rev: v0.16.10
     hooks:
-      - id: ruff
-        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-check
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.15.0
-    hooks:
-      - id: mypy
-        additional_dependencies: [types-PyYAML]
-        args: [--ignore-missing-imports]
-
   - repo: https://github.com/codespell-project/codespell
-    rev: v2.3.0
+    rev: v2.4.3
     hooks:
       - id: codespell
-        additional_dependencies: [tomli]
-        args: ["--ignore-words-list", "nd,th,te,mape,ot,aci,fpr,ois,aussian,numer,commun,multline,als,activ,strat,oen,suh,vas,mye,fo,hte,ue,nax,ags,bu,acn,vew,ecept,ure,ege,edn,whe,inh,ths,proceedure,eazy,clen,acess,astroid,degress,som,sompz,slac,ges,recal,litterature,desig,bund,fof,crate"]
 
   - repo: local
     hooks:
-      - id: ci-parity-pre-push
-        name: pre-push lint gate
-        entry: pixi run lint
+      - id: mypy
+        name: type checks in the locked scientific environment
+        entry: pixi run --as-is mypy src/xmatch tests scripts
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ci-local-pre-push
+        name: offline test gate
+        entry: pixi run ci-local
         language: system
         pass_filenames: false
         always_run: true

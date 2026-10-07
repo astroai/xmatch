@@ -33,7 +33,14 @@ class AuthConfig:
         logger.debug("Loading authentication details from environment...")
         loaded_auth = {}
 
-        known_services = ["noao_datalab", "gaia_archive", "vizier", "cadc"]
+        known_services = [
+            "noao_datalab",
+            "cds",
+            "esa_gaia",
+            "gaia_archive",
+            "vizier",
+            "cadc",
+        ]
         for service_name in known_services:
             env_prefix = f"XMATCH_{service_name.upper()}"
             username = os.environ.get(f"{env_prefix}_USER")
@@ -47,6 +54,10 @@ class AuthConfig:
     def get_auth_session(self, service_name: str) -> Any | None:
         """Return the authenticated session for *service_name*, or None."""
         session = self._auth_sessions.get(service_name)
+        if session is None:
+            legacy_name = {"cds": "vizier", "esa_gaia": "gaia_archive"}.get(service_name)
+            if legacy_name is not None:
+                session = self._auth_sessions.get(legacy_name)
         if session:
             logger.debug("Retrieved auth session for '%s'.", service_name)
         else:

@@ -1,14 +1,12 @@
 # xmatch
 
-The high-performance, format-agnostic **Swiss-Army-knife for astronomical catalogue crossmatching**.
-
-`xmatch` matches, joins, and aggregates astronomical catalogues across any scale—from interactive laptop tables to full-sky billions-of-rows surveys:
+`xmatch` matches and joins astronomical catalogues from local files, HATS trees, and configured remote archives. Matching features depend on the selected engine and the metadata supplied for each catalogue; the guides document those limits and the memory trade-offs.
 
 ```bash
 xmatch match catalog1.parquet catalog2.csv -o matches.parquet -r 1.0
 ```
 
-`catalog1` and `catalog2` can each be a **local file** (Parquet, CSV, TSV, FITS), a **HATS spatial directory**, or a **remote TAP/ADQL catalogue** (Gaia, VizieR, NOIRLab Data Lab). `xmatch` auto-detects coordinate columns, resolves aliases, handles kinematics, and streams results directly through Polars.
+Inputs can be local Parquet, CSV, TSV, or FITS files, HATS directories, Polars frames, or configured remote catalogues. Coordinate names can be configured or detected. Proper-motion propagation uses declared epoch and motion metadata; mixed coordinate frames are rejected and generic catalogue discovery does not invent positional uncertainties.
 
 ---
 
@@ -16,31 +14,31 @@ xmatch match catalog1.parquet catalog2.csv -o matches.parquet -r 1.0
 
 All detailed architectural references and user guides are organized in the [`docs/`](docs/) directory:
 
-- **[User Guide & Cookbooks (`docs/usage.md`)](docs/usage.md)**: End-to-end recipes covering CLI commands, universal formats, remote archive federation, SOTA matching algorithms, proper motions, out-of-core scaling, and Ray clustering.
+- **[User Guide & Cookbooks (`docs/usage.md`)](docs/usage.md)**: Installation, local and remote matching, explicit memory controls, and distributed workflows with their limits.
 - **[Public API Reference (`docs/api.md`)](docs/api.md)**: Full Python API specifications for `CrossMatch`, `MatchRequest`, `MatchSpec`, observation/candidate release helpers, engines, storage abstractions, and exception hierarchies.
-- **[Crossmatch Algorithms & Math (`docs/algorithms.md`)](docs/algorithms.md)**: Comprehensive survey of all 12 implemented algorithms, error covariance modeling, literature citations, and a deep dive into **Astropy vs. SciPy cKDTree**.
+- **[Crossmatch Algorithms & Math (`docs/algorithms.md`)](docs/algorithms.md)**: Matcher definitions, uncertainty assumptions, score semantics, and engine behavior.
 - **[Source & Measurement Releases (`docs/observations.md`)](docs/observations.md)**: Lazy, source-preserving measurement ledgers, photometric unit/limit normalization, property evidence, and checksummed Parquet releases.
 - **[Candidate & Association Pipeline (`docs/catalogue-pipeline.md`)](docs/catalogue-pipeline.md)**: End-to-end workflow from pinned survey observation and sparse-candidate releases to per-target association hypotheses.
 - **[Association Contract v1 (`docs/association-v1.md`)](docs/association-v1.md)**: Audit-grade versioned association record specification, release directories, component sidecars, and member equivalence tracking.
 
 ---
 
-## Key Features
+## Capabilities
 
 - **Universal Multi-Format I/O**:
   - Ingests and streams `.parquet`, `.csv`, `.tsv`, `.tab`, `.fits` (via high-speed Torchfits with Astropy fallback), and HATS.
   - Remote storage connectors: POSIX filesystem, CANFAR VOSpace (`vos:`), HTTP/HTTPS, and S3.
-- **Polars Streaming Engine**:
-  - Memory-bounded streaming execution via Polars `LazyFrame` sinks (`sink_parquet(streaming=True)`, `sink_csv(streaming=True)`).
-  - Out-of-core memory budgeting (`--batch-size`) to process TB-scale catalogues on modest hardware.
-- **SOTA Astrometric & Probabilistic Matchers**:
+- **File I/O and explicit memory controls**:
+  - Parquet, CSV, TSV, FITS, and HATS readers with Parquet/CSV/TSV/FITS outputs.
+  - Output sinks can stream serialization. Most matching engines still materialize inputs and matches; local pairwise CSV/Parquet requests can opt into the spill path with `--memory-budget-bytes` and file output. See [memory limits](docs/usage.md#pairwise-spill-matching-on-one-machine).
+- **Astrometric and probabilistic matchers**:
   - Simple radius (`sky`) and adaptive per-row astrometric uncertainties (`skyerr`).
   - 2D Gaussian error ellipses via Mahalanobis distance (`skyellipse`).
-  - Proper-motion epoch propagation (`target_epoch`) and probabilistic PM drift prior for catalogues without proper motions (Wilson 2023 `pm_prior`).
+  - Proper-motion epoch propagation (`target_epoch`) when epoch and motion metadata are supplied, plus an explicit population drift model (`pm_prior`) for missing motion.
   - Sutherland & Saunders (1992) Likelihood Ratio (`lr`) with magnitude background subtraction.
   - Machine learning classifiers (`ml` Random Forest, `xgb` XGBoost/LightGBM) with self-match pseudo-labeling.
-  - Wilson & Naylor (2017) Astrometric Uncertainty Function (`auf`) and flux-enhanced AUF (`macauff`).
-  - Budavári & Szalay (2008) Bayesian qualification (`p_match`) and simultaneous $N$-way posterior (`nway_match`).
+  - AUF-inspired empirical separation/background scores (`auf`) and a flux-augmented heuristic (`macauff`). These are not full reproductions of the published methods and their scores are not calibrated probabilities.
+  - Bayesian positional qualification (`probabilistic=True`) or photometric qualification (`prior_columns`) with declared errors or explicit error floors, plus simultaneous $N$-way scores (`nway_match`). These scores use stated assumptions and are not population-calibrated probabilities.
   - Friends-of-Friends transitive closure object bundles (`fof_match`).
 - **Complete Relational Joins**:
   - Inner (`1and2`), Left (`all1`), Right (`all2`), Full Outer (`1or2`, `all`), and Anti-joins (`1not2`, `2not1`).
@@ -48,15 +46,15 @@ All detailed architectural references and user guides are organized in the [`doc
   - Multi-catalogue sequential chains (`crossmatch_multi`).
 - **Local Mirroring & Offline Caching**:
   - `xmatch sync`: Mirror remote TAP and HATS surveys into a durable local HATS cache with keyset paging, rate limiting, and progress checkpoints.
-- **Distributed Ray Execution & Full-Sky Master Unions**:
-  - `engine="ray"`: Distributes spatial candidate search across Ray workers with full support for all 8 matchers (`sky`, `skyerr`, `skyellipse`, `lr`, `ml`, `xgb`, `auf`, `macauff`), $N$-dimensional ranking, `probabilistic=True`, `nway_match`, `fof_match`, and proper-motion propagation (`target_epoch`, `pm_prior`).
-  - `engine="ray-union"`: Distributed $N$-survey full-outer join producing partitioned HATS directories (`Norder/Dir/Npix.parquet`) with `sky`, `skyerr`, `skyellipse`, `target_epoch`, and `pm_prior`.
+- **Distributed execution**:
+  - `engine="ray"` parallelizes pairwise HEALPix candidate searches. The coordinator still holds the input frames and final result in memory.
+  - `engine="ray-union"` mirrors inputs into HATS and writes a full-sky, full-outer HATS union. It supports `sky`, `skyerr`, and `skyellipse`; compressed interval planning handles mixed-order/RING layouts and uncertainty or epoch halos in distributed tasks. Planning may scan additional partitions. Output trees add non-null `_union_ra` and `_union_dec` routing columns and declare NESTED ordering.
 
 ---
 
 ## Installation
 
-Requires Python $\ge 3.13$ (Python 3.13 and 3.14 supported).
+Requires Python $\ge 3.13$. The checked Pixi environment and local release gate use Python 3.13.
 
 ### Recommended: Pixi
 
@@ -68,19 +66,35 @@ cd xmatch
 # Install environment and dependencies
 pixi install
 
-# Run fast preflight check
+# Run lint, formatting, bytecode, and offline test checks
 pixi run preflight-push
+pixi run ci-local
 ```
 
 ### Standard: Pip
 
-```bash
-# Core package
-pip install xmatch
+The PyPI distribution name [`xmatch`](https://pypi.org/project/xmatch/) belongs
+to a different project. Until this project has a confirmed distribution name
+and first release, install from a checkout instead of running `pip install xmatch`:
 
-# Full installation with all optional accelerators and remote CDS backends
-pip install "xmatch[cds,hats,ray,torchsky,torchfits,ml]"
+```bash
+git clone https://github.com/astroai/xmatch.git
+cd xmatch
+python -m pip install .
+
+# Optional integrations; use only the extras you need
+python -m pip install ".[cds,hats-ray,torchfits,ml]"
 ```
+
+The repository is currently private, so this installation route requires
+repository access. A PyPI installation command will be documented after the
+package name is settled and a release is published.
+
+The tensor-native `torchsky` engine is not a package extra: no `torchsky`
+distribution is published on PyPI. To use it, install xmatch alongside a
+compatible Torchsky checkout. The integration was tested with the sibling
+Torchsky 0.4 development source installed editable and Torchfits 1.0.0 from
+PyPI.
 
 ---
 
@@ -136,4 +150,3 @@ bundles = cm.fof_match(
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
-

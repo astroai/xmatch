@@ -103,7 +103,7 @@ def load_hats_all(src: CatalogueSource) -> pl.DataFrame:
     """Materialize an entire HATS catalogue (outer-join / small-catalog path)."""
     root = _hats_root(src)
     frames = [_load_pixel_path(p) for _, _, p in list_hats_pixels(root)]
-    frames = [f for f in frames if f is not None and f.height > 0]
+    frames = [f for f in frames if f is not None]
     if not frames:
         return pl.DataFrame()
     return pl.concat(frames, how="diagonal_relaxed")
@@ -123,19 +123,12 @@ def _healpix_neighbors(order: int, center_pix: int, *, radius_arcsec: float = 0.
         center = torch.tensor([pix], dtype=torch.int64)
         lon, lat = ts_healpix.pix2ang(nside, center, nest=True, lonlat=True)
         pixrad = ts_healpix.max_pixrad(nside, degrees=False)
-        radius_rad = math.radians(max(float(radius_arcsec), 0.0) / 3600.0) + (2.0 * pixrad)
+        radius_rad = min(
+            math.pi, math.radians(max(float(radius_arcsec), 0.0) / 3600.0) + (2.0 * pixrad)
+        )
         covered = cap_covering_pixels(nside, lon, lat, radius_rad, nest=True)
         return sorted({int(p) for p in covered.tolist()})
     out = {pix}
-    try:
-        import healpy as hp
-
-        for n in hp.get_all_neighbours(nside, pix, nest=True):
-            if int(n) >= 0:
-                out.add(int(n))
-        return sorted(out)
-    except Exception:
-        pass
     try:
         import cdshealpix as chp
         import numpy as np
@@ -158,11 +151,10 @@ def _healpix_neighbors(order: int, center_pix: int, *, radius_arcsec: float = 0.
         for n in np.atleast_1d(neigh).astype(int).ravel():
             if n >= 0:
                 out.add(int(n))
-    except Exception:
-        logger.warning(
-            "HEALPix neighbour lookup unavailable; margin is same-pixel only "
-            "(install healpy or cdshealpix for boundary-safe HATS matches)"
-        )
+    except Exception as exc:
+        raise CrossMatchError(
+            "Cannot compute boundary-safe HATS margins; install cdshealpix or torchsky"
+        ) from exc
     return sorted(out)
 
 
@@ -186,42 +178,6 @@ def margin_pixels(
     ]
 
 
-def _effective_margin_radius_arcsec(
-    src1: CatalogueSource,
-    src2: CatalogueSource,
-    left_df: pl.DataFrame,
-    spec: MatchSpec,
-) -> float:
-    """Return a boundary-safe cone radius (arcsec) for HATS neighbour lookup."""
-    base = max(float(spec.radius_arcsec), 0.0)
-    if spec.matcher not in ("skyerr", "skyellipse") or left_df.is_empty():
-        return base
-    import numpy as np
-
-    from .matchers import (
-        _chord_to_arcsec,
-        _pos_covariance,
-        _pos_sigma_arcsec,
-        _skyellipse_search_chord_max,
-    )
-
-    lsrc = _frame_source(src1, left_df, src1.name)
-    if spec.matcher == "skyellipse":
-        cov_l = _pos_covariance(left_df, lsrc)
-        if cov_l is not None:
-            bound = float(
-                _chord_to_arcsec(_skyellipse_search_chord_max(cov_l, cov_l, spec.max_error))
-            )
-            if math.isfinite(bound) and bound > 0:
-                return max(base, bound)
-    lsig = _pos_sigma_arcsec(left_df, lsrc)
-    r_floor = float(src2.default_pos_error_arcsec or 1.0)
-    if lsig is not None and lsig.size > 0 and np.any(np.isfinite(lsig)):
-        l_max = float(np.nanmax(lsig))
-        return max(base, float(spec.max_error) * (2.0 * l_max + r_floor))
-    return max(base, float(spec.max_error) * 2.0 * r_floor)
-
-
 def _frame_source(base: CatalogueSource, df: pl.DataFrame, name: str) -> CatalogueSource:
     ra = base.ra_column or "ra"
     dec = base.dec_column or "dec"
@@ -243,6 +199,7 @@ def _frame_source(base: CatalogueSource, df: pl.DataFrame, name: str) -> Catalog
         pm_dec_column=base.pm_dec_column,
         parallax_column=base.parallax_column,
         radial_velocity_column=base.radial_velocity_column,
+        frame=base.frame,
         _frame=df.lazy(),
     )
 
@@ -258,8 +215,6 @@ def _match_frames(
     *,
     worker_task: bool = False,
 ) -> pl.DataFrame:
-    if left_df.is_empty() and right_df.is_empty():
-        return pl.DataFrame()
     lsrc = _frame_source(left_src, left_df, left_src.name)
     rsrc = _frame_source(right_src, right_df, right_src.name)
     if left_src.access_method == "hats":
@@ -280,10 +235,10 @@ def _match_frames(
         spec,
         engine=eng,
         right_suffix=right_suffix,
+        # ponytail: Ray allocates one CPU per pixel task; no nested tree pool.
+        _tree_workers=1 if worker_task and engine == "ray" else -1,
     )
-    if isinstance(result, pl.LazyFrame):
-        return result.collect()
-    return result
+    return result.collect()
 
 
 def _pixel_task_payload(
@@ -301,10 +256,8 @@ def _pixel_task_payload(
     right_empty_schema: dict[str, pl.DataType] | None = None,
 ) -> pl.DataFrame | None:
     left_df = _load_pixel_path(Path(left_path))
-    if left_df.is_empty():
-        return None
     if right_hats:
-        eff_radius = _effective_margin_radius_arcsec(src1, src2, left_df, spec)
+        eff_radius = float(spec.radius_arcsec)
         marg = margin_pixels(order, pix, eff_radius, list(right_index))
         frames = [_load_pixel_path(Path(right_index[p])) for p in marg if p in right_index]
         frames = [f for f in frames if f.height > 0]
@@ -326,7 +279,7 @@ def _pixel_task_payload(
         right_suffix,
         worker_task=True,
     )
-    return part if part is not None and part.height > 0 else None
+    return part
 
 
 def hats_native_crossmatch(
@@ -350,9 +303,25 @@ def hats_native_crossmatch(
     needs_global_population = (
         spec.matcher in ("lr", "ml", "xgb", "auf", "macauff")
         or bool(spec.prior_columns)
+        or spec.probabilistic
         or bool(spec.extra_distance_cols)
         or spec.target_epoch is not None
     )
+    if left_hats and right_hats:
+        orders = {
+            order for src in (src1, src2) for order, _, _ in list_hats_pixels(_hats_root(src))
+        }
+        ring_ordered = any(
+            _read_properties(_hats_root(src)).get("hats_ordering", "NESTED").upper() == "RING"
+            for src in (src1, src2)
+        )
+        # ponytail: the pixel fast path needs one common NESTED order and a
+        # fixed angular radius. Global matching is O(N) memory for adaptive
+        # tiling/uncertainty; upgrade to interval-based margins with measured
+        # right-side uncertainty bounds before partitioning those cases.
+        needs_global_population |= (
+            len(orders) != 1 or ring_ordered or spec.matcher in ("skyerr", "skyellipse")
+        )
     can_partition_left = (
         left_hats and spec.join_type in ("1and2", "all1", "1not2") and not needs_global_population
     )
@@ -391,8 +360,7 @@ def hats_native_crossmatch(
             right_index[int(pix)] = path
             if right_empty_schema is None:
                 sample_df = _load_pixel_path(path)
-                if not sample_df.is_empty():
-                    right_empty_schema = dict(sample_df.schema)
+                right_empty_schema = dict(sample_df.schema)
     else:
         right_all = (local_lf2 or src2.lazy()).collect()
 

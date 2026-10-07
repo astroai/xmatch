@@ -254,8 +254,21 @@ def detect_radec_columns(cols_df: pl.DataFrame) -> tuple[str | None, str | None]
     """
     from .astro_utils import find_coord_columns
 
+    if "column_name" not in cols_df.columns:
+        return None, None
     col_names = cols_df["column_name"].to_list()
-    return find_coord_columns(col_names)
+    ra_col, dec_col = find_coord_columns(col_names)
+    if ra_col and dec_col:
+        return ra_col, dec_col
+    if "ucd" not in cols_df.columns:
+        return ra_col, dec_col
+    for name, ucd in cols_df.select("column_name", "ucd").iter_rows():
+        tokens = {token.strip().lower() for token in str(ucd or "").split(";")}
+        if ra_col is None and "pos.eq.ra" in tokens:
+            ra_col = name
+        if dec_col is None and "pos.eq.dec" in tokens:
+            dec_col = name
+    return ra_col, dec_col
 
 
 def get_table_schema(
@@ -273,9 +286,6 @@ def get_table_schema(
     cols = discover_columns(tap_url, bare_table, schema_name=schema_name, auth_session=auth_session)
     # VizieR TAP_SCHEMA often stores the bare id; if empty, retry without schema.
     if cols.height == 0 and schema_name is not None:
-        cols = discover_columns(tap_url, table_name.strip().strip('"'), auth_session=auth_session)
-    # CDS large_tables: table_name may be II/349/ps1 while discover listed large_tables."II/349/ps1"
-    if cols.height == 0 and "/" in table_name:
         cols = discover_columns(tap_url, table_name.strip().strip('"'), auth_session=auth_session)
     ra, dec = detect_radec_columns(cols)
     access = table_name.strip().strip('"')
@@ -360,7 +370,6 @@ def catalogue_entry_from_schema(
         "ra_column": ra,
         "dec_column": dec,
         "estimated_size": "huge",
-        "default_pos_error_arcsec": 0.1,
     }
     if id_col:
         entry["id_column"] = id_col

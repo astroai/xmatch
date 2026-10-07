@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ version = "0.5.0"
 description = "High-performance, format-agnostic astronomical catalogue crossmatching and multi-survey union toolkit."
 readme = "README.md"
 requires-python = ">=3.13"
-license = {file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
   { name = "Seb Fabbro", email = "sebfabbro@gmail.com" },
 ]
@@ -16,10 +17,8 @@ keywords = ["astronomy", "crossmatch", "catalogue", "hats", "healpix", "polars",
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
 
@@ -44,8 +43,6 @@ zone = ["cdshealpix>=0.8"]
 hats = ["hats>=0.7", "cdshealpix>=0.8"]
 # Native HATS+Ray pixel matcher.
 hats-ray = ["hats>=0.7", "ray>=2.50", "cdshealpix>=0.8"]
-# Tensor-native nearest-neighbour engine.
-torchsky = ["torchsky>=0.4.0.dev0"]
 # Ray distributed engine (parallel HEALPix pixel-batch matching).
 ray = ["ray>=2.50", "cdshealpix>=0.8"]
 # Machine-learning and gradient-boosted probabilistic matchers.
@@ -85,10 +82,11 @@ explicit_package_bases = true
 ignore_missing_imports = true
 check_untyped_defs = false
 warn_return_any = false
+warn_unreachable = true
 disable_error_code = ["import-untyped", "union-attr", "arg-type", "index"]
 
 [tool.codespell]
-ignore-words-list = "activ,strat,oen,suh,vas,mye,fo,hte,ue,nax,ags,bu,acn,vew,ecept,ure,ege,edn,whe,inh,ths,proceedure,eazy,clen,acess,astroid,degress,som,sompz,slac,ges,recal,litterature,ned,aas,alph,legac,desig,bund,fof,crate"
+ignore-words-list = "aas,anc,fof,hav,nd,ned"
 skip = "*.ipynb,pyproject.toml,*.json,pixi.lock,paper/*.cls"
 
 [tool.setuptools.package-data]

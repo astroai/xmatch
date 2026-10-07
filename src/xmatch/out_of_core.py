@@ -19,7 +19,6 @@ from .matchers import (
     _EPOCH_SIGMA,
     _PROPAGATED_COV_EE,
     _PROPAGATED_COV_NN,
-    _UNIT_TO_ARCSEC,
     MatchSpec,
     _apply_pm_drift_prior,
     _apply_proper_motion,
@@ -29,7 +28,7 @@ from .matchers import (
     sky_match,
 )
 from .request import MatchRequest, SideOverrides
-from .sources import CatalogueSource
+from .sources import CatalogueSource, position_error_to_arcsec_factor
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +270,12 @@ def _validate_semantics(req: MatchRequest, src1: CatalogueSource, src2: Catalogu
         raise CrossMatchError(
             "Bounded-memory matching currently supports matcher='sky' and 'skyerr' only."
         )
-    if req.spec.prior_columns or req.spec.extra_distance_cols or req.spec.filter_expr:
+    if (
+        req.probabilistic
+        or req.spec.prior_columns
+        or req.spec.extra_distance_cols
+        or req.spec.filter_expr
+    ):
         raise CrossMatchError(
             "Bounded-memory matching does not yet support priors, extra-distance columns, "
             "or filter expressions."
@@ -336,7 +340,7 @@ def _required_columns(
 
 
 def _sigma_expr(src: CatalogueSource, alias: str) -> pl.Expr:
-    factor = _UNIT_TO_ARCSEC.get((src.pos_err_units or "arcsec").lower(), 1.0)
+    factor = position_error_to_arcsec_factor(src.pos_err_units)
     floor = (
         float(src.default_pos_error_arcsec) * math.sqrt(2.0)
         if src.default_pos_error_arcsec is not None

@@ -18,10 +18,9 @@ import numpy as np
 import polars as pl
 
 from .exceptions import StiltsError
+from .sources import position_error_to_arcsec_factor
 
 logger = logging.getLogger(__name__)
-
-_UNIT_TO_ARCSEC = {"arcsec": 1.0, "mas": 1e-3, "deg": 3600.0, "arcmin": 60.0}
 
 # STILTS join keyword per xmatch join_type.
 _STILTS_JOIN = {
@@ -149,7 +148,7 @@ def _error_value_expr(src, max_error: float) -> str:
     so that STILTS' ``sep <= err1 + err2`` rule becomes
     ``sep <= max_error * (e1 + e2)``.
     """
-    factor = _UNIT_TO_ARCSEC.get((src.pos_err_units or "arcsec").lower(), 1.0)
+    factor = position_error_to_arcsec_factor(src.pos_err_units)
     if src.ra_err_column and src.dec_err_column:
         core = f"hypot({src.ra_err_column},{src.dec_err_column})*{factor}"
     else:
@@ -164,8 +163,8 @@ def _values_expr(src, spec) -> str:
     ra, dec = src.ra_column, src.dec_column
     if spec.matcher == "sky":
         return f"{ra} {dec}"
-    # skyerr / skyellipse both use a circular n-sigma error radius (correlation
-    # is not yet modelled, so skyellipse currently behaves like skyerr).
+    # skyerr uses a circular n-sigma error radius. skyellipse is rejected at
+    # the STILTS entrypoint because this backend cannot honor its covariance.
     return f"{ra} {dec} {_error_value_expr(src, spec.max_error)}"
 
 
@@ -181,6 +180,20 @@ def stilts_sky_match(
     tmpdir=None,
     right_suffix: str = "_2",
 ) -> pl.DataFrame:
+    unsupported = []
+    if spec.matcher not in {"sky", "skyerr"}:
+        unsupported.append(f"matcher={spec.matcher!r}")
+    if spec.extra_distance_cols:
+        unsupported.append("extra_distance_cols")
+    if spec.prior_columns:
+        unsupported.append("prior_columns")
+    if spec.probabilistic:
+        unsupported.append("probabilistic scoring")
+    if spec.filter_expr:
+        unsupported.append("filter_expr")
+    if unsupported:
+        raise StiltsError("STILTS cannot honor " + ", ".join(unsupported))
+
     base = _resolve_base_command(stilts_cmd_base)
     if base is None:
         raise StiltsError("No STILTS command available.")
@@ -225,7 +238,8 @@ def stilts_sky_match(
             "values2": _values_expr(right_src, spec),
             "params": params_value,
             "join": _STILTS_JOIN.get(spec.join_type, "1and2"),
-            "find": spec.find,
+            # xmatch selects per primary; STILTS "best" instead enforces 1:1.
+            "find": "best1" if spec.find == "best" else spec.find,
             # Match the astropy engine's schema: left columns keep their names,
             # right-hand collisions get a custom suffix.
             "fixcols": "dups",

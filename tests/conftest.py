@@ -38,7 +38,7 @@ def _sep_max_deviation(results: list[dict]) -> str:
     baseline_seps = None
     for r in results:
         if r["engine"] == "astropy" and r.get("result") is not None:
-            baseline_seps = r["result"]["sep_arcsec"].to_numpy()
+            baseline_seps = r["result"].sort("_bench_left_row")["sep_arcsec"].to_numpy()
             break
     if baseline_seps is None:
         return ""
@@ -47,7 +47,7 @@ def _sep_max_deviation(results: list[dict]) -> str:
     for r in results:
         if r["engine"] == "astropy" or r.get("result") is None or not r["matches"]:
             continue
-        engine_seps = r["result"]["sep_arcsec"].to_numpy()
+        engine_seps = r["result"].sort("_bench_left_row")["sep_arcsec"].to_numpy()
         if len(engine_seps) != len(baseline_seps):
             parts.append(f"{r['engine']}:count-diff")
             continue

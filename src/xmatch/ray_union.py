@@ -21,7 +21,8 @@ the matcher's right-side rename convention).
 Chunking: each chunk owns exactly one centre partition (the template of a
 HATS output partition).  Candidate rows of each catalogue with a larger
 index are the partitions intersecting a cone of radius ``2*(sep + delta)``
-arcsec around the *centre partition pixel centre* (``delta`` = largest
+degrees around the *centre partition pixel centre* (``sep`` converted
+to degrees and enlarged by measured errors/motion; ``delta`` = largest
 partition diagonal across all catalogues; the factor-2 margin keeps the
 covering conservative, so every mate row lies inside its chunk's pool).
 Every centre row belongs to exactly one chunk and its partners all live in
@@ -33,8 +34,8 @@ Per-row neighbourhoods are resolved with a scipy :class:`cKDTree` (dense
 cone matrices would blow the memory guard); combos per centre row are
 capped by ``max_tuples``.
 
-Output: ``<out>/dataset/Norder=…/Dir=…/Npix=….parquet`` — one directory
-partition per input partition (no re-heap), plus
+Output: ``<out>/dataset/Norder=…/Dir=…/Npix=….parquet`` — one disjoint NESTED tiling
+based on the hub footprint, plus
 ``dataset/partition_info.parquet``, ``properties`` and
 ``_metadata``/``_common_metadata``, readable via standard HATS
 readers.  Chunk outputs go to ``<out>/chunks/<key>.parquet`` and are skipped
@@ -46,16 +47,18 @@ module must import without ray installed).
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import itertools
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -72,10 +75,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_TASK_ROWS = 2_000_000
 DEFAULT_CHUNK_MEMORY_GB = 8.0
 DEFAULT_MAX_TUPLES = 10_000
-_BYTES_PER_ROW = 64.0  # conservative per-row footprint for the memory guards
+_BYTES_PER_ROW = (
+    64.0  # ponytail: advisory estimate, not a hard memory cap; size wide rows separately
+)
 _HUB_BLOCK = 50_000  # centre rows per distance batch
 _STATE_NAME = "resume.state"
-_FIXED_COLS = {"sep_arcsec", "_src_cats"}
+_FIXED_COLS = {"sep_arcsec", "_src_cats", "_union_ra", "_union_dec"}
 
 _LAST_PLAN: UnionPlan | None = None
 """Most recently built :class:`UnionPlan` (inspected by tests / ``doctor``)."""
@@ -112,7 +117,7 @@ class CataloguePlan:
     partitions: list[PartitionPlan] = field(default_factory=list)
     cols: list[str] = field(default_factory=list)  # original column names
     final_cols: list[str] = field(default_factory=list)  # after _k suffixing
-    dtypes: dict[str, str] = field(default_factory=dict)  # final col -> polars dtype str
+    dtypes: dict[str, pl.DataType] = field(default_factory=dict)  # final col -> complete dtype
     ra_err_column: str | None = None
     dec_err_column: str | None = None
     corr_column: str | None = None
@@ -150,7 +155,7 @@ class RestPlan:
 class UnionPlan:
     catalogues: list[CataloguePlan]
     sep_arcsec: float
-    delta_arcsec: float
+    delta_deg: float
     max_tuples: int
     col_names: list[str]  # final output column order (incl. sep_arcsec/_src_cats)
     out_dir: str
@@ -196,14 +201,8 @@ def _pixel_center_deg(order: int, pix: int) -> tuple[float, float]:
     return float(np.degrees(np.asarray(lon.value)[0])), float(np.degrees(np.asarray(lat.value)[0]))
 
 
-def _cone_pixels(order: int, pix: int, radius_deg: float, depth: int) -> list[tuple[int, int]]:
-    """Covering pixels at ``depth`` for a cone of ``radius_deg``.
-
-    :func:`cdshealpix.cone_search` returns a *parent* pixel (shallower than
-    ``depth``) when a whole subtree is inside the cone; every descendant of
-    that parent at the candidate depth is covered, so expand parents to all
-    their children (not just the first one).
-    """
+def _cone_ranges(order: int, pix: int, radius_deg: float, depth: int) -> list[tuple[int, int]]:
+    """Half-open NESTED intervals at ``depth``; keep covered subtrees compressed."""
     cds = _cdshealpix()
     lon, lat = _pixel_center_deg(order, pix)
     from astropy import units as u  # noqa: PLC0415
@@ -215,16 +214,10 @@ def _cone_pixels(order: int, pix: int, radius_deg: float, depth: int) -> list[tu
         float(radius_deg) * u.deg,
         depth,
     )
-    out: list[tuple[int, int]] = []
-    for ipx, d in zip(np.asarray(ipix).tolist(), np.asarray(depths).tolist(), strict=True):
-        dif = depth - int(d)
-        if dif <= 0:
-            out.append((depth, int(ipx)))
-            continue
-        base = int(ipx) << (2 * dif)
-        for child in range(base, base + (1 << (2 * dif))):
-            out.append((depth, child))
-    return out
+    return [
+        (int(px) << (2 * (depth - int(d))), (int(px) + 1) << (2 * (depth - int(d))))
+        for px, d in zip(ipix, depths, strict=True)
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -311,10 +304,10 @@ def _hats_dir(pix: int) -> int:
     return (int(pix) // 10_000) * 10_000
 
 
-def _catalogue_schema(storage: Storage, rel: str) -> dict[str, str]:
-    """Column name -> polars dtype name ('{}' when unknown)."""
+def _catalogue_schema(storage: Storage, rel: str) -> dict[str, pl.DataType]:
+    """Column name -> complete polars dtype ('{}' when unknown)."""
     try:
-        return {c: str(t) for c, t in storage.parquet_schema(rel).items()}
+        return dict(storage.parquet_schema(rel))
     except Exception:  # noqa: BLE001 - schema is best-effort; empty means unknown
         return {}
 
@@ -327,34 +320,16 @@ def _est_rows(part: PartitionPlan, storage: Storage, fallback: int) -> int:
     return part.est_rows
 
 
-def _c_map(cur_cand: list[dict[int, list[int]]]) -> dict[int, list[int]]:
-    """Union of per-centre-partition candidate lists (deduped, sorted)."""
-    sink: dict[int, list[int]] = {}
-    for d in cur_cand:
-        for k, v in d.items():
-            for i in v:
-                if i not in sink.setdefault(k, []):
-                    sink[k].append(i)
-    return {k: sorted(v) for k, v in sink.items()}
-
-
-def _lookup_partition(pix_to_idx: dict[tuple[int, int], int], od: int, px: int) -> int | None:
-    if (od, px) in pix_to_idx:
-        return pix_to_idx[(od, px)]
-    for j in range(od - 1, -1, -1):
-        key = (j, px >> (2 * (od - j)))
-        if key in pix_to_idx:
-            return pix_to_idx[key]
-    return None
-
-
-def _partition_index(cat: CataloguePlan) -> dict[tuple[int, int], int]:
-    """``(order, pixel) -> partition position`` for one catalogue.
-
-    Built once per catalogue: rebuilding it inside :func:`_cone_candidate_idx`
-    made the plan build O(P^2) in dict construction for a full-sky input.
-    """
-    return {(q.order, q.pix): idx for idx, q in enumerate(cat.partitions)}
+def _partition_index(cat: CataloguePlan, depth: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sorted disjoint tile intervals at the catalogue's deepest order."""
+    intervals = sorted(
+        (p.pix << (2 * (depth - p.order)), (p.pix + 1) << (2 * (depth - p.order)), i)
+        for i, p in enumerate(cat.partitions)
+    )
+    starts, ends, indices = np.asarray(intervals, dtype=np.int64).T
+    if np.any(starts[1:] < ends[:-1]):
+        raise CrossMatchError(f"Catalogue '{cat.name}' has overlapping HATS partitions")
+    return starts, ends, indices
 
 
 def _cone_candidate_idx(
@@ -363,21 +338,26 @@ def _cone_candidate_idx(
     depths: Sequence[int],
     cone_radius: float,
     centre: int | None = None,
-    pix_index: Sequence[dict[tuple[int, int], int]] | None = None,
+    pix_index: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None,
 ) -> dict[int, list[int]]:
-    """Partitions of each other catalogue intersecting the cone around ``part``."""
+    """Intersect compressed cone intervals with actual input tiles.
+
+    Expanding a fully covered parent into every deepest-order child can
+    exhaust memory on sparse, high-order catalogues. Binary searches on
+    disjoint tile intervals preserve every intersecting tile without expansion.
+    """
     cand: dict[int, list[int]] = {}
     for j, other in enumerate(catalogues):
         if j == centre:
             continue
-        other_pix = pix_index[j] if pix_index is not None else _partition_index(other)
+        starts, ends, indices = (
+            pix_index[j] if pix_index is not None else _partition_index(other, depths[j])
+        )
         seen: set[int] = set()
-        for od, px in _cone_pixels(part.order, part.pix, cone_radius, depths[j]):
-            if od > depths[j]:
-                continue
-            idx = _lookup_partition(other_pix, od, px)
-            if idx is not None:
-                seen.add(idx)
+        for lo, hi in _cone_ranges(part.order, part.pix, cone_radius, depths[j]):
+            first = np.searchsorted(ends, lo, side="right")
+            last = np.searchsorted(starts, hi, side="left")
+            seen.update(indices[first:last].tolist())
         if seen:
             cand[j] = sorted(seen)
     return cand
@@ -403,15 +383,27 @@ def build_union_plan(
     """Return a :class:`UnionPlan`; every source must be a local HATS dir."""
     if not sources:
         raise CrossMatchError("union needs at least one catalogue")
-    if sep_arcsec <= 0:
+    if not math.isfinite(sep_arcsec) or sep_arcsec <= 0:
         raise CrossMatchError(f"radius_arcsec must be positive, got {sep_arcsec}")
     if matcher not in ("sky", "skyerr", "skyellipse"):
         raise CrossMatchError(
             f"engine='ray-union' supports matcher in ('sky', 'skyerr', 'skyellipse'), got matcher='{matcher}'."
         )
-    max_tuples = max(1, int(max_tuples))
-    task_rows = max(1, int(task_rows))
-    chunk_memory_gb = max(0.1, float(chunk_memory_gb))
+    for name, value in (
+        ("max_tuples", max_tuples),
+        ("task_rows", task_rows),
+        ("hats_threshold", hats_threshold),
+    ):
+        if isinstance(value, bool) or not math.isfinite(value) or value <= 0 or int(value) != value:
+            raise CrossMatchError(f"{name} must be a positive integer, got {value}")
+    for name, limit in (("chunk_memory_gb", chunk_memory_gb), ("max_error", max_error)):
+        if not math.isfinite(limit) or limit <= 0:
+            raise CrossMatchError(f"{name} must be positive and finite, got {limit}")
+    if target_epoch is not None and not math.isfinite(target_epoch):
+        raise CrossMatchError("target_epoch must be finite")
+    max_tuples = int(max_tuples)
+    task_rows = int(task_rows)
+    chunk_memory_gb = float(chunk_memory_gb)
 
     catalogues: list[CataloguePlan] = []
     used: set[str] = set(_FIXED_COLS)
@@ -429,7 +421,7 @@ def build_union_plan(
         # RING-ordered copies (remote mirrors preserve the source's own
         # hats_ordering property) are converted to NESTED in the plan
         # geometry: every downstream pixel computation (_pixel_center_deg,
-        # _cone_pixels, the _lookup_partition ancestor shifts, the rest
+        # _cone_ranges, the tile interval shifts, the rest
         # tiling) is NESTED, and the output is always NESTED hub tiling.
         props = _read_hats_properties(storage, rel)
         ordering = next((v for k, v in props.items() if k.lower() == "hats_ordering"), "")
@@ -445,14 +437,9 @@ def build_union_plan(
                 len(parts),
             )
         parts.sort(key=lambda p: (p.order, p.pix))
-        _diag_cache: dict[int, float] = {}
         for part in parts:
             _est_rows(part, storage, hats_threshold)
-            diag = _diag_cache.get(part.order)
-            if diag is None:
-                diag = _pixel_diagonal_deg(part.order)
-                _diag_cache[part.order] = diag
-            max_delta = max(max_delta, diag)
+            max_delta = max(max_delta, _pixel_diagonal_deg(part.order, part.pix))
         schema = _catalogue_schema(storage, parts[0].rel)
         if "file_loc" in schema:  # partition_info-style file is not data
             schema = {}
@@ -476,8 +463,8 @@ def build_union_plan(
             final_cols.append(col)
         all_cols.extend(final_cols)
 
-        dtypes: dict[str, str] = {
-            final: str(schema[orig]) for orig, final in zip(cols, final_cols, strict=True)
+        dtypes: dict[str, pl.DataType] = {
+            final: schema[orig] for orig, final in zip(cols, final_cols, strict=True)
         }
         col_map = dict(zip(cols, final_cols, strict=True))
 
@@ -500,7 +487,7 @@ def build_union_plan(
         catalogues.append(
             CataloguePlan(
                 name=src.name,
-                root=root,
+                root=str(storage.root) if isinstance(storage, LocalStorage) else root,
                 rel=rel,
                 ra=ra_final,
                 dec=dec_final,
@@ -524,14 +511,60 @@ def build_union_plan(
             )
         )
 
-    all_cols += ["sep_arcsec", "_src_cats"]
+    all_cols += ["sep_arcsec", "_src_cats", "_union_ra", "_union_dec"]
     eff_arcsec = float(sep_arcsec)
-    if matcher in ("skyerr", "skyellipse"):
-        eff_arcsec = max(eff_arcsec, float(max_error) * 30.0)
-    if target_epoch is not None:
-        eff_arcsec += 60.0
+    max_motion_deg = 0.0
+    if matcher != "sky" or target_epoch is not None:
+        # Scan one partition at a time: fixed error/motion margins silently
+        # miss high-uncertainty or high-proper-motion sources. Use the same
+        # epoch propagation and covariance extraction as the workers.
+        bounds_plan = UnionPlan(
+            catalogues,
+            sep_arcsec,
+            max_delta,
+            max_tuples,
+            all_cols,
+            out_dir,
+            matcher=matcher,
+            max_error=float(max_error),
+            target_epoch=target_epoch,
+            pm_prior=pm_prior,
+            pm_prior_magnitude_column=pm_prior_magnitude_column,
+            fallback_policy=fallback_policy,
+        )
+        max_sigma = 0.0
+        max_ra_var = max_dec_var = 0.0
+        for cat in catalogues:
+            for pi in range(len(cat.partitions)):
+                original = _cat_frame(cat, [pi])
+                aligned = (
+                    _cat_frame(cat, [pi], bounds_plan) if target_epoch is not None else original
+                )
+                if not aligned.height:
+                    continue
+                if target_epoch is not None:
+                    before = matchers._radec_to_xyz(
+                        original[cat.ra].to_numpy(), original[cat.dec].to_numpy()
+                    )
+                    after = matchers._radec_to_xyz(
+                        aligned[cat.ra].to_numpy(), aligned[cat.dec].to_numpy()
+                    )
+                    motion = matchers._chord_to_arcsec(np.linalg.norm(after - before, axis=1))
+                    max_motion_deg = max(max_motion_deg, float(np.max(motion)) / 3600.0)
+                err = _extract_matcher_err(aligned, cat, matcher)
+                if matcher == "skyerr":
+                    max_sigma = max(max_sigma, float(np.nanmax(err)))
+                elif matcher == "skyellipse":
+                    max_ra_var = max(max_ra_var, float(np.nanmax(err[0])))
+                    max_dec_var = max(max_dec_var, float(np.nanmax(err[1])))
+        if matcher == "skyerr":
+            eff_arcsec = max(eff_arcsec, 2.0 * float(max_error) * max_sigma)
+        elif matcher == "skyellipse":
+            eff_arcsec = max(
+                eff_arcsec, float(max_error) * math.sqrt(2.0 * (max_ra_var + max_dec_var))
+            )
     sep_deg = eff_arcsec / 3600.0
-    cone_radius = 2.0 * (sep_deg + max_delta)
+    cone_radius = min(180.0, 2.0 * (sep_deg + max_delta + max_motion_deg))
     depths = [max((p.order for p in c.partitions), default=0) for c in catalogues]
 
     chunks: list[ChunkPlan] = []
@@ -539,7 +572,7 @@ def build_union_plan(
     # Open each catalogue's storage once and build each pixel->partition index
     # once: both used to be rebuilt inside the per-partition (O(P)) loops.
     storages = [open_storage(cat.root) for cat in catalogues]
-    pix_index = [_partition_index(cat) for cat in catalogues]
+    pix_index = [_partition_index(cat, depths[j]) for j, cat in enumerate(catalogues)]
 
     for ci, cat in enumerate(catalogues):
         cat_storage = storages[ci]
@@ -562,7 +595,7 @@ def build_union_plan(
                     f"Catalogue '{cat.name}' partition {part.rel} drives a pool of ~{extra} rows "
                     f"— exceeds --task-rows={task_rows}; raise --task-rows or shrink --hats-threshold."
                 )
-            mem = extra * _BYTES_PER_ROW / 1e9
+            mem = extra * _BYTES_PER_ROW / 1024**3
             if mem > chunk_memory_gb:
                 raise CrossMatchError(
                     f"pool of ~{extra} rows (~{mem:,.2f} GiB at {_BYTES_PER_ROW:g} B/row) "
@@ -573,7 +606,7 @@ def build_union_plan(
                     key=f"c{ci}-{pi:05d}",
                     center=ci,
                     center_idx=pi,
-                    cand_idx=_c_map([cand]),
+                    cand_idx=cand,
                     est_rows=extra,
                 )
             )
@@ -598,7 +631,7 @@ def build_union_plan(
     return UnionPlan(
         catalogues=catalogues,
         sep_arcsec=sep_arcsec,
-        delta_arcsec=max_delta,
+        delta_deg=max_delta,
         max_tuples=max_tuples,
         col_names=all_cols,
         out_dir=out_dir,
@@ -849,7 +882,7 @@ def _block_combos(
             if idx.size:
                 ra, dec = pools[k]
                 xyz_c = matchers._radec_to_xyz(ra[idx], dec[idx])
-                chord = np.sqrt(np.clip(2.0 - 2.0 * (h_xyz[bi] @ xyz_c.T), 0.0, 4.0))
+                chord = np.linalg.norm(xyz_c - h_xyz[bi], axis=1)
                 seps_k = matchers._chord_to_arcsec(chord)
                 if (
                     matcher == "skyerr"
@@ -873,7 +906,11 @@ def _block_combos(
                     sra2_p, sde2_p, rho_p = pool_errs[k]
                     mean_dec = 0.5 * (float(centre_dec[bi]) + dec[idx])
                     cos_dec = np.cos(np.radians(mean_dec))
-                    delta_ra = (float(centre_ra[bi]) - ra[idx]) * 3600.0 * cos_dec
+                    delta_ra = (
+                        ((float(centre_ra[bi]) - ra[idx] + 180.0) % 360.0 - 180.0)
+                        * 3600.0
+                        * cos_dec
+                    )
                     delta_dec = (float(centre_dec[bi]) - dec[idx]) * 3600.0
                     d2 = matchers._mahalanobis_pairwise(
                         delta_ra,
@@ -912,7 +949,7 @@ def _block_combos(
                 if idx_k.size
                 else np.array([-1], dtype=np.int64)
             )
-        total = int(np.prod([len(each) for each in lists]))
+        total = math.prod(len(each) for each in lists)
 
         def sep_of(
             combo: tuple[int, ...], nbrs: list[tuple[np.ndarray, np.ndarray]] = nbrs
@@ -925,7 +962,6 @@ def _block_combos(
             return min(vals) if vals else None  # None = centre-only row
 
         always: list[tuple[int, ...]] = []
-        heap: list[tuple[float, tuple[int, ...]]] = []  # (-sep, combo)
         if total <= max_tuples:
             for combo in itertools.product(*[each.tolist() for each in lists]):
                 if all(c < 0 for c in combo):
@@ -943,48 +979,37 @@ def _block_combos(
                 always.append(combo)
             ordered: list[tuple[int, ...]] = always
         else:
-            # Product exceeds max_tuples: keep the max_tuples combos with the
-            # smallest sep.  Sort each partner's neighbours by separation and
-            # scan the product row-major over the sorted lists (the best
-            # combos — every partner near its closest — cluster at the scan
-            # start), bounded to a small multiple of the cap so pathological
-            # pools stay cheap; the heap bounds memory and the final sort
-            # makes the cut deterministic.  Combo ids stay original pool ids,
-            # so sep_of/cat_sel downstream need no conversion.  A row here
-            # has mates (total > 1), so no centre-only combo can survive —
-            # `always` stays empty and the single falls to the oracle rules.
-            perm_k: list[np.ndarray | None] = []
-            sorted_lists: list[np.ndarray] = []
-            for k in range(n_partner):
-                idx_k = nbrs[k][0]
-                if idx_k.size:
-                    perm = np.argsort(nbrs[k][1], kind="stable")
-                    perm_k.append(perm)
-                    sorted_lists.append(np.concatenate([np.array([-1]), idx_k[perm]]))
-                else:
-                    perm_k.append(None)
-                    sorted_lists.append(np.array([-1], dtype=np.int64))
-            budget = max(1 << 20, max_tuples * 64)
-            for scanned, combo in enumerate(
-                itertools.product(*[each.tolist() for each in sorted_lists])
-            ):
-                if scanned >= budget:
-                    break
-                if all(c < 0 for c in combo):
-                    continue  # centre-only: `always` carries it (empty here)
-                vals = [
-                    float(nbrs[k][1][perm_k[k][combo[k] - 1]])  # type: ignore[index]
-                    for k in range(n_partner)
-                    if combo[k] >= 0
-                ]
-                sep = min(vals)
-                if len(heap) < max_tuples:
-                    heapq.heappush(heap, (-sep, combo))
-                elif sep < -heap[0][0]:
-                    heapq.heapreplace(heap, (-sep, combo))
-            ordered = [c for _, c in sorted(heap, key=lambda t: (t[0], t[1]))]
-            if always:
-                ordered.insert(0, always[0])
+            # The score is the smallest used edge. Sorted axes (null last,
+            # with score infinity) make it monotone on the product grid.
+            # Best-first traversal returns the exact cap without sampling or
+            # materialising the complete product; at most O(cap * N) states.
+            sorted_lists = []
+            sorted_seps = []
+            for idx_k, seps_k in nbrs:
+                perm = np.lexsort((idx_k, seps_k))
+                sorted_lists.append(np.concatenate([idx_k[perm], [-1]]))
+                sorted_seps.append(np.concatenate([seps_k[perm], [np.inf]]))
+
+            def state(pos, sorted_lists=sorted_lists, sorted_seps=sorted_seps):
+                combo = tuple(int(sorted_lists[k][p]) for k, p in enumerate(pos))
+                score = min(float(sorted_seps[k][p]) for k, p in enumerate(pos))
+                return score, combo, pos
+
+            origin = (0,) * n_partner
+            frontier = [state(origin)]
+            visited = {origin}
+            ordered = []
+            while frontier and len(ordered) < max_tuples:
+                score, combo, pos = heapq.heappop(frontier)
+                if np.isfinite(score):
+                    ordered.append(combo)
+                for k in range(n_partner):
+                    if pos[k] + 1 >= len(sorted_lists[k]):
+                        continue
+                    neighbor = pos[:k] + (pos[k] + 1,) + pos[k + 1 :]
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        heapq.heappush(frontier, state(neighbor))
 
         for combo in ordered:
             centre_out.append(int(centre_row[bi]))
@@ -1009,17 +1034,12 @@ def _block_combos(
 
 def _null_cat_frame(cat: CataloguePlan, m: int) -> pl.DataFrame:
     """Frame of ``m`` all-null rows with this catalogue's final columns."""
-    cols = []
-    for col in cat.final_cols:
-        dtype = None
-        dt = cat.dtypes.get(col)
-        if dt:
-            try:
-                dtype = getattr(pl, dt.split("(", 1)[0].strip())
-            except AttributeError:
-                dtype = None
-        cols.append(pl.Series(col, [None] * m, dtype=dtype, strict=False))
-    return pl.DataFrame(cols)
+    return pl.DataFrame(
+        [
+            pl.Series(col, [None] * m, dtype=cat.dtypes.get(col), strict=False)
+            for col in cat.final_cols
+        ]
+    )
 
 
 def _assemble_block(
@@ -1045,17 +1065,34 @@ def _assemble_block(
             tables.append(_gather_rows(centre_frame, centre_ids))
         else:
             idx = cat_sel.get(k, np.full(m, -1, dtype=np.int64))
-            frame = cat_frames.get(k, _null_cat_frame(plan.catalogues[k], m))
-            if frame.height == 0:
-                frame = _null_cat_frame(plan.catalogues[k], m)  # empty pool
+            frame = cat_frames.get(k)
+            if frame is None or frame.height == 0:
+                frame = _null_cat_frame(plan.catalogues[k], m)
             tables.append(_gather_rows(frame, idx))
     tables.append(pl.Series("sep_arcsec", seps, dtype=pl.Float64).to_frame())
     tables.append(pl.Series("_src_cats", srcs, dtype=pl.String).to_frame())
-    return pl.concat(tables, how="horizontal", strict=True)
+    return (
+        tables[0]
+        .hstack([column for frame in tables[1:] for column in frame.get_columns()])
+        .with_columns(
+            pl.coalesce([pl.col(cat.ra) for cat in plan.catalogues])
+            .cast(pl.Float64)
+            .alias("_union_ra"),
+            pl.coalesce([pl.col(cat.dec) for cat in plan.catalogues])
+            .cast(pl.Float64)
+            .alias("_union_dec"),
+        )
+    )
 
 
-def _empty_named(col_names: Sequence[str]) -> pl.DataFrame:
-    return pl.DataFrame({c: pl.Series(c, [], dtype=pl.Null) for c in col_names})
+def _empty_union(plan: UnionPlan) -> pl.DataFrame:
+    schema: dict[str, pl.DataType | type[pl.DataType]] = {
+        col: dtype for cat in plan.catalogues for col, dtype in cat.dtypes.items()
+    }
+    schema.update(
+        sep_arcsec=pl.Float64, _src_cats=pl.String, _union_ra=pl.Float64, _union_dec=pl.Float64
+    )
+    return pl.DataFrame(schema=schema)
 
 
 def _run_chunk(plan: UnionPlan, chunk: ChunkPlan) -> dict[str, Any]:
@@ -1129,9 +1166,7 @@ def _run_chunk(plan: UnionPlan, chunk: ChunkPlan) -> dict[str, Any]:
             )
         )
 
-    table = pl.concat(blocks, how="diagonal_relaxed") if blocks else _empty_named(plan.col_names)
-    if not table.height:
-        return {"key": chunk.key, "rows": 0}
+    table = pl.concat(blocks, how="diagonal_relaxed") if blocks else _empty_union(plan)
     dest = Path(plan.out_dir) / "chunks" / f"{chunk.key}.parquet"
     dest.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_parquet(table, dest)
@@ -1209,7 +1244,7 @@ def _run_rest(plan: UnionPlan, rest: RestPlan) -> dict[str, Any]:
                     keep[b0 + i] = False
                 elif plan.matcher == "skyerr" and centre_err is not None and pe is not None:
                     idx = np.asarray(hs, dtype=np.int64)
-                    chord = np.sqrt(np.clip(2.0 - 2.0 * (h_xyz[i] @ p_xyz[idx].T), 0.0, 4.0))
+                    chord = np.linalg.norm(p_xyz[idx] - h_xyz[i], axis=1)
                     seps_k = matchers._chord_to_arcsec(chord)
                     limit = float(plan.max_error) * (
                         float(centre_err[b0 + i]) + np.asarray(pe, dtype=float)[idx]
@@ -1222,7 +1257,11 @@ def _run_rest(plan: UnionPlan, rest: RestPlan) -> dict[str, Any]:
                     sra2_p, sde2_p, rho_p = pe
                     mean_dec = 0.5 * (float(dec_full[b0 + i]) + dec[idx])
                     cos_dec = np.cos(np.radians(mean_dec))
-                    delta_ra = (float(ra_full[b0 + i]) - ra[idx]) * 3600.0 * cos_dec
+                    delta_ra = (
+                        ((float(ra_full[b0 + i]) - ra[idx] + 180.0) % 360.0 - 180.0)
+                        * 3600.0
+                        * cos_dec
+                    )
                     delta_dec = (float(dec_full[b0 + i]) - dec[idx]) * 3600.0
                     d2 = matchers._mahalanobis_pairwise(
                         delta_ra,
@@ -1370,8 +1409,9 @@ def _read_hub_props(plan: UnionPlan) -> dict[str, str]:
                     break
     except OSError:
         pass
-    out.setdefault("hats_col_ra", hub.ra)
-    out.setdefault("hats_col_dec", hub.dec)
+    out["hats_col_ra"] = "_union_ra"
+    out["hats_col_dec"] = "_union_dec"
+    out["hats_ordering"] = "NESTED"
     out.setdefault("hats_nested", "True")
     out.setdefault("obs_collection", hub.name)
     return out
@@ -1424,7 +1464,7 @@ def _assemble(plan: UnionPlan) -> dict[str, Any]:
     # scan, i.e. O(P^2) for a full-sky output (P ~ 10^5-10^6 pixels).
     seen: dict[Path, None] = {}
 
-    def add_partition(part: PartitionPlan, src: Path, keep: bool = True) -> None:
+    def add_partition(part: PartitionPlan, src: Path) -> None:
         relf = f"Norder={part.order}/Dir={_hats_dir(part.pix)}/Npix={part.pix}.parquet"
         dest = dataset / relf
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1439,16 +1479,6 @@ def _assemble(plan: UnionPlan) -> dict[str, Any]:
                 [pl.read_parquet(dest), pl.read_parquet(src)], how="vertical_relaxed"
             )
             _atomic_write_parquet(merged, dest)
-        elif keep:
-            tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
-            try:
-                import shutil  # noqa: PLC0415
-
-                shutil.copy2(src, tmp)
-                os.replace(tmp, dest)
-            finally:
-                tmp.unlink(missing_ok=True)
-            seen[dest] = None
         else:
             # `src` is our own staging file (rest-routing tmp): the move is
             # the rename, and it consumes the tmp -> no litter.
@@ -1457,53 +1487,56 @@ def _assemble(plan: UnionPlan) -> dict[str, Any]:
         # NOTE: the source chunk parquet is deliberately NOT removed — they
         # are the resume points (a rerun skips existing chunk files).
 
-    for chunk in plan.chunks:
-        src = out / "chunks" / f"{chunk.key}.parquet"
-        if src.exists():
-            part = plan.catalogues[chunk.center].partitions[chunk.center_idx]
-            add_partition(part, src)
-    for rest in plan.rest:
-        src = out / "chunks" / f"rest-{rest.cat}-{rest.part_idx:05d}.parquet"
+    hub_parts = plan.catalogues[0].partitions
+    max_hub_order = max(p.order for p in hub_parts)
+    routing_cat = CataloguePlan("union", "", "", "_union_ra", "_union_dec")
+    files = [out / "chunks" / f"{chunk.key}.parquet" for chunk in plan.chunks]
+    files += [out / "chunks" / f"rest-{rest.cat}-{rest.part_idx:05d}.parquet" for rest in plan.rest]
+    for src in files:
         if not src.exists():
             continue
         frame = pl.read_parquet(src)
-        cat = plan.catalogues[rest.cat]
-        hub_parts = plan.catalogues[0].partitions
-        max_hub_order = max(p.order for p in hub_parts)
-        hub_idx, outside_pix = _rest_hub_keys(frame, cat, hub_parts, max_hub_order)
-        hub_parts_dict = (
-            frame.with_columns(pl.Series("_k", hub_idx))
-            .filter(pl.col("_k") >= 0)
-            .partition_by("_k", as_dict=True)
+        # Every emitted row uses its lowest-indexed member's coordinates.
+        # Route all chunks (including moved sources and secondary-only rows)
+        # through the hub tiling; copying each input's tile creates overlapping
+        # parent/child output pixels and null advertised coordinate columns.
+        hub_idx, outside_pix = _rest_hub_keys(frame, routing_cat, hub_parts, max_hub_order)
+        groups = frame.with_columns(pl.Series("_route", hub_idx)).partition_by(
+            "_route", as_dict=True
         )
-        for k, sub in hub_parts_dict.items():
-            h = int(k[0])
-            sub = sub.drop("_k")
-            tmp = out / "chunks" / f".rest-{rest.cat}-{rest.part_idx:05d}-h{h:05d}.tmp"
+        for key, sub in groups.items():
+            h = int(key[0])
+            if h < 0:
+                continue
+            tmp = out / "chunks" / f".{src.stem}-h{h}.tmp"
             try:
-                sub.write_parquet(tmp)
-                add_partition(plan.catalogues[0].partitions[h], tmp, keep=False)
+                sub.drop("_route").write_parquet(tmp)
+                add_partition(hub_parts[h], tmp)
+            finally:
+                tmp.unlink(missing_ok=True)
+        groups = frame.with_columns(pl.Series("_route", outside_pix)).partition_by(
+            "_route", as_dict=True
+        )
+        for key, sub in groups.items():
+            px = int(key[0])
+            if px < 0:
+                continue
+            tmp = out / "chunks" / f".{src.stem}-o{px}.tmp"
+            try:
+                sub.drop("_route").write_parquet(tmp)
+                add_partition(PartitionPlan(max_hub_order, px, ""), tmp)
             finally:
                 tmp.unlink(missing_ok=True)
 
-        outside_parts_dict = (
-            frame.with_columns(pl.Series("_o", outside_pix))
-            .filter(pl.col("_o") >= 0)
-            .partition_by("_o", as_dict=True)
-        )
-        for k, sub in outside_parts_dict.items():
-            px = int(k[0])
-            sub = sub.drop("_o")
-            tmp = (
-                out
-                / "chunks"
-                / f".rest-{rest.cat}-{rest.part_idx:05d}-o{max_hub_order:02d}_{px}.tmp"
-            )
-            try:
-                sub.write_parquet(tmp)
-                add_partition(PartitionPlan(order=max_hub_order, pix=px, rel=""), tmp, keep=False)
-            finally:
-                tmp.unlink(missing_ok=True)
+    if not seen:
+        # A zero-row catalogue still carries a readable schema and HATS metadata.
+        tmp = out / "chunks" / ".empty.tmp"
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _empty_union(plan).write_parquet(tmp)
+            add_partition(hub_parts[0], tmp)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     if seen:
         info: list[dict[str, Any]] = []
@@ -1575,6 +1608,28 @@ def _append_event(out: Path, event: str, **fields: Any) -> None:
         pass
 
 
+def _input_fingerprint(plan: UnionPlan) -> list[dict[str, Any]]:
+    """Local stat freshness; content digests for roots without reliable mtimes."""
+    files = []
+    for cat in plan.catalogues:
+        storage = open_storage(cat.root)
+        for part in cat.partitions:
+            entry: dict[str, Any] = {"root": cat.root, "rel": part.rel}
+            if isinstance(storage, LocalStorage):
+                stat = (Path(storage.root) / part.rel).stat()
+                entry.update(size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+            else:
+                # Remote stores lack a revision/mtime contract. Read each file
+                # once for freshness instead of silently reusing stale chunks.
+                with tempfile.TemporaryDirectory(prefix="xmatch-fingerprint-") as directory:
+                    local = Path(directory) / "partition.parquet"
+                    storage.stage_in(part.rel, local)
+                    with local.open("rb") as stream:
+                        entry["sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+            files.append(entry)
+    return files
+
+
 def ray_union_match(
     sources: Sequence[CatalogueSource],
     *,
@@ -1603,51 +1658,18 @@ def ray_union_match(
     """
     matchers._validate_coordinate_frames(list(sources), target_epoch=target_epoch)
     out = Path(str(output_file))
+    for source in sources:
+        root, rel = _catalogue_root(source, cache_root)
+        if not root.startswith("vos:"):
+            input_path = (Path(root) / rel).resolve()
+            output_path = out.resolve()
+            if output_path.is_relative_to(input_path) or input_path.is_relative_to(output_path):
+                raise CrossMatchError("ray-union output must not overlap an input catalogue")
     out.mkdir(parents=True, exist_ok=True)
-    task_rows = int(task_rows or DEFAULT_TASK_ROWS)
-    chunk_memory_gb = float(chunk_memory_gb or DEFAULT_CHUNK_MEMORY_GB)
-    max_tuples = int(max_tuples or DEFAULT_MAX_TUPLES)
+    task_rows = DEFAULT_TASK_ROWS if task_rows is None else task_rows
+    chunk_memory_gb = DEFAULT_CHUNK_MEMORY_GB if chunk_memory_gb is None else chunk_memory_gb
+    max_tuples = DEFAULT_MAX_TUPLES if max_tuples is None else max_tuples
     sep_arcsec = float(sep_arcsec)
-    fingerprint: dict[str, Any] = {
-        "sep_arcsec": sep_arcsec,
-        "hats_threshold": int(hats_threshold),
-        "task_rows": task_rows,
-        "chunk_memory_gb": chunk_memory_gb,
-        "max_tuples": max_tuples,
-        "inputs": [
-            {
-                "name": s.name,
-                "root": (cache_root or "") if s.hats_cache_rel else str(s.path or ""),
-                "rel": s.hats_cache_rel or "",
-            }
-            for s in sources
-        ],
-    }
-    if matcher != "sky":
-        fingerprint["matcher"] = matcher
-        fingerprint["max_error"] = float(max_error)
-    if target_epoch is not None:
-        fingerprint["target_epoch"] = float(target_epoch)
-    if pm_prior:
-        fingerprint["pm_prior"] = True
-        if pm_prior_magnitude_column is not None:
-            fingerprint["pm_prior_magnitude_column"] = pm_prior_magnitude_column
-
-    state_path = out / _STATE_NAME
-    prior_fp = None
-    if state_path.exists():
-        try:
-            prior_fp = json.loads(state_path.read_text()).get("fingerprint")
-        except (OSError, ValueError):
-            prior_fp = None
-    if prior_fp is not None and prior_fp != fingerprint:
-        # different parameters/inputs into the same out dir: stale chunks and
-        # an assembled dataset from the old run must not leak into this one.
-        import shutil  # noqa: PLC0415
-
-        for sub in ("chunks", "dataset"):
-            shutil.rmtree(out / sub, ignore_errors=True)
-
     global _LAST_PLAN  # noqa: PLW0603 - inspectable by tests / doctor
     plan = build_union_plan(
         list(sources),
@@ -1666,25 +1688,82 @@ def ray_union_match(
         fallback_policy=fallback_policy,
     )
     _LAST_PLAN = plan
+    fingerprint: dict[str, Any] = {
+        "sep_arcsec": sep_arcsec,
+        "hats_threshold": int(hats_threshold),
+        "task_rows": task_rows,
+        "chunk_memory_gb": chunk_memory_gb,
+        "max_tuples": max_tuples,
+        "plan_version": 3,
+        "fallback_policy": fallback_policy,
+        "inputs": [
+            {**asdict(cat), "dtypes": {col: str(dtype) for col, dtype in cat.dtypes.items()}}
+            for cat in plan.catalogues
+        ],
+        # ponytail: local freshness uses stat, not a full O(bytes) digest;
+        # nonlocal files require content hashes because their mtimes are unknown.
+        "input_files": _input_fingerprint(plan),
+    }
+    if matcher != "sky":
+        fingerprint["matcher"] = matcher
+        fingerprint["max_error"] = float(max_error)
+    if target_epoch is not None:
+        fingerprint["target_epoch"] = float(target_epoch)
+    if pm_prior:
+        fingerprint["pm_prior"] = True
+        if pm_prior_magnitude_column is not None:
+            fingerprint["pm_prior_magnitude_column"] = pm_prior_magnitude_column
+
+    state_path = out / _STATE_NAME
+    prior_fp = None
+    if state_path.exists():
+        try:
+            prior_fp = json.loads(state_path.read_text()).get("fingerprint")
+        except (OSError, ValueError):
+            prior_fp = None
+    if prior_fp is None and any((out / sub).exists() for sub in ("chunks", "dataset")):
+        raise CrossMatchError(
+            "Cannot resume existing output without a valid fingerprint; use a new output directory."
+        )
+    if prior_fp is not None and prior_fp != fingerprint:
+        # different parameters/inputs into the same out dir: stale chunks and
+        # an assembled dataset from the old run must not leak into this one.
+        import shutil  # noqa: PLC0415
+
+        for sub in ("chunks", "dataset"):
+            if (out / sub).exists():
+                shutil.rmtree(out / sub)
+        for name in ("properties", "partition_info.csv"):
+            (out / name).unlink(missing_ok=True)
+
     if progress_cb:
         progress_cb(
             f"plan: {len(plan.chunks)} chunks, {len(plan.rest)} rest runs, "
-            f"delta={plan.delta_arcsec:.4f} deg, radius={sep_arcsec} arcsec"
+            f"delta={plan.delta_deg:.4f} deg, radius={sep_arcsec} arcsec"
         )
-    state_path.write_text(json.dumps({"status": "running", "fingerprint": fingerprint}, indent=2))
+    _atomic_write_text(
+        json.dumps({"status": "running", "fingerprint": fingerprint}, indent=2), state_path
+    )
 
     import ray  # noqa: PLC0415
 
     # join a running head (CANFAR: `ray start --head` + RAY_ADDRESS); on a
     # laptop with no cluster, "auto" raises and we fall back to a fresh local
     # cluster (Ray 2.x does not auto-start one for address="auto").
-    try:
-        ray.init(address=os.environ.get("RAY_ADDRESS") or "auto", ignore_reinit_error=True)
-    except ConnectionError:
-        # ray.init honours $RAY_ADDRESS for address=None too, so a dead
-        # cluster address must be cleared before the local fallback.
-        os.environ.pop("RAY_ADDRESS", None)
-        ray.init(address=None, ignore_reinit_error=True)
+    owns_ray = not ray.is_initialized()
+    if owns_ray:
+        address = os.environ.get("RAY_ADDRESS")
+        try:
+            ray.init(address=address or "auto", ignore_reinit_error=True)
+        except ConnectionError as exc:
+            if address and fallback_policy == "error":
+                raise CrossMatchError(
+                    "engine='ray-union' could not connect to RAY_ADDRESS under fallback_policy='error'"
+                ) from exc
+            if address:
+                logger.warning("Cannot connect to RAY_ADDRESS; starting a local Ray cluster.")
+            # Explicit 'local' bypasses RAY_ADDRESS without changing caller env.
+            ray.init(address="local", ignore_reinit_error=True)
     try:
         plan_ref = ray.put(plan)
         chunk_fn = _chunk_task_factory()
@@ -1728,7 +1807,7 @@ def ray_union_match(
                         f"ray-union: {done}/{total} tasks "
                         f"({100.0 * done / max(total, 1):.0f}%, {rate:.1f}/s{eta_s})"
                     )
-                state_path.write_text(
+                _atomic_write_text(
                     json.dumps(
                         {
                             "status": "running",
@@ -1738,11 +1817,12 @@ def ray_union_match(
                             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                         },
                         indent=2,
-                    )
+                    ),
+                    state_path,
                 )
         assembled = _assemble(plan)
         rows = int(assembled.get("rows", 0))  # assembled total, not the task delta
-        (out / _STATE_NAME).write_text(
+        _atomic_write_text(
             json.dumps(
                 {
                     "status": "done",
@@ -1751,10 +1831,12 @@ def ray_union_match(
                     "fingerprint": fingerprint,
                 },
                 indent=2,
-            )
+            ),
+            state_path,
         )
         _append_event(out, "done", rows=rows, chunks=assembled["chunks"])
         if progress_cb:
             progress_cb(f"ray-union: {total} tasks, {rows} rows, {assembled['chunks']} partitions")
     finally:
-        ray.shutdown()
+        if owns_ray:
+            ray.shutdown()

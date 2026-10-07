@@ -27,10 +27,16 @@ import pytest
 from xmatch import hats_native, mirror
 from xmatch.exceptions import CrossMatchError
 from xmatch.sources import CatalogueSource
+from xmatch.storage import LocalStorage, Storage
 
 from .tap_fake import FakeTAPServer, make_rows
 
 PAGE = 100
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan"), "inf"])
+def test_nonfinite_estimated_size_uses_safe_default(value):
+    assert mirror._parse_estimated_size(value) == mirror.DEFAULT_ESTIMATED_SIZE
 
 
 def test_mirrored_source_preserves_measurement_and_motion_metadata(tmp_path):
@@ -149,6 +155,71 @@ def test_tap_force_refetches(tmp_path: Path, tap_server) -> None:
     assert forced.pages == 2
     assert forced.files_downloaded == 2
     assert forced.converted is True
+
+
+def test_tap_force_refetch_drops_stale_pages_after_shrink(tmp_path: Path, tap_server) -> None:
+    src = _tap_source(tap_server)
+    cache = str(tmp_path / "cache")
+    _sync(src, cache)
+
+    tap_server.update(make_rows(80))
+    forced = _sync(src, cache, force=True)
+
+    rows = _mirror_rows(cache, src)
+    assert forced.converted is True
+    assert rows.height == 80
+    assert rows["id"].max() == 79
+    assert len(list((Path(cache) / src.name / "raw" / "pages").glob("*.parquet"))) == 1
+
+
+def test_failed_tap_force_refresh_preserves_previous_pages_and_manifest(
+    tmp_path: Path, tap_server, monkeypatch
+) -> None:
+    src = _tap_source(tap_server)
+    cache = tmp_path / "cache"
+    _sync(src, str(cache))
+    pages_dir = cache / src.name / "raw" / "pages"
+    manifest_path = cache / src.name / "raw" / "sync.json"
+    old_page_bytes = {p.name: p.read_bytes() for p in pages_dir.glob("*.parquet")}
+    old_manifest = manifest_path.read_bytes()
+
+    updated = make_rows(200)
+    for row in updated:
+        row["ra"] += 5.0
+    tap_server.update(updated)
+    original_tap_run = mirror._tap_run
+
+    def fail_on_second_page(source, service, query, maxrec=None):
+        if "OFFSET 100" in query:
+            raise RuntimeError("simulated refresh interruption")
+        return original_tap_run(source, service, query, maxrec=maxrec)
+
+    monkeypatch.setattr(mirror, "_tap_run", fail_on_second_page)
+    with pytest.raises(RuntimeError, match="refresh interruption"):
+        _sync(src, str(cache), force=True)
+
+    assert {name: (pages_dir / name).read_bytes() for name in old_page_bytes} == old_page_bytes
+    assert manifest_path.read_bytes() == old_manifest
+
+    monkeypatch.setattr(mirror, "_tap_run", original_tap_run)
+    _sync(src, str(cache), force=True)
+    rows = _mirror_rows(str(cache), src)
+    minimum_ra = rows["ra"].min()
+    assert isinstance(minimum_ra, float)
+    assert minimum_ra >= 15.0
+    assert len(list(pages_dir.glob("*.parquet"))) == 2
+
+
+def test_tap_sync_rejects_non_unique_ordering_key_across_page_boundary(tmp_path: Path) -> None:
+    rows = make_rows(200)
+    rows[100]["id"] = rows[99]["id"]
+    server = FakeTAPServer(rows)
+    try:
+        src = _tap_source(server)
+        with pytest.raises(CrossMatchError, match="unique.*ordering key"):
+            _sync(src, str(tmp_path / "cache"))
+    finally:
+        server.shutdown()
 
 
 def test_tap_window_shrink_refetches_only_changed_page(tmp_path: Path, tap_server) -> None:
@@ -286,6 +357,114 @@ def test_hats_over_vos_mirror(tmp_path: Path, monkeypatch) -> None:
     assert st2.files_downloaded == 0
 
 
+class _FaultingStorage(Storage):
+    """Protocol-only remote stand-in with injectable transfer/move failures."""
+
+    def __init__(self, root: Path, *, fail_transfer: bool = False, fail_publish: bool = False):
+        self._local = LocalStorage(root)
+        self.root = self._local.root
+        self.fail_transfer = fail_transfer
+        self.fail_publish = fail_publish
+        self._uploads = 0
+
+    def exists(self, rel: str) -> bool:
+        return self._local.exists(rel)
+
+    def list(self, rel: str) -> list[str]:
+        children = self._local.list(rel)
+        if not children and self._local.size(rel) >= 0:
+            return [rel.rsplit("/", 1)[-1]]  # VOS vls may echo leaf names.
+        return children
+
+    def mkdir(self, rel: str) -> None:
+        self._local.mkdir(rel)
+
+    def rm(self, rel: str) -> None:
+        self._local.rm(rel)
+
+    def stage_out(self, local: Path, rel: str) -> None:
+        self._uploads += 1
+        if self.fail_transfer and self._uploads == 2:
+            raise OSError("simulated transfer interruption")
+        self._local.stage_out(local, rel)
+
+    def rename(self, src: str, dst: str) -> None:
+        if self.fail_publish and src.endswith(".tmp") and dst == "catalogue":
+            self.fail_publish = False
+            raise OSError("simulated promotion failure")
+        self._local.rename(src, dst)
+
+
+def _tree_with_files(root: Path, values: dict[str, str]) -> None:
+    for rel, content in values.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+
+@pytest.mark.parametrize("failure", ["transfer", "promotion"])
+def test_remote_tree_publish_failure_preserves_previous_tree(tmp_path: Path, failure: str) -> None:
+    """Remote publication is all-or-rollback even when staging/moving fails."""
+    old = {"properties": "old metadata", "dataset/part.parquet": "old partition"}
+    new = {"properties": "new metadata", "dataset/part.parquet": "new partition"}
+    live = tmp_path / "remote" / "catalogue"
+    _tree_with_files(live, old)
+    local = tmp_path / "new-tree"
+    _tree_with_files(local, new)
+    cache = _FaultingStorage(
+        tmp_path / "remote",
+        fail_transfer=failure == "transfer",
+        fail_publish=failure == "promotion",
+    )
+    assert not isinstance(cache, LocalStorage)
+    assert isinstance(cache, Storage)
+
+    message = "transfer interruption" if failure == "transfer" else "promotion failure"
+    with pytest.raises(OSError, match=message):
+        mirror._copy_tree_up(cache, local, "catalogue")
+
+    assert {rel: (live / rel).read_text() for rel in old} == old
+    assert not (tmp_path / "remote" / "catalogue.tmp").exists()
+    assert not (tmp_path / "remote" / "catalogue.old").exists()
+
+
+def test_remote_tree_publish_recovers_backup_before_transfer(tmp_path: Path) -> None:
+    """An interrupted prior promotion leaves the old tree recoverable."""
+    old = {"properties": "old metadata", "dataset/part.parquet": "old partition"}
+    new = {"properties": "new metadata", "dataset/part.parquet": "new partition"}
+    backup = tmp_path / "remote" / "catalogue.old"
+    _tree_with_files(backup, old)
+    _tree_with_files(tmp_path / "remote" / "catalogue.tmp", {"partial": "stale"})
+    local = tmp_path / "new-tree"
+    _tree_with_files(local, new)
+    cache = _FaultingStorage(tmp_path / "remote", fail_transfer=True)
+
+    with pytest.raises(OSError, match="transfer interruption"):
+        mirror._copy_tree_up(cache, local, "catalogue")
+
+    live = tmp_path / "remote" / "catalogue"
+    assert {rel: (live / rel).read_text() for rel in old} == old
+    assert not backup.exists()
+    assert not (tmp_path / "remote" / "catalogue.tmp").exists()
+
+
+def test_remote_tree_publish_replaces_complete_tree(tmp_path: Path) -> None:
+    old = {"properties": "old metadata", "dataset/old.parquet": "old partition"}
+    new = {"properties": "new metadata", "dataset/part.parquet": "new partition"}
+    _tree_with_files(tmp_path / "remote" / "catalogue", old)
+    local = tmp_path / "new-tree"
+    _tree_with_files(local, new)
+    cache = _FaultingStorage(tmp_path / "remote")
+
+    mirror._copy_tree_up(cache, local, "catalogue")
+
+    live = tmp_path / "remote" / "catalogue"
+    assert {rel: (live / rel).read_text() for rel in new} == new
+    assert not (live / "dataset/old.parquet").exists()
+    assert not (tmp_path / "remote" / "catalogue.tmp").exists()
+    assert not (tmp_path / "remote" / "catalogue.old").exists()
+
+
 def test_ensure_mirrored_local_conversion(tmp_path: Path) -> None:
     """Plain local parquet inputs are converted once into the cache as HATS."""
     frame = list(make_rows(37, ra0=200.0, dec0=10.0))
@@ -410,7 +589,9 @@ def test_sync_falls_back_to_alternate_endpoint(tmp_path: Path, monkeypatch) -> N
 
         rows = mirror_rows(cache, src)
         assert rows.height == 200
-        assert rows["ra"].min() >= 30.0  # rows came from B
+        minimum_ra = rows["ra"].min()
+        assert isinstance(minimum_ra, float)
+        assert minimum_ra >= 30.0  # rows came from B
         assert srv_a.queries == []  # primary never served anything
     finally:
         srv_a.shutdown()
