@@ -140,7 +140,16 @@ The next complete live run passed 669 tests with nine skips and exposed two
 stale Ray-address tests. They assumed the old environment-clearing fallback.
 The tests now verify the documented warning/local fallback policies, preserved
 caller environment and exact output identities; all five targeted address
-checks passed. A fresh complete run follows the memory-budget correction.
+checks passed. The fresh complete run after the memory-budget correction
+finished with 670 passed, nine skipped and one failure in the live ESA
+remote-first test: the archive closed a job-metadata connection. An unchanged
+retry timed out. These are unresolved live transport failures, not successful
+release checks. A new offline three-catalogue regression exercises the same
+remote-first path through real PyVO and a local UWS server, checking exact
+identities and job deletion. That regression and the four TAP lifecycle checks
+passed together (five tests, 12.54 s). The live test now anchors its cone and
+expected identity to an actual Gaia DR3 sample; this revised live assertion has
+not yet passed against ESA.
 
 Fresh 500-row Gaia DR3, AllWISE and USNO-B1 samples passed all 12 live catalogue
 checks. Optional Torchsky/Torchfits checks used the sibling Torchsky checkout
@@ -205,9 +214,18 @@ The CANFAR environment used Python 3.13.15, Ray 2.58.0, NumPy 2.4.6, Polars
 1.44.2, PyArrow 25.0.0, SciPy 1.18.1, Astropy 8.0.1, PyVO 1.9.1, HATS 0.11.0
 and CDSHealpix 0.8.1. The three owned cluster sessions were removed after testing.
 Following explicit cleanup authorization, the helper-created VOS configuration
-was removed before starting the larger worker sweep. That sweep uses a separate
-owned namespace and frozen corrected package; its sessions and artifacts will
-be removed after local evidence is saved.
+was removed before starting the larger worker sweep. The controlled sweep
+completed both input sizes with one, two, four and eight workers, using the same
+frozen matching package and input hashes. Every point has one warmup and three
+timed repetitions, with output identity checks and complete worker task records
+saved locally. The one-million-row median fell from 283.778 s with one worker
+to 60.004 s with eight workers (4.73 times faster, 59.1% parallel efficiency).
+Launching worker sixteen failed with a manager HTTP 400 wrapping a CANFAR
+session-service HTTP 500; no sixteen-worker timing exists. The user removed the
+manager and workers after the sweep stopped. All seventeen owned manager,
+bootstrap and worker IDs subsequently returned HTTP 404 on direct checks.
+The stale manager configuration is also absent. Temporary ARC storage cleanup
+is being verified separately after preserving all eight completed points.
 
 Separate Python 3.14.8 / Polars 2.0 compatibility checks passed 206 tests with
 24 optional dependency skips. This is a targeted compatibility check, not the
@@ -218,15 +236,23 @@ All configured pre-commit hooks passed. Mypy now uses the locked Pixi scientific
 environment; the former isolated hook lacked dependencies and misclassified
 Polars type aliases. Codespell passes with a reduced list of scientific tokens.
 
-Final combined checks, rebuilt artifacts, Ubuntu CI, Python compatibility and
-CANFAR worker evidence will be recorded after those runs finish.
+The tightened archive checker rejects undeclared wheel payloads and unexpected
+generated source-archive metadata. Five malformed-archive cases failed before
+the fix; all twelve checker tests now pass. The scaling analyzer self-check also
+passes with Python assertions disabled. The latest fast gate passes Ruff,
+formatting, Mypy and compilation. Final artifacts still need rebuilding from
+the completed report and source tree.
 
 The review candidate is [draft PR #204](https://github.com/astroai/xmatch/pull/204).
 Its configured commit and pre-push offline gates passed. The first Ubuntu job
 caught incompatible setup-pixi settings (`cache=true`, `run-install=false`);
 the workflow now performs the locked installation through the setup action,
-removing the redundant separate install step. A fresh Linux job must confirm
-the corrected workflow before this candidate is ready.
+removing the redundant separate install step. The corrected workflow passed on
+Ubuntu at commit `aafb077`: 639 tests passed, twelve skipped and 33 live tests
+deselected, plus lint, typing, compilation, artifact checks and installed-wheel
+CLI verification. [The successful run](https://github.com/astroai/xmatch/actions/runs/37637370937)
+validates that commit; the subsequent report and checker edits still need the
+final pre-push gate and a fresh CI run.
 
 ## Compatibility and limits from the initial audit
 

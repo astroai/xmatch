@@ -1,8 +1,9 @@
 name: Linux release gate
 
 on:
+  # ponytail: PR events cover feature branches; push verifies merged main.
   push:
-    branches: [main, "codex/**"]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:

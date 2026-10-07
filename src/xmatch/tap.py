@@ -75,6 +75,8 @@ def execute_tap_query(
 ):
     """Execute an ADQL query (async) and return the result as an astropy Table.
 
+    PyVO attempts to delete the submitted job on exit, including errors or cancellation.
+
     ``progress_cb`` is invoked with short status strings at three points:
     on submission ("submitting TAP job"), every poll iteration
     ("phase: queued" / "phase: running" / ...), and on completion

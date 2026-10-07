@@ -107,11 +107,29 @@ def test_wheel_rejects_omitted_or_changed_license(tmp_path, include_license, lic
         check_wheel(path, ROOT, _project(), package_files(ROOT))
 
 
-def test_sdist_rejects_unlisted_source_payload(tmp_path):
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "unexpected.txt",
+        "src/xmatch.egg-info/unexpected.txt",
+        "src/xmatch.egg-info/nested/SOURCES.txt",
+    ],
+)
+def test_sdist_rejects_unlisted_source_payload(tmp_path, extra):
     path = tmp_path / "xmatch.tar.gz"
-    required = _sdist(path, extra=("unexpected.txt",))
+    required = _sdist(path, extra=(extra,))
     with pytest.raises(SystemExit, match="source archive contents differ"):
         check_sdist(path, ROOT, required, _project()["name"])
+
+
+@pytest.mark.parametrize(
+    "extra", ["unexpected.py", "startup.pth", "xmatch-0.5.0.data/purelib/other.py"]
+)
+def test_wheel_rejects_payload_outside_package(tmp_path, extra):
+    path = tmp_path / "xmatch.whl"
+    _wheel(path, extra=(extra,))
+    with pytest.raises(SystemExit, match="wheel contents differ"):
+        check_wheel(path, ROOT, _project(), package_files(ROOT))
 
 
 def test_sdist_accepts_declared_sources_and_generated_metadata(tmp_path):

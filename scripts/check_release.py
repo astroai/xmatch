@@ -85,6 +85,22 @@ def check_wheel(wheel_path: Path, root: Path, project: dict, package: list[Path]
             len(metadata_paths) == 1,
             f"expected one wheel METADATA, found {metadata_paths}",
         )
+        dist_info = metadata_paths[0].rsplit("/", 1)[0]
+        allowed_names = (
+            expected_package
+            | {
+                f"{dist_info}/{filename}"
+                for filename in ("METADATA", "WHEEL", "RECORD", "entry_points.txt", "top_level.txt")
+            }
+            | {f"{dist_info}/licenses/{relative}" for relative in expected_license_files}
+        )
+        unexpected_names = {
+            name for name in names if not name.endswith("/") and name not in allowed_names
+        }
+        _require(
+            not unexpected_names,
+            f"wheel contents differ: extra={sorted(unexpected_names)}",
+        )
         metadata = Parser().parsestr(wheel.read(metadata_paths[0]).decode())
         wheel_name = re.sub(r"[-_.]+", "-", metadata.get("Name", "")).lower()
         project_name = re.sub(r"[-_.]+", "-", project["name"]).lower()
@@ -148,7 +164,18 @@ def _is_generated_sdist_metadata(name: str, archive_root: str, project_name: str
     parts = relative.parts
     egg_info = re.sub(r"[-.]+", "_", project_name).lower() + ".egg-info"
     return relative.as_posix() in {"PKG-INFO", "setup.cfg"} or (
-        len(parts) >= 3 and parts[0] == "src" and parts[1] == egg_info
+        len(parts) == 3
+        and parts[0] == "src"
+        and parts[1] == egg_info
+        and parts[2]
+        in {
+            "PKG-INFO",
+            "SOURCES.txt",
+            "dependency_links.txt",
+            "entry_points.txt",
+            "requires.txt",
+            "top_level.txt",
+        }
     )
 
 

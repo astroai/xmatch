@@ -92,8 +92,10 @@ def self_check() -> None:
         for iteration, seconds in enumerate((1000, 9, 10, 11))
     ]
     summary = summarise(rows)
-    assert summary[100, 1]["union_seconds"] == (10.0, 9.0, 11.0)
-    assert summary[100, 2]["union_seconds"] == (5.0, 4.5, 5.5)
+    if summary[100, 1]["union_seconds"] != (10.0, 9.0, 11.0) or summary[100, 2][
+        "union_seconds"
+    ] != (5.0, 4.5, 5.5):
+        raise AssertionError("Warmup exclusion or median/range aggregation failed")
     for broken in (
         rows + [rows[0]],
         [{**row, "union_seconds": "nan"} for row in rows],
@@ -162,14 +164,32 @@ def main() -> None:
                 capsize=3,
                 label=label,
             )
-        baseline = summary[size, 1]["union_seconds"][0]
+        baseline, baseline_low, baseline_high = summary[size, 1]["union_seconds"]
         speedups = [baseline / summary[size, count]["union_seconds"][0] for count in worker_counts]
-        axes[1, column].plot(worker_counts, speedups, "o-")
+        bounds = [
+            (1.0, 1.0)
+            if count == 1
+            else (
+                baseline_low / summary[size, count]["union_seconds"][2],
+                baseline_high / summary[size, count]["union_seconds"][1],
+            )
+            for count in worker_counts
+        ]
+        errors = [
+            [center - low for center, (low, _) in zip(speedups, bounds, strict=True)],
+            [high - center for center, (_, high) in zip(speedups, bounds, strict=True)],
+        ]
+        axes[1, column].errorbar(worker_counts, speedups, yerr=errors, fmt="o-", capsize=3)
         axes[1, column].plot(worker_counts, worker_counts, ":", color="gray", label="Ideal")
-        axes[2, column].plot(
+        axes[2, column].errorbar(
             worker_counts,
             [100 * speedup / count for speedup, count in zip(speedups, worker_counts, strict=True)],
-            "o-",
+            yerr=[
+                [100 * error / count for error, count in zip(side, worker_counts, strict=True)]
+                for side in errors
+            ],
+            fmt="o-",
+            capsize=3,
         )
         axes[2, column].axhline(100, linestyle=":", color="gray")
         axes[0, column].set_title(f"{size:,} rows per input")
