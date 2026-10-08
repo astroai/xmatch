@@ -27,7 +27,7 @@ repos:
     hooks:
       - id: mypy
         name: type checks in the locked scientific environment
-        entry: pixi run --as-is mypy src/xmatch tests scripts
+        entry: pixi run --as-is mypy src/xmatcher tests scripts
         language: system
         pass_filenames: false
         always_run: true

@@ -1,9 +1,9 @@
 """Mirroring + incremental cache tests: TAP fake on 127.0.0.1, remote HATS over HTTP.
 
-Covers the ``xmatch sync`` data plane behind :func:`xmatch.mirror.sync_catalogue`:
+Covers the ``xmatcher sync`` data plane behind :func:`xmatcher.mirror.sync_catalogue`:
 
 * cold TAP sync → local HATS catalogue (proven readable via
-  :func:`xmatch.hats_native.list_hats_pixels`)
+  :func:`xmatcher.hats_native.list_hats_pixels`)
 * incremental re-sync with zero page downloads (probe-only),
 * :code:`--force` re-fetch,
 * window-shrink re-sync (one refetched page),
@@ -24,10 +24,10 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from xmatch import hats_native, mirror
-from xmatch.exceptions import CrossMatchError
-from xmatch.sources import CatalogueSource
-from xmatch.storage import LocalStorage, Storage
+from xmatcher import hats_native, mirror
+from xmatcher.exceptions import CrossMatchError
+from xmatcher.sources import CatalogueSource
+from xmatcher.storage import LocalStorage, Storage
 
 from .tap_fake import FakeTAPServer, make_rows
 
@@ -40,7 +40,7 @@ def test_nonfinite_estimated_size_uses_safe_default(value):
 
 
 def test_mirrored_source_preserves_measurement_and_motion_metadata(tmp_path):
-    from xmatch.storage import LocalStorage
+    from xmatcher.storage import LocalStorage
 
     source = CatalogueSource(
         name="pilot",
@@ -315,7 +315,7 @@ def test_hats_over_vos_mirror(tmp_path: Path, monkeypatch) -> None:
         frame, vos_root / "cat", ra_column="ra", dec_column="dec", threshold=50
     )
 
-    from xmatch.storage import LocalStorage
+    from xmatcher.storage import LocalStorage
 
     class _VlsLikeStorage(LocalStorage):
         """LocalStorage with the real ``vls`` quirks _walk_storage must handle:
@@ -553,7 +553,7 @@ def test_headroom_gate_blocks_sync_when_disk_full(tmp_path: Path, tap_server, mo
 
     DU = collections.namedtuple("DU", "total used free")
     monkeypatch.setattr(
-        "xmatch.storage.shutil.disk_usage",
+        "xmatcher.storage.shutil.disk_usage",
         lambda p: DU(1000, 900, 5.0),  # 5 bytes free
     )
     with pytest.raises(mirror.CrossMatchError, match=r"min-free-gb"):

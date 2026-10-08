@@ -20,6 +20,7 @@ import polars as pl
 
 from .sources import CatalogueSource
 
+# Persisted v1 wire names stay fixed across the package rename to preserve IDs.
 OBSERVATION_RELEASE_SCHEMA_VERSION = "xmatch.observations.release.v1"
 SOURCE_ID_SCHEMA_VERSION = "xmatch.source.v1"
 _FLUX_FACTORS = {"Jy": 1.0, "mJy": 1e-3, "uJy": 1e-6, "nanomaggy": 3.631e-6}

@@ -94,7 +94,7 @@ class CatalogueSource:
     tap_url: str | None = None
     default_columns: list[str] | None = None
 
-    # Mirror location inside the xmatch cache root (set by ensure_mirrored).
+    # Mirror location inside the xmatcher cache root (set by ensure_mirrored).
     hats_cache_rel: str | None = None
 
     # Cache root that actually holds the mirrored copy at ``hats_cache_rel``
@@ -103,7 +103,7 @@ class CatalogueSource:
 
     # Alternate endpoints for the same data (mirror archives / mirrored
     # copies other data centres keep).  Entries are resolved CatalogueSource
-    # objects (same-schema copies in xmatch.yaml) or raw http(s)/vos: HATS
+    # objects (same-schema copies in xmatcher.yaml) or raw http(s)/vos: HATS
     # URLs for remote-HATS sources.  Used by the sync failover walk.
     fallbacks: list[str | CatalogueSource] = field(default_factory=list)
 

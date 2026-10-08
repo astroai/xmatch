@@ -1,4 +1,4 @@
-"""Streaming tests for the pure polars ``id_join`` machinery in xmatch.
+"""Streaming tests for the pure polars ``id_join`` machinery in xmatcher.
 
 The STILTS-backed spatial tests in :mod:`tests.test_large_crossmatch` cover
 streaming end-to-end on a 10k-row scale, but they exercise the spatial
@@ -17,7 +17,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from xmatch import CrossMatch
+from xmatcher import CrossMatch
 
 _N_BASE = 10_000  # rows per parquet catalogue
 _INJECT = 50  # deliberate id overlap (left's tail == right's head)
@@ -33,7 +33,7 @@ def parquet_catalogues(tmp_path: Path) -> tuple[Path, Path]:
     id-join produces exactly ``_INJECT = 50`` matched rows.
 
     Both catalogues use identical column names (``oid``, ``ra``, ``dec``,
-    ``mag``) on purpose: the names need to be ``ra``/``dec`` so xmatch's
+    ``mag``) on purpose: the names need to be ``ra``/``dec`` so xmatcher's
     local-source resolver can satisfy its (rather eager) RA/Dec-detection
     step on both sides, and naming collisions on the right catalogue are
     exactly what we want — they exercise polars's suffix-on-collision

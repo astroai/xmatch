@@ -42,7 +42,7 @@ class AuthConfig:
             "cadc",
         ]
         for service_name in known_services:
-            env_prefix = f"XMATCH_{service_name.upper()}"
+            env_prefix = f"XMATCHER_{service_name.upper()}"
             username = os.environ.get(f"{env_prefix}_USER")
             password = os.environ.get(f"{env_prefix}_PASSWORD")
             if username and password:

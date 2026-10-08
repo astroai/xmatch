@@ -1,6 +1,6 @@
-# Crossmatch Algorithms in xmatch
+# Crossmatch Algorithms in xmatcher
 
-Algorithms and score assumptions for the matchers implemented in `xmatch`.
+Algorithms and score assumptions for the matchers implemented in `xmatcher`.
 Literature references identify related methods or mathematical foundations;
 they do not claim that every implementation is a complete reproduction.
 In particular, `auf` and `macauff` are lightweight empirical heuristics.

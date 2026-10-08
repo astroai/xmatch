@@ -3,7 +3,7 @@ import json
 import polars as pl
 import pytest
 
-from xmatch import CrossMatch
+from xmatcher import CrossMatch
 
 
 def _source(data, **metadata):
@@ -14,7 +14,7 @@ def _source(data, **metadata):
 
 
 def test_inventory_preserves_native_values_and_release_identity():
-    from xmatch.observations import source_inventory
+    from xmatcher.observations import source_inventory
 
     source = _source({"id": [17, 18], "ra": [359.9, 0.1], "dec": [2.0, -2.0]})
     rows = source_inventory(source).collect()
@@ -29,7 +29,7 @@ def test_inventory_preserves_native_values_and_release_identity():
 
 
 def test_namespaced_ids_distinguish_integer_string_and_delimiters():
-    from xmatch.observations import namespaced_source_id
+    from xmatcher.observations import namespaced_source_id
 
     assert namespaced_source_id("a:b", "c") != namespaced_source_id("a", "b:c")
     assert namespaced_source_id("a", 17) != namespaced_source_id("a", "17")
@@ -48,7 +48,7 @@ def test_namespaced_ids_distinguish_integer_string_and_delimiters():
     ],
 )
 def test_flux_normalization_preserves_negative_flux(unit, value, expected):
-    from xmatch.observations import normalize_photometry
+    from xmatcher.observations import normalize_photometry
 
     source = _source(
         {"id": [17], "f": [value], "e": [0.5]},
@@ -70,7 +70,7 @@ def test_flux_normalization_preserves_negative_flux(unit, value, expected):
 
 
 def test_magnitudes_have_asymmetric_flux_errors_and_vega_requires_zeropoint():
-    from xmatch.observations import normalize_photometry
+    from xmatcher.observations import normalize_photometry
 
     mapping = {"passband": "pilot:g:v1", "value_column": "m", "error_column": "e", "unit": "ABmag"}
     source = _source({"id": [1], "m": [20.0], "e": [0.5]}, photometry=[mapping])
@@ -86,7 +86,7 @@ def test_magnitudes_have_asymmetric_flux_errors_and_vega_requires_zeropoint():
 
 
 def test_photometry_keeps_missing_upper_limit_and_observation_epoch_distinct():
-    from xmatch.observations import normalize_photometry
+    from xmatcher.observations import normalize_photometry
 
     source = _source(
         {
@@ -118,7 +118,7 @@ def test_photometry_keeps_missing_upper_limit_and_observation_epoch_distinct():
 
 
 def test_raw_property_evidence_keeps_conflicts_and_native_types():
-    from xmatch.observations import normalize_property_evidence
+    from xmatcher.observations import normalize_property_evidence
 
     source = _source(
         {"id": [1], "z1": [0.1], "z2": [0.2], "type": ["QSO"], "rv": [52.0]},
@@ -187,7 +187,7 @@ def test_source_resolution_retains_explicit_astrometric_frame():
 
 
 def test_immutable_release_accounts_for_sources_without_photometry(tmp_path):
-    from xmatch.observations import write_observation_release
+    from xmatcher.observations import write_observation_release
 
     destination = tmp_path / "release"
     source = _source({"id": [1, 2]})
@@ -207,7 +207,7 @@ def test_immutable_release_accounts_for_sources_without_photometry(tmp_path):
 
 @pytest.mark.parametrize("ids", [[1, 1], [1, None]])
 def test_invalid_native_identity_never_publishes_release(tmp_path, ids):
-    from xmatch.observations import write_observation_release
+    from xmatcher.observations import write_observation_release
 
     destination = tmp_path / "release"
     with pytest.raises(ValueError, match="[Ii][Dd]|identity|identifier"):
@@ -218,7 +218,7 @@ def test_invalid_native_identity_never_publishes_release(tmp_path, ids):
 
 
 def test_normalization_rejects_undeclared_or_invalid_metadata():
-    from xmatch.observations import (
+    from xmatcher.observations import (
         normalize_photometry,
         normalize_property_evidence,
         source_inventory,
@@ -242,7 +242,7 @@ def test_normalization_rejects_undeclared_or_invalid_metadata():
 
 
 def test_bad_uncertainties_and_overflow_do_not_become_finite_measurements():
-    from xmatch.observations import normalize_photometry
+    from xmatcher.observations import normalize_photometry
 
     source = _source(
         {"id": [1, 2, 3], "f": [1.0, float("nan"), 2.0], "e": [-1.0, 0.2, float("inf")]},
@@ -262,7 +262,7 @@ def test_bad_uncertainties_and_overflow_do_not_become_finite_measurements():
 
 
 def test_duplicate_measurement_mapping_is_rejected():
-    from xmatch.observations import normalize_photometry
+    from xmatcher.observations import normalize_photometry
 
     mapping = {"passband": "g", "value_column": "f", "unit": "Jy"}
     with pytest.raises(ValueError, match="duplicate"):
@@ -270,7 +270,7 @@ def test_duplicate_measurement_mapping_is_rejected():
 
 
 def test_evidence_preserves_posterior_array_and_upstream_observation_id():
-    from xmatch.observations import normalize_property_evidence
+    from xmatcher.observations import normalize_property_evidence
 
     source = _source(
         {"id": [1], "posterior": [[0.2, 0.8]], "obs_id": ["spec-42"]},
@@ -293,7 +293,7 @@ def test_evidence_preserves_posterior_array_and_upstream_observation_id():
 
 
 def test_release_verification_rejects_tampering_and_escaped_paths(tmp_path):
-    from xmatch.observations import verify_observation_release, write_observation_release
+    from xmatcher.observations import verify_observation_release, write_observation_release
 
     path = tmp_path / "release"
     manifest = write_observation_release(
@@ -312,7 +312,7 @@ def test_release_verification_rejects_tampering_and_escaped_paths(tmp_path):
 
 
 def test_photometry_keeps_passband_curve_and_limit_confidence_metadata():
-    from xmatch.observations import normalize_photometry
+    from xmatcher.observations import normalize_photometry
 
     source = _source(
         {"id": [1], "f": [5.0], "state": ["L"]},
@@ -341,7 +341,7 @@ def test_photometry_keeps_passband_curve_and_limit_confidence_metadata():
 
 
 def test_required_observation_columns_include_evidence_and_astrometric_fields():
-    from xmatch.observations import required_observation_columns
+    from xmatcher.observations import required_observation_columns
 
     source = _source(
         {"id": [1]},
@@ -384,7 +384,7 @@ def test_required_observation_columns_include_evidence_and_astrometric_fields():
 
 
 def test_magnitude_uncertainty_conversion_avoids_intermediate_overflow_and_flags_true_overflow():
-    from xmatch.observations import normalize_photometry
+    from xmatcher.observations import normalize_photometry
 
     source = _source(
         {"id": [1, 2], "m": [1000.0, 20.0], "e": [900.0, 900.0]},
@@ -397,7 +397,7 @@ def test_magnitude_uncertainty_conversion_avoids_intermediate_overflow_and_flags
 
 
 def test_vega_flux_conversion_combines_zeropoint_before_exponentiation():
-    from xmatch.observations import normalize_photometry
+    from xmatcher.observations import normalize_photometry
 
     source = _source(
         {"id": [1], "m": [-800.0]},
@@ -411,7 +411,7 @@ def test_vega_flux_conversion_combines_zeropoint_before_exponentiation():
 
 
 def test_invalid_upper_limit_is_retained_and_flagged():
-    from xmatch.observations import normalize_photometry
+    from xmatcher.observations import normalize_photometry
 
     source = _source(
         {"id": [1], "f": [-1.0], "status": ["L"]},
@@ -431,8 +431,8 @@ def test_invalid_upper_limit_is_retained_and_flagged():
 
 
 def test_dispatch_rejects_mixed_frames_before_matching_and_keeps_id_join_available():
-    from xmatch.exceptions import CrossMatchError
-    from xmatch.request import MatchRequest
+    from xmatcher.exceptions import CrossMatchError
+    from xmatcher.request import MatchRequest
 
     source = _source({"id": [1], "ra": [10.0], "dec": [20.0]})
     other = _source({"id": [1], "ra": [10.0], "dec": [20.0]}, frame="galactic")
@@ -445,9 +445,9 @@ def test_dispatch_rejects_mixed_frames_before_matching_and_keeps_id_join_availab
 
 
 def test_local_target_epoch_requires_icrs_even_when_frames_agree():
-    from xmatch.exceptions import CrossMatchError
-    from xmatch.matchers import MatchSpec
-    from xmatch.request import MatchRequest
+    from xmatcher.exceptions import CrossMatchError
+    from xmatcher.matchers import MatchSpec
+    from xmatcher.request import MatchRequest
 
     source = _source({"id": [1], "ra": [10.0], "dec": [20.0]}, frame="galactic", epoch=2020.0)
     request = MatchRequest(
@@ -458,7 +458,7 @@ def test_local_target_epoch_requires_icrs_even_when_frames_agree():
 
 
 def test_nway_rejects_mixed_frames_before_remote_download():
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher.exceptions import CrossMatchError
 
     cm = CrossMatch()
     for name, frame in [("equatorial", "icrs"), ("galactic", "galactic")]:
@@ -476,7 +476,7 @@ def test_nway_rejects_mixed_frames_before_remote_download():
 
 
 def test_same_frame_spherical_geometry_does_not_require_icrs():
-    from xmatch.request import MatchRequest
+    from xmatcher.request import MatchRequest
 
     source = _source({"id": [1], "ra": [10.0], "dec": [20.0]}, frame="galactic")
     request = MatchRequest(source.lazy(), source.lazy(), engine="fast")

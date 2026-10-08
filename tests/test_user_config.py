@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-from xmatch import CrossMatch
-from xmatch.discovery import (
+from xmatcher import CrossMatch
+from xmatcher.discovery import (
     catalogue_entry_from_schema,
     guess_endpoint,
     looks_like_table_id,
     split_table_id,
 )
-from xmatch.exceptions import ConfigError, InputError
-from xmatch.user_config import (
+from xmatcher.exceptions import ConfigError, InputError
+from xmatcher.user_config import (
     append_catalogue_to_user_config,
     deep_merge,
     format_catalogue_yaml,
@@ -24,7 +24,7 @@ from xmatch.user_config import (
 
 
 def test_box_cone_predicate_for_noirlab():
-    from xmatch.remote_tap import _cone_predicate, _uses_box_cone
+    from xmatcher.remote_tap import _cone_predicate, _uses_box_cone
 
     assert _uses_box_cone("https://datalab.noirlab.edu/tap")
     assert not _uses_box_cone("http://tapvizier.u-strasbg.fr/TAPVizieR/tap")
@@ -82,7 +82,7 @@ def test_catalogue_entry_from_schema_builds_yaml_ready_dict():
 def test_detect_radec_columns_uses_tap_ucd_when_names_are_uninformative():
     import polars as pl
 
-    from xmatch.discovery import detect_radec_columns
+    from xmatcher.discovery import detect_radec_columns
 
     columns = pl.DataFrame(
         {
@@ -96,20 +96,20 @@ def test_detect_radec_columns_uses_tap_ucd_when_names_are_uninformative():
 def test_detect_radec_columns_handles_empty_tap_schema():
     import polars as pl
 
-    from xmatch.discovery import detect_radec_columns
+    from xmatcher.discovery import detect_radec_columns
 
     assert detect_radec_columns(pl.DataFrame()) == (None, None)
 
 
 def test_auth_sessions_accept_actual_archive_names_and_legacy_env_names(monkeypatch):
-    from xmatch.auth import AuthConfig
+    from xmatcher.auth import AuthConfig
 
-    monkeypatch.setenv("XMATCH_VIZIER_USER", "legacy-cds")
-    monkeypatch.setenv("XMATCH_VIZIER_PASSWORD", "legacy-secret")
-    monkeypatch.setenv("XMATCH_GAIA_ARCHIVE_USER", "legacy-gaia")
-    monkeypatch.setenv("XMATCH_GAIA_ARCHIVE_PASSWORD", "legacy-secret")
-    monkeypatch.setenv("XMATCH_CDS_USER", "canonical-cds")
-    monkeypatch.setenv("XMATCH_CDS_PASSWORD", "canonical-secret")
+    monkeypatch.setenv("XMATCHER_VIZIER_USER", "legacy-cds")
+    monkeypatch.setenv("XMATCHER_VIZIER_PASSWORD", "legacy-secret")
+    monkeypatch.setenv("XMATCHER_GAIA_ARCHIVE_USER", "legacy-gaia")
+    monkeypatch.setenv("XMATCHER_GAIA_ARCHIVE_PASSWORD", "legacy-secret")
+    monkeypatch.setenv("XMATCHER_CDS_USER", "canonical-cds")
+    monkeypatch.setenv("XMATCHER_CDS_PASSWORD", "canonical-secret")
     sessions = {}
 
     def make_session(username, password):
@@ -117,7 +117,7 @@ def test_auth_sessions_accept_actual_archive_names_and_legacy_env_names(monkeypa
         sessions[username] = session
         return session
 
-    monkeypatch.setattr("xmatch.auth._make_basic_auth_session", make_session)
+    monkeypatch.setattr("xmatcher.auth._make_basic_auth_session", make_session)
     auth = AuthConfig()
 
     assert auth.get_auth_session("cds") is sessions["canonical-cds"]
@@ -160,10 +160,10 @@ def test_deep_merge_and_user_overlay(tmp_path, monkeypatch):
 
     user = tmp_path / "user.yaml"
     user.write_text(yaml.safe_dump(overlay))
-    monkeypatch.setattr("xmatch.user_config.find_user_config_path", lambda: user)
+    monkeypatch.setattr("xmatcher.user_config.find_user_config_path", lambda: user)
     monkeypatch.setattr(
-        "xmatch.user_config.bundled_config_path",
-        lambda: Path(__file__).resolve().parents[1] / "src" / "xmatch" / "xmatch.yaml",
+        "xmatcher.user_config.bundled_config_path",
+        lambda: Path(__file__).resolve().parents[1] / "src" / "xmatcher" / "xmatcher.yaml",
     )
     cfg, primary = load_merged_config(include_user_overlay=True)
     assert primary == user
@@ -173,7 +173,7 @@ def test_deep_merge_and_user_overlay(tmp_path, monkeypatch):
 
 
 def test_append_catalogue_merges_archives_on_second_adopt(tmp_path):
-    dest = tmp_path / "xmatch.yaml"
+    dest = tmp_path / "xmatcher.yaml"
     cds = {
         "cds": {
             "tap_service": {
@@ -216,7 +216,7 @@ def test_append_catalogue_merges_archives_on_second_adopt(tmp_path):
 
 
 def test_append_catalogue_to_user_config(tmp_path):
-    dest = tmp_path / "xmatch.yaml"
+    dest = tmp_path / "xmatcher.yaml"
     archives = {
         "cds": {
             "description": "CDS",
@@ -246,7 +246,7 @@ def test_append_catalogue_to_user_config(tmp_path):
 
 
 def test_failed_user_config_serialization_preserves_previous_file(tmp_path, monkeypatch):
-    dest = tmp_path / "xmatch.yaml"
+    dest = tmp_path / "xmatcher.yaml"
     original = "archives: {cds: {}}\ncatalogues: {}\n"
     dest.write_text(original)
     entry = {
@@ -259,7 +259,7 @@ def test_failed_user_config_serialization_preserves_previous_file(tmp_path, monk
     def fail_dump(*args, **kwargs):
         raise OSError("write failed")
 
-    monkeypatch.setattr("xmatch.user_config.yaml.safe_dump", fail_dump)
+    monkeypatch.setattr("xmatcher.user_config.yaml.safe_dump", fail_dump)
     with pytest.raises(OSError, match="write failed"):
         append_catalogue_to_user_config("test", entry, path=dest)
 
@@ -286,7 +286,7 @@ def test_bundled_new_survey_aliases():
 
 
 def test_resolve_access_identifier_uses_bundled_catalogue():
-    """Pasting ACCESS from `xmatch list` must resolve to the short-name entry."""
+    """Pasting ACCESS from `xmatcher list` must resolve to the short-name entry."""
     cm = CrossMatch()
     src = cm.resolve_source("II/349/ps1", {})
     assert src.name == "ps1"
@@ -311,7 +311,7 @@ def test_source_from_table_id_uses_mock_schema(monkeypatch):
             "access_identifier": table_id.strip('"'),
         }
 
-    monkeypatch.setattr("xmatch.crossmatch.get_table_schema", fake_schema)
+    monkeypatch.setattr("xmatcher.crossmatch.get_table_schema", fake_schema)
     # Unknown VizieR id (not in bundled config) → ad-hoc TAP path.
     src = cm.resolve_source("II/999/not_a_real_cat", {})
     assert not src.is_local

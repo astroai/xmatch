@@ -1,6 +1,6 @@
 """Catalogue crossmatch orchestrator.
 
-Resolves inputs into :class:`~xmatch.sources.CatalogueSource` objects, selects a
+Resolves inputs into :class:`~xmatcher.sources.CatalogueSource` objects, selects a
 strategy from the input types, executes it on the appropriate backend, and
 returns the result as a polars frame (eager by default, lazy on request).
 
@@ -71,7 +71,7 @@ def _find_default_config_path() -> Path | None:
     bundled = bundled_config_path()
     if bundled.is_file():
         return bundled
-    cwd = Path.cwd() / "xmatch.yaml"
+    cwd = Path.cwd() / "xmatcher.yaml"
     return cwd if cwd.is_file() else None
 
 
@@ -277,7 +277,7 @@ class CrossMatch:
         self._explicit_config = config_file is not None
         if config_file is None:
             if DEFAULT_CONFIG_PATH is None:
-                raise ConfigError("No xmatch.yaml found; pass config_file explicitly.")
+                raise ConfigError("No xmatcher.yaml found; pass config_file explicitly.")
             self.config_file = DEFAULT_CONFIG_PATH
         else:
             self.config_file = Path(config_file)
@@ -404,7 +404,7 @@ class CrossMatch:
     def find_catalogue_by_access_id(self, table_id: str) -> str | None:
         """Return catalogue key whose ``access_identifier``/``table_name`` matches *table_id*.
 
-        Lets users paste the ACCESS column from ``xmatch list`` and still get the
+        Lets users paste the ACCESS column from ``xmatcher list`` and still get the
         bundled entry (columns, errors, epoch) instead of a bare TAP_SCHEMA probe.
         """
         needle = table_id.strip().strip('"').lower()
@@ -478,7 +478,7 @@ class CrossMatch:
 
         if text.startswith(("http://", "https://", "vos:")):
             # Remote HATS catalogue over HTTP / vos: — mirrored on demand by the
-            # ray-union pipeline and `xmatch sync`.
+            # ray-union pipeline and `xmatcher sync`.
             name = text.rstrip("/").rsplit("/", 1)[-1] or "remote-hats"
             return CatalogueSource(
                 name=name,
@@ -502,7 +502,7 @@ class CrossMatch:
             return self._local_source(path.stem, path=path, overrides=overrides)
 
         # Prefer a configured catalogue when the user pastes an ACCESS id from
-        # `xmatch list` (e.g. II/349/ps1 → ps1), before falling back to ad-hoc TAP.
+        # `xmatcher list` (e.g. II/349/ps1 → ps1), before falling back to ad-hoc TAP.
         by_access = self.find_catalogue_by_access_id(text)
         if by_access is not None:
             return self._remote_source(self.get_catalogue_config(by_access), overrides)
@@ -610,7 +610,7 @@ class CrossMatch:
         # Apply explicit overrides first; fall back to auto-detection. Note that
         # we no longer raise on missing RA/Dec here so ``id_join`` flows can
         # operate on tables without spatial columns; the hard error is now
-        # emitted from :func:`xmatch.matchers.sky_match`.
+        # emitted from :func:`xmatcher.matchers.sky_match`.
         src.ra_column = overrides.get("ra_column")
         src.dec_column = overrides.get("dec_column")
         if src.ra_column is None or src.dec_column is None:
@@ -729,7 +729,7 @@ class CrossMatch:
         """Run a two-catalogue crossmatch.
 
         For typed request objects see :meth:`crossmatch_request` with
-        :class:`~xmatch.request.MatchRequest`.
+        :class:`~xmatcher.request.MatchRequest`.
 
         ``progress_cb``, when supplied, is forwarded to :meth:`_download_remote`
         so the CLI can render a spinner during TAP/CDS downloads.
@@ -868,7 +868,7 @@ class CrossMatch:
                 if output_file is None:
                     raise CrossMatchError(
                         "Full-sky unions of remote surveys write the joined HATS catalogue "
-                        "to disk; pass -o/--output <out>.hats and xmatch will auto-route "
+                        "to disk; pass -o/--output <out>.hats and xmatcher will auto-route "
                         "to engine='ray-union'."
                     )
                 logger.info(
@@ -1261,7 +1261,7 @@ class CrossMatch:
         union_requested: bool = False,
         **params: Any,
     ) -> None:
-        """Distributed N-survey full-outer join via :mod:`xmatch.ray_union`.
+        """Distributed N-survey full-outer join via :mod:`xmatcher.ray_union`.
 
         Every input is mirrored into the cache first (:func:`.mirror.ensure_mirrored`),
         then the HATS-sharded Ray pipeline runs.  Writes the joined HATS catalogue
@@ -1358,7 +1358,7 @@ class CrossMatch:
         workers = int(threads if threads is not None else DEFAULT_SYNC_WORKERS)
         min_free = float(
             params.get("min_free_gb")
-            or os.environ.get("XMATCH_MIN_FREE_GB")
+            or os.environ.get("XMATCHER_MIN_FREE_GB")
             or cache_cfg.get("min_free_gb")
             or DEFAULT_MIN_FREE_GB
         )
@@ -1380,7 +1380,7 @@ class CrossMatch:
                     f"Invalid vos: output '{output_file}' (need a container and a name)."
                 )
             vos_storage = open_storage(vos_root)
-            staging = Path(tempfile.mkdtemp(prefix="xmatch-union-vos-"))
+            staging = Path(tempfile.mkdtemp(prefix="xmatcher-union-vos-"))
             out_dir = staging / _name
             if vos_storage.list(""):
                 try:
@@ -1476,7 +1476,7 @@ class CrossMatch:
                     ]
                 else:
                     # --no-sync: require cached HATS copies up front, with the actionable
-                    # "run xmatch sync" error instead of a path-shaped crash downstream,
+                    # "run xmatcher sync" error instead of a path-shaped crash downstream,
                     # and repoint each remote source at the first surviving copy
                     # (primary root, then replicas) so the union reads a replica when
                     # the primary is gone instead of failing on an empty directory.
@@ -2228,7 +2228,7 @@ class CrossMatch:
         hats_threshold: int = 100_000,
         progress_cb: Callable[[str], None] | None = None,
     ) -> pl.DataFrame | pl.LazyFrame | None:
-        """Run a crossmatch from a typed :class:`~xmatch.request.MatchRequest`.
+        """Run a crossmatch from a typed :class:`~xmatcher.request.MatchRequest`.
 
         This is the preferred entry point for new code. It gives mypy and IDEs
         full visibility into every parameter.

@@ -9,8 +9,8 @@ import numpy as np
 import polars as pl
 import pytest
 
-from xmatch import CatalogueSource, CrossMatchError, MatchSpec
-from xmatch.matchers import _torchsky_match, _zone_match, sky_match
+from xmatcher import CatalogueSource, CrossMatchError, MatchSpec
+from xmatcher.matchers import _torchsky_match, _zone_match, sky_match
 
 
 def _source(name: str, **kwargs) -> CatalogueSource:
@@ -31,7 +31,7 @@ def test_match_spec_rejects_unknown_fallback_policy() -> None:
 def test_ray_strict_policy_fails_when_ray_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("xmatch.ray_engine.ray_available", lambda: False)
+    monkeypatch.setattr("xmatcher.ray_engine.ray_available", lambda: False)
     left = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005]})
     with pytest.raises(CrossMatchError, match="requires Ray"):
@@ -71,7 +71,7 @@ def test_zone_strict_policy_fails_when_healpix_is_unavailable(
 def test_auto_stilts_falls_back_for_unsupported_match_semantics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from xmatch import stilts
+    from xmatcher import stilts
 
     monkeypatch.setattr(stilts, "stilts_available", lambda _command: True)
 
@@ -99,7 +99,7 @@ def test_auto_stilts_falls_back_for_unsupported_match_semantics(
 def test_stilts_strict_policy_rejects_unsupported_match_semantics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from xmatch import stilts
+    from xmatcher import stilts
 
     monkeypatch.setattr(stilts, "stilts_available", lambda _command: True)
     left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [0.1], "dee": [0.1]})
@@ -139,7 +139,7 @@ def test_torchsky_engine_adapts_nearest_match_result(
             separation_arcsec=np.array([0.25]),
         )
 
-    monkeypatch.setattr("xmatch.matchers._load_torchsky_crossmatch", lambda: fake_crossmatch)
+    monkeypatch.setattr("xmatcher.matchers._load_torchsky_crossmatch", lambda: fake_crossmatch)
     left = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     right = pl.DataFrame({"ra": [50.0, 10.00005], "dec": [5.0, 5.00005]})
 
@@ -169,7 +169,7 @@ def test_torchsky_skyerr_nan_sigma_is_not_accepted(
             separation_arcsec=np.array([0.0]),
         )
 
-    monkeypatch.setattr("xmatch.matchers._load_torchsky_crossmatch", lambda: fake_crossmatch)
+    monkeypatch.setattr("xmatcher.matchers._load_torchsky_crossmatch", lambda: fake_crossmatch)
     left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [np.nan], "dee": [np.nan]})
     right = pl.DataFrame({"ra": [10.0], "dec": [5.0], "rae": [0.1], "dee": [0.1]})
     with pytest.raises(CrossMatchError, match="non-finite or negative RA position error"):
@@ -210,7 +210,7 @@ def test_torchsky_missing_package_fails_loud(
     def missing_torchsky():
         raise CrossMatchError("engine='torchsky' requires the optional torchsky package")
 
-    monkeypatch.setattr("xmatch.matchers._load_torchsky_crossmatch", missing_torchsky)
+    monkeypatch.setattr("xmatcher.matchers._load_torchsky_crossmatch", missing_torchsky)
     left = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     right = pl.DataFrame({"ra": [10.00005], "dec": [5.00005]})
 

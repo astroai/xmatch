@@ -1,17 +1,17 @@
-# xmatch Public Python API Reference
+# xmatcher Public Python API Reference
 
-Stable public surface only. Anything not exported from `xmatch.__init__` is considered internal.
+Stable public surface only. Anything not exported from `xmatcher.__init__` is considered internal.
 
 ---
 
-## Top-Level Entry Points (`xmatch.CrossMatch`)
+## Top-Level Entry Points (`xmatcher.CrossMatch`)
 
 `CrossMatch` resolves configured catalogues, manages remote archive access, validates declared coordinate-frame compatibility, and dispatches requests to matching engines. It does not transform coordinates between frames.
 
 ```python
-from xmatch import CrossMatch
+from xmatcher import CrossMatch
 
-cm = CrossMatch()  # loads bundled xmatch.yaml and user overrides
+cm = CrossMatch()  # loads bundled xmatcher.yaml and user overrides
 ```
 
 ### Methods Summary
@@ -239,7 +239,7 @@ Defines the algorithm criteria:
 
 ## Execution Engines Matrix
 
-`xmatch` decouples matching algorithms from spatial indexing engines.
+`xmatcher` decouples matching algorithms from spatial indexing engines.
 
 | Engine | Primary Backend | Threading / Scaling | Memory Overhead | Supported Algorithms & Features |
 |---|---|---|---|---|
@@ -287,7 +287,7 @@ flowchart TD
 ## Universal I/O and Storage Helpers
 
 ```python
-from xmatch import (
+from xmatcher import (
     scan_frame,
     write_frame,
     is_hats_dir,
@@ -306,27 +306,27 @@ from xmatch import (
 
 ---
 
-## Local Mirroring & Caching (`xmatch.mirror`)
+## Local Mirroring & Caching (`xmatcher.mirror`)
 
 The mirroring subsystem backs offline queries and the distributed `ray-union` pipeline:
 
 ```python
-from xmatch.mirror import mirror_catalogue, TokenBucket
-from xmatch.storage import open_storage
+from xmatcher.mirror import mirror_catalogue, TokenBucket
+from xmatcher.storage import open_storage
 ```
 
-- **Remote HATS Replication**: Synchronizes remote HATS directories over HTTP or `vos:` into the local cache (`~/.cache/xmatch` or `/arc/projects/hats`). It hashes remote partition content for each sync attempt; this detects same-size edits but requires reading partition bytes and can add substantial network I/O.
+- **Remote HATS Replication**: Synchronizes remote HATS directories over HTTP or `vos:` into the local cache (`~/.cache/xmatcher` or `/arc/projects/hats`). It hashes remote partition content for each sync attempt; this detects same-size edits but requires reading partition bytes and can add substantial network I/O. The documented CANFAR working/output directory is `/arc/projects/hats/xmatcher`.
 - **TAP Keyset Pagination**: Downloads TAP catalogues with local resume manifests (`sync.json`) and requires a unique, non-null stable key. Page-window row counts do not detect same-count edits; `--force` requests a full refresh. Append-only growth is detected using a maximum-key probe.
 - **TokenBucket Rate Limiter**: Thread-safe per-host rate limiting handling HTTP 429/503 responses with exponential backoff.
 
 ---
 
-## Association Contract & Provenance Graph (`xmatch.association`)
+## Association Contract & Provenance Graph (`xmatcher.association`)
 
-The `xmatch.association` module provides an audit-grade, content-addressed association contract (`xmatch.association.v1`) for astronomical candidate generation, graph components, and identity continuity. (See [`docs/association-v1.md`](association-v1.md) for normative schema specifications).
+The `xmatcher.association` module provides an audit-grade, content-addressed association contract (`xmatch.association.v1`) for astronomical candidate generation, graph components, and identity continuity. (See [`docs/association-v1.md`](association-v1.md) for normative schema specifications).
 
 ```python
-from xmatch.association import (
+from xmatcher.association import (
     AssociationRecord,
     AssociationProvenance,
     AssociationScore,
@@ -403,12 +403,12 @@ CrossMatchError
 
 ## Catalogue and model-training products
 
-`xmatch.observations` supplies `source_inventory`, `namespaced_source_id`,
+`xmatcher.observations` supplies `source_inventory`, `namespaced_source_id`,
 `normalize_photometry`, `normalize_property_evidence`,
 `required_observation_columns`, `validate_source_inventory`,
 `write_observation_release`, and `verify_observation_release`.
-`xmatch.candidates` supplies `write_candidate_release`,
+`xmatcher.candidates` supplies `write_candidate_release`,
 `verify_candidate_release`, and `normalize_candidate_hypotheses`.
-These functions are also exported from `xmatch`.
+These functions are also exported from `xmatcher`.
 See [observation mappings](observations.md) and the
 [catalogue-to-model pipeline](catalogue-pipeline.md) for contracts and examples.

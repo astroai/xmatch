@@ -17,7 +17,7 @@
 Build a HATS-based crossmatch pipeline on CANFAR that:
 1. Caches survey catalogs locally (`/arc/projects/hats/`, `/scratch/` for ephemeral)
 2. Crossmatches them against Gaia DR3 (full catalog, not just XP stars)
-3. Applies proper-motion corrections via xmatch
+3. Applies proper-motion corrections via xmatcher
 4. Produces a general-purpose master HATS catalog (not MSA-specific)
 5. Enables efficient streaming for future MSA pretraining
 
@@ -77,12 +77,12 @@ hats-catalog-pipeline/
 ├── scripts/
 │   ├── fetch.py                # download VizieR HATS → /arc/projects/hats/
 │   ├── fetch_gaia_xp.py        # fetch XP coefficients (HATS or bulk CSV)
-│   ├── crossmatch.py           # xmatch with PM propagation via torchsky engine
+│   ├── crossmatch.py           # xmatcher with PM propagation via torchsky engine
 │   └── build_master.py         # assemble final HATS catalog
 └── src/hats_catalog/
     ├── fetch.py                # catalog fetching logic
     ├── crossmatch.py           # crossmatch orchestration
-    ├── pm.py                   # PM propagation (via xmatch --target-epoch)
+    ├── pm.py                   # PM propagation (via xmatcher --target-epoch)
     └── schema.py               # column definitions, catalog metadata
 ```
 
@@ -104,7 +104,7 @@ Step 3: crossmatch.py
     × other surveys with measured motion propagated to J2016.0
     × surveys without PM either matched at their declared epoch or handled
       with an explicitly accepted missing-motion prior and positional errors
-  ──→ /arc/projects/hats/gaia_xmatch/
+  ──→ /arc/projects/hats/xmatcher/
 
 Step 4: build_master.py
   Gaia XP (via source_id join) + crossmatch results
@@ -124,7 +124,7 @@ Step 4: build_master.py
   galex/                               # unverified size estimate; measure current product
   splus_dr4/                           # unverified size estimate; measure current product
   vhs_dr5/                             # unverified size estimate; measure current product
-  gaia_xmatch/                         # intermediate crossmatch
+  xmatcher/                            # intermediate output and working products
   master/                              # final catalog
 
 /scratch/                              # ephemeral, fast
@@ -150,7 +150,7 @@ Step 4: build_master.py
 ```
 hats-import    # FITS → HATS conversion
 lsdb           # HATS catalog I/O
-xmatch         # crossmatch orchestration
+xmatcher       # crossmatch orchestration
 torchsky       # HEALPix-accelerated matching
 torchfits      # FITS I/O
 pyarrow        # Parquet
@@ -171,7 +171,7 @@ polars         # data manipulation
   stationary across epoch differences. Either compare at a scientifically
   justified native epoch, supply a validated motion model, or use an explicitly
   accepted missing-motion prior with suitable positional uncertainty.
-- `xmatch` validates frames, epochs, and motion metadata; it does not infer
+- `xmatcher` validates frames, epochs, and motion metadata; it does not infer
   missing scientific metadata. Consult `docs/usage.md` before planning the full
   survey scale because memory behavior depends on input ordering and matcher.
 
@@ -181,7 +181,7 @@ polars         # data manipulation
 
 2. **SDSS**: Skip entirely, or import DR16 photometry from VizieR for completeness? PS1 + SMSS + S-PLUS already cover u/g/r/i/z wavelengths.
 
-3. **Crossmatch order**: Sequential left joins (Gaia × CatWISE, then result × PS1, etc.) — simple, robust. Or N-way Bayesian (xmatch.nway_match) — more complex but handles degeneracies.
+3. **Crossmatch order**: Sequential left joins (Gaia × CatWISE, then result × PS1, etc.) — simple, robust. Or N-way Bayesian (`xmatcher.nway_match`) — more complex but handles degeneracies.
 
 4. **Pixel threshold**: How many rows per HEALPix partition? Current MSA uses 2M rows/key. Suggest 1M for HATS (balances memory vs parallelism).
 

@@ -5,8 +5,8 @@ import pytest
 from astropy.coordinates import SkyCoord
 from astropy.time import Time
 
-from xmatch import astro_utils
-from xmatch.astro_utils import (
+from xmatcher import astro_utils
+from xmatcher.astro_utils import (
     find_coord_columns,
     propagate_proper_motion,
     propagate_proper_motion_with_jacobian,

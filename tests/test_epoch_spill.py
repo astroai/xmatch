@@ -4,10 +4,10 @@ import numpy as np
 import polars as pl
 import pytest
 
-from xmatch import CatalogueSource, MatchRequest, MatchSpec, SideOverrides, astro_utils
-from xmatch.exceptions import CrossMatchError
-from xmatch.out_of_core import _align_epoch, match_to_output
-from xmatch.sources import ASTROMETRIC_COVARIANCE_KEYS
+from xmatcher import CatalogueSource, MatchRequest, MatchSpec, SideOverrides, astro_utils
+from xmatcher.exceptions import CrossMatchError
+from xmatcher.out_of_core import _align_epoch, match_to_output
+from xmatcher.sources import ASTROMETRIC_COVARIANCE_KEYS
 
 
 def _source(frame, **metadata):
@@ -121,7 +121,7 @@ def test_skyerr_epoch_spill_inflates_uncertainty_and_halo(tmp_path, monkeypatch)
     result = pl.read_parquet(output)
     assert result["id"].to_list() == [1] and result["id_2"].to_list() == [2]
     assert result["sep_arcsec"].item() == pytest.approx(0.4, abs=1e-8)
-    assert not any(name.startswith("_xmatch_spill_") for name in result.columns)
+    assert not any(name.startswith("_xmatcher_spill_") for name in result.columns)
 
 
 def test_epoch_covariance_alignment_rejects_missing_invalid_or_unavailable_covariance(monkeypatch):
@@ -185,7 +185,7 @@ def test_epoch_covariance_mixed_rows_preserve_static_uncertainty_and_identity(mo
     source = _covariance_source(frame, epoch_column="epoch")
     result = _align_epoch(frame.lazy(), source, 2010.0, propagate_covariance=True).collect()
     assert result["id"].to_list() == [2**60 + 1, 1]
-    assert result["_xmatch_spill_epoch_sigma"].to_list() == pytest.approx(
+    assert result["_xmatcher_spill_epoch_sigma"].to_list() == pytest.approx(
         [
             np.sqrt(2) / 1000,
             np.sqrt(500002) / 1000,
@@ -213,7 +213,7 @@ def test_epoch_covariance_physical_path_accepts_explicit_deterministic_rv(monkey
         release_metadata={"radial_velocity_uncertainty": "deterministic"},
     )
     result = _align_epoch(frame.lazy(), source, 2010.0, propagate_covariance=True).collect()
-    assert result["_xmatch_spill_epoch_sigma"].item() == pytest.approx(np.sqrt(500002) / 1000)
+    assert result["_xmatcher_spill_epoch_sigma"].item() == pytest.approx(np.sqrt(500002) / 1000)
 
 
 def test_epoch_covariance_matches_real_torchsky_zero_motion_jacobian():
@@ -222,7 +222,7 @@ def test_epoch_covariance_matches_real_torchsky_zero_motion_jacobian():
     result = _align_epoch(
         frame.lazy(), _covariance_source(frame), 2010.0, propagate_covariance=True
     ).collect()
-    sigma = result["_xmatch_spill_epoch_sigma"].item()
+    sigma = result["_xmatcher_spill_epoch_sigma"].item()
     assert sigma == pytest.approx(np.sqrt(2 * (1 + 10**2 * 50**2)) / 1000, rel=1e-10)
 
 
@@ -238,14 +238,14 @@ def test_epoch_covariance_scalar_epoch_broadcasts_over_multiple_rows(monkeypatch
         frame.lazy(), _covariance_source(frame), 2010.0, propagate_covariance=True
     ).collect()
     assert result["id"].to_list() == [1, 2]
-    assert result["_xmatch_spill_epoch_sigma"].to_list() == pytest.approx(
+    assert result["_xmatcher_spill_epoch_sigma"].to_list() == pytest.approx(
         [np.sqrt(500002) / 1000] * 2
     )
 
 
 @pytest.mark.parametrize("find", ["best", "all"])
 def test_target_epoch_skyerr_matches_with_and_without_spill(tmp_path, monkeypatch, find):
-    from xmatch.matchers import sky_match
+    from xmatcher.matchers import sky_match
 
     monkeypatch.setattr(astro_utils, "propagate_proper_motion_with_jacobian", _zero_motion_jacobian)
     left = _covariance_frame()
@@ -299,13 +299,13 @@ def test_target_epoch_skyerr_matches_with_and_without_spill(tmp_path, monkeypatc
         .sort("id_2")
         .equals(spill.select("id", "id_2", "sep_arcsec").sort("id_2"))
     )
-    assert not any(name.startswith("_xmatch_spill_epoch_sigma") for name in eager.columns)
+    assert not any(name.startswith("_xmatcher_spill_epoch_sigma") for name in eager.columns)
 
 
 @pytest.mark.parametrize("fallback", ["warn", "error"])
 @pytest.mark.parametrize("pm_prior", [False, True])
 def test_eager_target_epoch_skyerr_fails_on_missing_covariance_even_with_warn(fallback, pm_prior):
-    from xmatch.matchers import sky_match
+    from xmatcher.matchers import sky_match
 
     frame = _covariance_frame()
     source = _source(
@@ -325,7 +325,7 @@ def test_eager_target_epoch_skyerr_fails_on_missing_covariance_even_with_warn(fa
 
 
 def test_eager_epoch_skyerr_outer_rows_do_not_leak_evaluated_uncertainty(monkeypatch):
-    from xmatch.matchers import sky_match
+    from xmatcher.matchers import sky_match
 
     monkeypatch.setattr(astro_utils, "propagate_proper_motion_with_jacobian", _zero_motion_jacobian)
     left = _covariance_frame()
@@ -353,11 +353,11 @@ def test_eager_epoch_skyerr_outer_rows_do_not_leak_evaluated_uncertainty(monkeyp
         engine="fast",
     ).collect()
     assert result.height == 2
-    assert not any(name.startswith("_xmatch_spill_epoch_sigma") for name in result.columns)
+    assert not any(name.startswith("_xmatcher_spill_epoch_sigma") for name in result.columns)
 
 
 def test_epoch_uncertainty_prior_uses_existing_radial_rms_convention(monkeypatch):
-    from xmatch import matchers
+    from xmatcher import matchers
 
     monkeypatch.setattr(matchers, "_galactic_latitude", lambda ra, dec: np.zeros(len(ra)))
     frame = pl.DataFrame(
@@ -378,13 +378,13 @@ def test_epoch_uncertainty_prior_uses_existing_radial_rms_convention(monkeypatch
     ).collect()
     # Reference radial RMS is 5 arcsec; the declared model adds 10 mas/yr
     # * 100 years = 1 arcsec radial RMS, once: sqrt(5**2 + 1**2).
-    assert evaluated["_xmatch_spill_epoch_sigma"].item() == pytest.approx(np.sqrt(26))
+    assert evaluated["_xmatcher_spill_epoch_sigma"].item() == pytest.approx(np.sqrt(26))
     assert evaluated["ra"].item() == 10.0
 
 
 @pytest.mark.parametrize("kind", ["unknown_motion", "missing_errors", "stilts"])
 def test_eager_epoch_skyerr_refuses_unknown_or_unsupported_science(kind):
-    from xmatch.matchers import sky_match
+    from xmatcher.matchers import sky_match
 
     frame = _covariance_frame()
     source = _covariance_source(frame)
@@ -443,7 +443,7 @@ def test_epoch_skyerr_refuses_physically_inconsistent_velocity(monkeypatch):
 
 @pytest.mark.parametrize("target_epoch", [None, 2000.0])
 def test_direct_sky_match_checks_declared_coordinate_frames(target_epoch):
-    from xmatch.matchers import sky_match
+    from xmatcher.matchers import sky_match
 
     frame = _covariance_frame()
     left = _covariance_source(frame)

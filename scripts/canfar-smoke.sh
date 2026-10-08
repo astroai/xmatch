@@ -5,12 +5,12 @@
 # CANFAR lab (or any scratch box with the pixi env):
 #
 #   1. build two tiny synthetic parquet catalogues in a scratch dir,
-#   2. `xmatch match --engine ray-union` them end to end (local parquet ->
+#   2. `xmatcher match --engine ray-union` them end to end (local parquet ->
 #      mirrored HATS in the cache -> Ray union match -> HATS output),
 #   3. verify the output is a readable, non-empty HATS dataset.
 #
-# With optional positional catalogue names (configured in xmatch.yaml) the
-# script first runs `xmatch sync NAME1 NAME2` so the real TAP/HATS remote
+# With optional positional catalogue names (configured in xmatcher.yaml) the
+# script first runs `xmatcher sync NAME1 NAME2` so the real TAP/HATS remote
 # data plane is covered too; the ray-union match then runs against the
 # mirrored copies. This remote smoke checks only that the result is readable
 # and non-empty; live catalogues do not have a fixed row-count oracle.
@@ -31,8 +31,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SCRATCH="${TMP_SCRATCH_DIR:-$(mktemp -d /tmp/xmatch-canfar-smoke.XXXXXX)}"
-CACHE_ROOT="${XMATCH_CACHE_ROOT:-${SCRATCH}/cache}"
+SCRATCH="${TMP_SCRATCH_DIR:-$(mktemp -d /tmp/xmatcher-canfar-smoke.XXXXXX)}"
+CACHE_ROOT="${XMATCHER_CACHE_ROOT:-${SCRATCH}/cache}"
 OUT_DIR="${SCRATCH}/out"
 mkdir -p "${OUT_DIR}"
 
@@ -43,7 +43,7 @@ REMOTE_CATALOGUES=0
 if [ "$#" -ge 2 ]; then
     REMOTE_CATALOGUES=1
     echo "==> syncing ${*} into ${CACHE_ROOT}"
-    pixi run xmatch sync "$@" --cache-root "${CACHE_ROOT}"
+    pixi run xmatcher sync "$@" --cache-root "${CACHE_ROOT}"
     MATCH_INPUTS=("$@")
 else
     echo "==> building synthetic catalogues in ${SCRATCH}"
@@ -66,7 +66,7 @@ PY
 fi
 
 echo "==> ray-union match: ${MATCH_INPUTS[*]}"
-pixi run xmatch match "${MATCH_INPUTS[@]}" \
+pixi run xmatcher match "${MATCH_INPUTS[@]}" \
     --engine ray-union \
     --cache-root "${CACHE_ROOT}" \
     -o "${OUT_DIR}/union.hats"
@@ -78,7 +78,7 @@ from pathlib import Path
 
 import hats
 import polars as pl
-from xmatch import hats_native
+from xmatcher import hats_native
 
 def require(condition: bool, message: str) -> None:
     if not condition:

@@ -1,4 +1,4 @@
-"""Storage abstraction for xmatch mirrors and Ray task I/O.
+"""Storage abstraction for xmatcher mirrors and Ray task I/O.
 
 A :class:`Storage` hides *where* the durable root lives (a POSIX dir on the
 driver/manager node, or a CANFAR VOSpace ``vos:`` URI) behind one API.  All
@@ -339,7 +339,7 @@ class VOSpaceStorage(Storage):
     def read_parquet(self, rel: str) -> pl.DataFrame:
         import tempfile
 
-        tmpdir = tempfile.mkdtemp(prefix="xmatch-vos-")
+        tmpdir = tempfile.mkdtemp(prefix="xmatcher-vos-")
         local = Path(tmpdir) / "part.parquet"
         try:
             self.stage_in(rel, local)
@@ -353,7 +353,7 @@ class VOSpaceStorage(Storage):
         """Stage the partition in and read its footer (one transfer, not two)."""
         import tempfile
 
-        tmpdir = tempfile.mkdtemp(prefix="xmatch-vos-schema-")
+        tmpdir = tempfile.mkdtemp(prefix="xmatcher-vos-schema-")
         local = Path(tmpdir) / "part.parquet"
         try:
             self.stage_in(rel, local)
@@ -366,7 +366,7 @@ class VOSpaceStorage(Storage):
     def write_parquet(self, df: pl.DataFrame, rel: str) -> None:
         import tempfile
 
-        tmpdir = tempfile.mkdtemp(prefix="xmatch-vos-")
+        tmpdir = tempfile.mkdtemp(prefix="xmatcher-vos-")
         local = Path(tmpdir) / "part.parquet"
         try:
             df.write_parquet(local)
@@ -481,40 +481,40 @@ def platform_arc_root() -> str | None:
 def default_cache_root() -> str:
     """Effective default cache root.
 
-    ``XMATCH_CACHE_ROOT`` wins; on AstroAI/CANFAR sessions (shared ``/arc``
+    ``XMATCHER_CACHE_ROOT`` wins; on AstroAI/CANFAR sessions (shared ``/arc``
     volume) the default is ``/arc/projects/hats`` — never a home directory,
     which is pod-local and lost; off the platform it falls back to
-    ``~/.cache/xmatch``.
+    ``~/.cache/xmatcher``.
     """
-    env = os.environ.get("XMATCH_CACHE_ROOT")
+    env = os.environ.get("XMATCHER_CACHE_ROOT")
     if env:
         return env
     if platform_arc_root():
         return "/arc/projects/hats"
-    return str(Path.home() / ".cache" / "xmatch")
+    return str(Path.home() / ".cache" / "xmatcher")
 
 
 def default_output_root() -> str | None:
     """Root for crossmatch outputs.
 
-    ``XMATCH_OUTPUT_ROOT`` wins (empty string disables); on
-    AstroAI/CANFAR sessions the default is ``/arc/projects/hats/xmatch``;
+    ``XMATCHER_OUTPUT_ROOT`` wins (empty string disables); on
+    AstroAI/CANFAR sessions the default is ``/arc/projects/hats/xmatcher``;
     off the platform there is no default and relative outputs stay
     cwd-relative.  The CLI resolves bare relative output names under this
     root; explicit paths are always respected verbatim.
     """
-    env = os.environ.get("XMATCH_OUTPUT_ROOT")
+    env = os.environ.get("XMATCHER_OUTPUT_ROOT")
     if env is not None:
         return env.strip() or None
     if platform_arc_root():
-        return "/arc/projects/hats/xmatch"
+        return "/arc/projects/hats/xmatcher"
     return None
 
 
 def all_cache_roots(cache_cfg: dict | None = None) -> list[str]:
     """Ordered, deduplicated cache roots: primary first, then replicas.
 
-    Primary = ``$XMATCH_CACHE_ROOT`` → ``cache_cfg["root"]`` →
+    Primary = ``$XMATCHER_CACHE_ROOT`` → ``cache_cfg["root"]`` →
     :func:`default_cache_root`.  Every entry of ``cache_cfg["roots"]`` is
     appended after it (blank entries dropped; the primary is never duplicated
     as a replica).  Never returns ``[]``.  Replicas may be ``vos:`` URIs —
@@ -522,7 +522,7 @@ def all_cache_roots(cache_cfg: dict | None = None) -> list[str]:
     mirror-fallback copies the union reads when the primary copy is gone.
     """
     cache_cfg = cache_cfg or {}
-    primary = os.environ.get("XMATCH_CACHE_ROOT") or cache_cfg.get("root") or default_cache_root()
+    primary = os.environ.get("XMATCHER_CACHE_ROOT") or cache_cfg.get("root") or default_cache_root()
     roots = [primary]
     for entry in cache_cfg.get("roots") or []:
         text = str(entry).strip()

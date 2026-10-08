@@ -15,8 +15,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from xmatch.exceptions import ConfigError
-from xmatch.storage import (
+from xmatcher.exceptions import ConfigError
+from xmatcher.storage import (
     LocalStorage,
     VOSpaceStorage,
     all_cache_roots,
@@ -120,7 +120,7 @@ def test_concurrent_stage_out_uses_distinct_temporary_files(tmp_path: Path, monk
             handle.write(Path(src).read_bytes())
             both_written.wait(timeout=5)
 
-    monkeypatch.setattr("xmatch.storage.shutil.copy2", synchronized_copy)
+    monkeypatch.setattr("xmatcher.storage.shutil.copy2", synchronized_copy)
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(store.stage_out, src, "same.dat") for src in sources]
         errors = [future.exception(timeout=10) for future in futures]
@@ -166,18 +166,18 @@ def test_rel_symlink_cannot_escape_local_storage_root(tmp_path: Path) -> None:
 def test_assert_headroom_uses_binary_gibibytes(tmp_path: Path, monkeypatch) -> None:
     from collections import namedtuple
 
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher.exceptions import CrossMatchError
 
     DiskUsage = namedtuple("DiskUsage", "total used free")
     monkeypatch.setattr(
-        "xmatch.storage.shutil.disk_usage",
+        "xmatcher.storage.shutil.disk_usage",
         lambda _: DiskUsage(2**40, 2**40 - 1_000_000_000, 1_000_000_000),
     )
     with pytest.raises(CrossMatchError, match="below the --min-free-gb floor"):
         assert_headroom(tmp_path, 1.0, "test filesystem")
 
     monkeypatch.setattr(
-        "xmatch.storage.shutil.disk_usage",
+        "xmatcher.storage.shutil.disk_usage",
         lambda _: DiskUsage(2**40, 0, 1024**3),
     )
     assert_headroom(tmp_path, 1.0, "test filesystem")
@@ -219,7 +219,7 @@ def _fake_vos_binary(monkeypatch, tmp_path: Path, scripts: dict[str, str] | None
         return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
 
     monkeypatch.setattr("shutil.which", lambda name, **kw: str(fake) if name == "vos" else None)
-    monkeypatch.setattr("xmatch.storage.subprocess.run", fake_run)
+    monkeypatch.setattr("xmatcher.storage.subprocess.run", fake_run)
     return runs
 
 
@@ -369,21 +369,21 @@ def test_open_storage_routing(tmp_path: Path) -> None:
 
 
 def test_default_cache_root(monkeypatch) -> None:
-    key = "XMATCH_CACHE_ROOT"
+    key = "XMATCHER_CACHE_ROOT"
     monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: None)
-    assert default_cache_root() == str(Path.home() / ".cache" / "xmatch")
+    monkeypatch.setattr("xmatcher.storage.platform_arc_root", lambda: None)
+    assert default_cache_root() == str(Path.home() / ".cache" / "xmatcher")
     monkeypatch.setenv(key, "/tmp/xc-root")
     assert default_cache_root() == "/tmp/xc-root"
 
 
 def test_all_cache_roots_precedence_and_dedup(monkeypatch) -> None:
-    """Primary = $XMATCH_CACHE_ROOT > cache.root > default; replicas follow."""
-    key = "XMATCH_CACHE_ROOT"
-    default = str(Path.home() / ".cache" / "xmatch")
+    """Primary = $XMATCHER_CACHE_ROOT > cache.root > default; replicas follow."""
+    key = "XMATCHER_CACHE_ROOT"
+    default = str(Path.home() / ".cache" / "xmatcher")
     monkeypatch.delenv(key, raising=False)
     # off-platform probe: tests must not depend on where they run
-    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: None)
+    monkeypatch.setattr("xmatcher.storage.platform_arc_root", lambda: None)
 
     # unset everything -> the default root alone (never [])
     assert all_cache_roots() == [default]
@@ -406,37 +406,37 @@ def test_all_cache_roots_precedence_and_dedup(monkeypatch) -> None:
 
 def test_default_cache_root_prefers_platform_arc(monkeypatch) -> None:
     """On AstroAI/CANFAR sessions the cache defaults to /arc/projects/hats —
-    never a home directory — and XMATCH_CACHE_ROOT still wins."""
-    key = "XMATCH_CACHE_ROOT"
+    never a home directory — and XMATCHER_CACHE_ROOT still wins."""
+    key = "XMATCHER_CACHE_ROOT"
     monkeypatch.delenv(key, raising=False)
-    home_default = str(Path.home() / ".cache" / "xmatch")
+    home_default = str(Path.home() / ".cache" / "xmatcher")
 
-    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: "/arc")
+    monkeypatch.setattr("xmatcher.storage.platform_arc_root", lambda: "/arc")
     assert default_cache_root() == "/arc/projects/hats"
 
-    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: None)
+    monkeypatch.setattr("xmatcher.storage.platform_arc_root", lambda: None)
     assert default_cache_root() == home_default
 
     # env override beats the platform default
     monkeypatch.setenv(key, "vos:hats")
-    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: "/arc")
+    monkeypatch.setattr("xmatcher.storage.platform_arc_root", lambda: "/arc")
     assert default_cache_root() == "vos:hats"
 
 
 def test_default_output_root_platform_and_env(monkeypatch) -> None:
-    """Outputs default to /arc/projects/hats/xmatch on the platform, stay
-    cwd-relative off it, and XMATCH_OUTPUT_ROOT (incl. empty=off) wins."""
-    key = "XMATCH_OUTPUT_ROOT"
+    """Outputs default to /arc/projects/hats/xmatcher on the platform, stay
+    cwd-relative off it, and XMATCHER_OUTPUT_ROOT (incl. empty=off) wins."""
+    key = "XMATCHER_OUTPUT_ROOT"
     monkeypatch.delenv(key, raising=False)
 
-    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: None)
+    monkeypatch.setattr("xmatcher.storage.platform_arc_root", lambda: None)
     assert default_output_root() is None
 
-    monkeypatch.setattr("xmatch.storage.platform_arc_root", lambda: "/arc")
-    assert default_output_root() == "/arc/projects/hats/xmatch"
+    monkeypatch.setattr("xmatcher.storage.platform_arc_root", lambda: "/arc")
+    assert default_output_root() == "/arc/projects/hats/xmatcher"
 
-    monkeypatch.setenv(key, "vos:hats/xmatch")
-    assert default_output_root() == "vos:hats/xmatch"
+    monkeypatch.setenv(key, "vos:hats/xmatcher")
+    assert default_output_root() == "vos:hats/xmatcher"
 
     monkeypatch.setenv(key, "   ")
     assert default_output_root() is None

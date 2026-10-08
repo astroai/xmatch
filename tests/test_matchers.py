@@ -2,15 +2,15 @@ import numpy as np
 import polars as pl
 import pytest
 
-from xmatch import stilts
-from xmatch.exceptions import CrossMatchError
-from xmatch.matchers import (
+from xmatcher import stilts
+from xmatcher.exceptions import CrossMatchError
+from xmatcher.matchers import (
     MatchSpec,
     _engineer_ml_features_and_labels,
     id_join,
     sky_match,
 )
-from xmatch.sources import CatalogueSource
+from xmatcher.sources import CatalogueSource
 
 
 def _src(name, ra="ra", dec="dec", **kw):
@@ -183,14 +183,14 @@ def test_skyerr_sigma_criterion():
 
 @pytest.mark.parametrize("radius", [648_000.0, 1_000_000.0])
 def test_arcsec_to_chord_saturates_at_half_circumference(radius):
-    from xmatch.matchers import _arcsec_to_chord
+    from xmatcher.matchers import _arcsec_to_chord
 
     assert _arcsec_to_chord(radius) == pytest.approx(2.0)
 
 
 @pytest.mark.parametrize("radius", [np.nan, np.inf, -np.inf, -1.0])
 def test_arcsec_to_chord_rejects_invalid_radius(radius):
-    from xmatch.matchers import _arcsec_to_chord
+    from xmatcher.matchers import _arcsec_to_chord
 
     with pytest.raises(ValueError, match="finite and nonnegative"):
         _arcsec_to_chord(radius)
@@ -198,21 +198,21 @@ def test_arcsec_to_chord_rejects_invalid_radius(radius):
 
 @pytest.mark.parametrize("invalid", [-0.1, np.nan, np.inf, -np.inf])
 def test_pairwise_bayes_rejects_corrupt_sigmas(invalid):
-    from xmatch.bayes import positional_log_likelihood
+    from xmatcher.bayes import positional_log_likelihood
 
     with pytest.raises(ValueError, match="positional errors must be finite and nonnegative"):
         positional_log_likelihood(np.array([0.0]), np.array([invalid]), np.array([0.1]))
 
 
 def test_pairwise_bayes_uses_documented_floor_for_exact_zero_errors():
-    from xmatch.bayes import positional_log_likelihood
+    from xmatcher.bayes import positional_log_likelihood
 
     result = positional_log_likelihood(np.array([0.0]), np.array([0.0]), np.array([0.0]))
     assert np.isfinite(result).all()
 
 
 def test_unknown_positional_error_units_fail_instead_of_assuming_arcsec():
-    from xmatch.matchers import _pos_sigma_arcsec
+    from xmatcher.matchers import _pos_sigma_arcsec
 
     frame = pl.DataFrame({"rae": [1.0], "dee": [1.0]})
     source = _src("bad-units", ra_err_column="rae", dec_err_column="dee", pos_err_units="ivar")
@@ -222,7 +222,7 @@ def test_unknown_positional_error_units_fail_instead_of_assuming_arcsec():
 
 @pytest.mark.parametrize("invalid", [-0.1, np.nan, np.inf, -np.inf])
 def test_invalid_declared_position_errors_are_rejected_even_with_floor(invalid):
-    from xmatch.matchers import _pos_covariance, _pos_sigma_arcsec
+    from xmatcher.matchers import _pos_covariance, _pos_sigma_arcsec
 
     frame = pl.DataFrame({"rae": [invalid], "dee": [0.1], "rho": [0.0]})
     source = _src(
@@ -240,7 +240,7 @@ def test_invalid_declared_position_errors_are_rejected_even_with_floor(invalid):
 
 @pytest.mark.parametrize("invalid", [np.nan, np.inf, -np.inf, -1.01, 1.01])
 def test_invalid_declared_position_correlations_are_rejected(invalid):
-    from xmatch.matchers import _pos_covariance
+    from xmatcher.matchers import _pos_covariance
 
     frame = pl.DataFrame({"rae": [0.1], "dee": [0.2], "rho": [invalid]})
     source = _src("bad-correlation", ra_err_column="rae", dec_err_column="dee", corr_column="rho")
@@ -461,7 +461,7 @@ def test_probabilistic_scoring_requires_declared_uncertainty():
 
 
 def test_request_propagates_probabilistic_flag_and_rejects_id_join():
-    from xmatch.request import MatchRequest
+    from xmatcher.request import MatchRequest
 
     request = MatchRequest.from_params("left.csv", "right.csv", probabilistic=True)
     assert request.probabilistic
@@ -500,7 +500,7 @@ def pm_frames():
 
 def test_proper_motion_propagates_both_sides(pm_frames):
     """Both sides with PM columns should have coordinates shifted."""
-    from xmatch.matchers import _apply_proper_motion
+    from xmatcher.matchers import _apply_proper_motion
 
     left, right = pm_frames
     l_src = _src("a", pm_ra_column="pmra", pm_dec_column="pmdec", epoch_column="ref_epoch")
@@ -525,7 +525,7 @@ def test_proper_motion_propagates_both_sides(pm_frames):
 
 def test_proper_motion_nan_pm_treated_as_zero(pm_frames):
     """NaN proper motions should be treated as zero (no propagation)."""
-    from xmatch.matchers import _apply_proper_motion
+    from xmatcher.matchers import _apply_proper_motion
 
     left, right = pm_frames
     # Set PM to NaN for first star
@@ -547,8 +547,8 @@ def test_proper_motion_nan_pm_treated_as_zero(pm_frames):
 
 
 def test_proper_motion_uses_6d_only_for_complete_physical_rows(monkeypatch):
-    from xmatch import astro_utils
-    from xmatch.matchers import _apply_proper_motion
+    from xmatcher import astro_utils
+    from xmatcher.matchers import _apply_proper_motion
 
     angular_calls = []
     space_calls = []
@@ -601,9 +601,9 @@ def test_proper_motion_uses_6d_only_for_complete_physical_rows(monkeypatch):
 
 
 def test_proper_motion_transports_gaia_covariance(monkeypatch):
-    from xmatch import astro_utils
-    from xmatch.matchers import _apply_proper_motion, _pos_covariance
-    from xmatch.sources import ASTROMETRIC_COVARIANCE_KEYS
+    from xmatcher import astro_utils
+    from xmatcher.matchers import _apply_proper_motion, _pos_covariance
+    from xmatcher.sources import ASTROMETRIC_COVARIANCE_KEYS
 
     covariance_columns = {key: key for key in ASTROMETRIC_COVARIANCE_KEYS}
     row = {
@@ -669,9 +669,9 @@ def test_proper_motion_transports_gaia_covariance(monkeypatch):
 
 
 def test_angular_motion_transports_gaia_covariance_without_rv(monkeypatch):
-    from xmatch import astro_utils
-    from xmatch.matchers import _apply_proper_motion, _pos_covariance
-    from xmatch.sources import ASTROMETRIC_COVARIANCE_KEYS
+    from xmatcher import astro_utils
+    from xmatcher.matchers import _apply_proper_motion, _pos_covariance
+    from xmatcher.sources import ASTROMETRIC_COVARIANCE_KEYS
 
     covariance_columns = {key: key for key in ASTROMETRIC_COVARIANCE_KEYS}
     row = {
@@ -737,8 +737,8 @@ def test_angular_motion_transports_gaia_covariance_without_rv(monkeypatch):
 
 
 def test_invalid_gaia_covariance_row_is_not_zero_imputed():
-    from xmatch.matchers import _astrometric_covariance_mas
-    from xmatch.sources import ASTROMETRIC_COVARIANCE_KEYS
+    from xmatcher.matchers import _astrometric_covariance_mas
+    from xmatcher.sources import ASTROMETRIC_COVARIANCE_KEYS
 
     covariance_columns = {key: key for key in ASTROMETRIC_COVARIANCE_KEYS}
     row = {
@@ -758,15 +758,15 @@ def test_invalid_gaia_covariance_row_is_not_zero_imputed():
     _covariance, valid_6d, valid_angular = result
     assert not valid_6d[0]
     assert not valid_angular[0]
-    from xmatch.matchers import _pos_sigma_arcsec
+    from xmatcher.matchers import _pos_sigma_arcsec
 
     with pytest.raises(CrossMatchError, match="invalid declared astrometric covariance"):
         _pos_sigma_arcsec(frame, source)
 
 
 def test_five_parameter_covariance_supplies_positional_sigma_and_ellipse():
-    from xmatch.matchers import _pos_covariance, _pos_sigma_arcsec
-    from xmatch.sources import ASTROMETRIC_COVARIANCE_KEYS
+    from xmatcher.matchers import _pos_covariance, _pos_sigma_arcsec
+    from xmatcher.sources import ASTROMETRIC_COVARIANCE_KEYS
 
     row = {
         "ra_error": [3.0],
@@ -791,7 +791,7 @@ def test_five_parameter_covariance_supplies_positional_sigma_and_ellipse():
 
 
 def test_pm_drift_has_same_radial_budget_for_sigma_and_covariance():
-    from xmatch.matchers import _pos_covariance, _pos_sigma_arcsec
+    from xmatcher.matchers import _pos_covariance, _pos_sigma_arcsec
 
     frame = pl.DataFrame({"rae": [0.3], "dee": [0.4], "_pm_drift_arcsec": [0.5]})
     source = _src("drift", ra_err_column="rae", dec_err_column="dee")
@@ -803,8 +803,8 @@ def test_pm_drift_has_same_radial_budget_for_sigma_and_covariance():
 
 
 def test_angular_covariance_remains_valid_without_parallax_uncertainty():
-    from xmatch.matchers import _astrometric_covariance_mas
-    from xmatch.sources import ASTROMETRIC_COVARIANCE_KEYS
+    from xmatcher.matchers import _astrometric_covariance_mas
+    from xmatcher.sources import ASTROMETRIC_COVARIANCE_KEYS
 
     covariance_columns = {key: key for key in ASTROMETRIC_COVARIANCE_KEYS}
     row = {
@@ -829,7 +829,7 @@ def test_angular_covariance_remains_valid_without_parallax_uncertainty():
 
 
 def test_proper_motion_empty_frame_preserves_schema():
-    from xmatch.matchers import _apply_proper_motion
+    from xmatcher.matchers import _apply_proper_motion
 
     empty = pl.DataFrame(
         schema={
@@ -858,7 +858,7 @@ def test_proper_motion_rejects_nonfinite_target_epoch():
 
 def test_proper_motion_no_pm_columns_returns_unchanged(pm_frames):
     """When neither source has PM columns, frames are returned as-is."""
-    from xmatch.matchers import _apply_proper_motion
+    from xmatcher.matchers import _apply_proper_motion
 
     left, right = pm_frames
     l_src = _src("a")  # no PM columns
@@ -877,7 +877,7 @@ def test_proper_motion_no_pm_columns_returns_unchanged(pm_frames):
 
 def test_proper_motion_catalogue_level_epoch(pm_frames):
     """Catalogue-level epoch attribute should be used when epoch_column is absent."""
-    from xmatch.matchers import _apply_proper_motion
+    from xmatcher.matchers import _apply_proper_motion
 
     left, right = pm_frames
     # Drop the ref_epoch column; use catalogue-level epoch instead.
@@ -900,7 +900,7 @@ def test_proper_motion_catalogue_level_epoch(pm_frames):
 
 def test_proper_motion_one_side_only(pm_frames):
     """When only one side has PM info, only that side is propagated."""
-    from xmatch.matchers import _apply_proper_motion
+    from xmatcher.matchers import _apply_proper_motion
 
     left, right = pm_frames
     l_src = _src("a", pm_ra_column="pmra", pm_dec_column="pmdec", epoch_column="ref_epoch")
@@ -921,7 +921,7 @@ def test_proper_motion_one_side_only(pm_frames):
 
 def test_proper_motion_missing_epoch_skips(pm_frames):
     """When no epoch info is available, PM propagation is skipped."""
-    from xmatch.matchers import _apply_proper_motion
+    from xmatcher.matchers import _apply_proper_motion
 
     left, right = pm_frames
     # Drop epoch column and don't set catalogue-level epoch.
@@ -1157,7 +1157,7 @@ def test_nd_chunk_size_parity():
     _ND_CHUNK_SIZE.  Test with extreme chunk_size=1 (one row per chunk) vs
     the default 50_000 on a small catalogue to verify index-offset
     correctness."""
-    from xmatch import matchers
+    from xmatcher import matchers
 
     left = pl.DataFrame(
         {
@@ -1580,9 +1580,9 @@ def test_ray_engine_graceful_fallback_when_unavailable(monkeypatch):
     (or fast) transparently and still produce correct results."""
     # Directly patch the availability check so the fallback path is
     # exercised regardless of whether Ray is actually installed.
-    monkeypatch.setattr("xmatch.ray_engine.ray_available", lambda: False)
+    monkeypatch.setattr("xmatcher.ray_engine.ray_available", lambda: False)
     # Clear the lazy-initialised remote function cache.
-    monkeypatch.setattr("xmatch.ray_engine._RAY_PIXEL_BATCH", None)
+    monkeypatch.setattr("xmatcher.ray_engine._RAY_PIXEL_BATCH", None)
 
     left = pl.DataFrame({"ra": [10.0, 20.0], "dec": [5.0, 6.0]})
     right = pl.DataFrame(
@@ -1610,8 +1610,8 @@ def test_ray_engine_graceful_fallback_zone_to_fast(monkeypatch):
     produce correct results via the final fast fallback."""
     # Simulate no cdshealpix so zone_match falls back to _scipy_match.
     # Ray is also unavailable for this test (chain: ray → zone → fast).
-    monkeypatch.setattr("xmatch.ray_engine.ray_available", lambda: False)
-    monkeypatch.setattr("xmatch.ray_engine._RAY_PIXEL_BATCH", None)
+    monkeypatch.setattr("xmatcher.ray_engine.ray_available", lambda: False)
+    monkeypatch.setattr("xmatcher.ray_engine._RAY_PIXEL_BATCH", None)
 
     import sys
 
@@ -1902,7 +1902,7 @@ def test_skyellipse_wraps_ra_difference_across_zero():
 @pytest.mark.parametrize("n_cats", [2, 3])
 def test_nway_bayesian_pmatch_in_unit_range(n_cats):
     """nway Bayesian multi-catalogue match must produce p_match in [0, 1]."""
-    from xmatch.bayes import compute_nway_p_match
+    from xmatcher.bayes import compute_nway_p_match
 
     rng = np.random.default_rng(42)
     n_tuples = 20
@@ -1937,7 +1937,7 @@ def test_nway_bayes_factor_matches_two_catalogue_formula_across_ra_wrap():
     import astropy.units as u
     from astropy.coordinates import SkyCoord
 
-    from xmatch.bayes import compute_nway_bayes_factor
+    from xmatcher.bayes import compute_nway_bayes_factor
 
     ras = [np.array([359.99999]), np.array([0.00001])]
     decs = [np.array([12.0]), np.array([12.0])]
@@ -1964,7 +1964,7 @@ def test_nway_bayes_factor_three_catalogue_formula_and_rotation_invariance():
     import astropy.units as u
     from astropy.coordinates import SkyCoord
 
-    from xmatch.bayes import compute_nway_bayes_factor
+    from xmatcher.bayes import compute_nway_bayes_factor
 
     ras = [np.array([359.99999]), np.array([0.00001]), np.array([0.00002])]
     decs = [np.array([10.0]), np.array([10.00001]), np.array([9.99998])]
@@ -1997,7 +1997,7 @@ def test_nway_bayes_factor_three_catalogue_formula_and_rotation_invariance():
 
 
 def test_nway_bayes_factor_rejects_invalid_uncertainty():
-    from xmatch.bayes import compute_nway_bayes_factor
+    from xmatcher.bayes import compute_nway_bayes_factor
 
     with pytest.raises(ValueError, match="finite and positive"):
         compute_nway_bayes_factor(
@@ -2009,7 +2009,7 @@ def test_nway_bayes_factor_rejects_invalid_uncertainty():
 
 
 def test_nway_p_match_uses_pre_fitted_prior_kde(monkeypatch):
-    import xmatch.bayes as bayes
+    import xmatcher.bayes as bayes
 
     gaussian_kde = pytest.importorskip("scipy.stats").gaussian_kde
     kde = gaussian_kde(np.linspace(10.0, 20.0, 100))
@@ -2043,7 +2043,7 @@ def test_nway_p_match_uses_pre_fitted_prior_kde(monkeypatch):
 
 @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
 def test_nway_p_match_rejects_nonfinite_photometric_values(value):
-    from xmatch.bayes import compute_nway_p_match
+    from xmatcher.bayes import compute_nway_p_match
 
     with pytest.raises(ValueError, match="photometric prior values must be finite"):
         compute_nway_p_match(
@@ -2058,7 +2058,7 @@ def test_nway_p_match_rejects_nonfinite_photometric_values(value):
 def test_nway_p_match_rejects_nonfinite_kde_log_density():
     from scipy.stats import gaussian_kde
 
-    from xmatch.bayes import compute_nway_p_match
+    from xmatcher.bayes import compute_nway_p_match
 
     kde = gaussian_kde(np.linspace(10.0, 20.0, 100))
     with pytest.raises(ValueError, match="photometric prior log-density must be finite"):
@@ -2075,7 +2075,7 @@ def test_nway_p_match_rejects_nonfinite_kde_log_density():
 def test_pairwise_kde_rejects_nonfinite_photometric_values():
     from scipy.stats import gaussian_kde
 
-    from xmatch.bayes import kde_log_at
+    from xmatcher.bayes import kde_log_at
 
     kde = gaussian_kde(np.linspace(10.0, 20.0, 100))
     with pytest.raises(ValueError, match="KDE evaluation values must be finite"):
@@ -2083,8 +2083,8 @@ def test_pairwise_kde_rejects_nonfinite_photometric_values():
 
 
 def test_pairwise_bayes_uses_equivalent_per_axis_error(monkeypatch):
-    from xmatch import bayes
-    from xmatch.matchers import _bayesian_qualify
+    from xmatcher import bayes
+    from xmatcher.matchers import _bayesian_qualify
 
     observed = {}
 
@@ -2117,7 +2117,7 @@ def test_pairwise_bayes_uses_equivalent_per_axis_error(monkeypatch):
 
 def test_nway_crossmatch_end_to_end():
     """nway_match on CrossMatch should produce result frame with p_match."""
-    from xmatch import CrossMatch
+    from xmatcher import CrossMatch
 
     left = pl.DataFrame(
         {
@@ -2158,7 +2158,7 @@ def test_nway_crossmatch_end_to_end():
 
 def test_nway_crossmatch_two_catalogues_works():
     """nway_match with exactly 2 catalogues should produce results."""
-    from xmatch import CrossMatch
+    from xmatcher import CrossMatch
 
     left = pl.DataFrame({"ra": [10.0, 10.00005], "dec": [5.0, 5.0]})
     right = pl.DataFrame({"ra": [10.0, 10.00005], "dec": [5.0, 5.0]})
@@ -2999,7 +2999,7 @@ def test_nan_dec_raises_clean_error():
 @pytest.mark.parametrize("engine", ["auto", "stilts"])
 @pytest.mark.parametrize("bad_side", ["left", "right"])
 def test_stilts_validates_coordinates_before_external_matching(monkeypatch, engine, bad_side):
-    from xmatch import stilts
+    from xmatcher import stilts
 
     called = []
 
@@ -3278,7 +3278,7 @@ def test_ray_and_zone_extra_distance_cols_and_probabilistic_parity(_ray_cluster)
 
 def test_ray_nway_and_fof_match_parity(_ray_cluster):
     """nway_match and fof_match with engine='ray' must match local execution."""
-    from xmatch import CrossMatch
+    from xmatcher import CrossMatch
 
     cat1 = pl.DataFrame(
         {

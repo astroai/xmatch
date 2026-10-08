@@ -5,8 +5,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from xmatch import CatalogueSource, MatchSpec, hats_native
-from xmatch.exceptions import CrossMatchError
+from xmatcher import CatalogueSource, MatchSpec, hats_native
+from xmatcher.exceptions import CrossMatchError
 
 
 def _write_hats(root: Path, rows: list[dict], order: int = 0, pix: int = 0) -> Path:

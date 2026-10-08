@@ -2,7 +2,7 @@
 
 Frames are handed off as temporary FITS files; the result is read back as a
 polars ``DataFrame``. This module no longer contains any Python re-implementation
-of sky matching — see :mod:`xmatch.matchers` for the astropy fallback engine.
+of sky matching — see :mod:`xmatcher.matchers` for the astropy fallback engine.
 """
 
 import logging
@@ -22,7 +22,7 @@ from .sources import position_error_to_arcsec_factor
 
 logger = logging.getLogger(__name__)
 
-# STILTS join keyword per xmatch join_type.
+# STILTS join keyword per xmatcher join_type.
 _STILTS_JOIN = {
     "1and2": "1and2",
     "1or2": "1or2",
@@ -143,7 +143,7 @@ def _add_true_separation(result: pl.DataFrame, l_ra, l_dec, r_ra, r_dec) -> pl.D
 def _error_value_expr(src, max_error: float) -> str:
     """STILTS expression for the n-sigma positional error radius (arcsec).
 
-    Mirrors :func:`xmatch.matchers._pos_sigma_arcsec`: the per-row error is
+    Mirrors :func:`xmatcher.matchers._pos_sigma_arcsec`: the per-row error is
     ``hypot(ra_err, dec_err)`` (unit-converted, floored), scaled by ``max_error``
     so that STILTS' ``sep <= err1 + err2`` rule becomes
     ``sep <= max_error * (e1 + e2)``.
@@ -217,7 +217,7 @@ def stilts_sky_match(
         stilts_matcher = "skyerr"
         params_value = str(max(scale, 1e-6))
 
-    with tempfile.TemporaryDirectory(prefix="xmatch_stilts_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="xmatcher_stilts_") as tmp:
         in1 = Path(tmp) / "in1.fits"
         in2 = Path(tmp) / "in2.fits"
         from astropy.table import Table
@@ -238,7 +238,7 @@ def stilts_sky_match(
             "values2": _values_expr(right_src, spec),
             "params": params_value,
             "join": _STILTS_JOIN.get(spec.join_type, "1and2"),
-            # xmatch selects per primary; STILTS "best" instead enforces 1:1.
+            # xmatcher selects per primary; STILTS "best" instead enforces 1:1.
             "find": "best1" if spec.find == "best" else spec.find,
             # Match the astropy engine's schema: left columns keep their names,
             # right-hand collisions get a custom suffix.

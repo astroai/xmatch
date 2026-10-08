@@ -32,7 +32,7 @@ from .sources import CatalogueSource, position_error_to_arcsec_factor
 
 logger = logging.getLogger(__name__)
 
-_INTERNAL_PREFIX = "_xmatch_spill_"
+_INTERNAL_PREFIX = "_xmatcher_spill_"
 _LEFT_ROW = f"{_INTERNAL_PREFIX}left_row"
 _RIGHT_ROW = f"{_INTERNAL_PREFIX}right_row"
 _ZONE = f"{_INTERNAL_PREFIX}zone"
@@ -146,7 +146,7 @@ def match_to_output(
         scratch_parent.mkdir(parents=True, exist_ok=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
-        prefix=f".{out.stem}.xmatch-", suffix=out.suffix, dir=out.parent
+        prefix=f".{out.stem}.xmatcher-", suffix=out.suffix, dir=out.parent
     )
     os.close(fd)
     temp_out = Path(temp_name)
@@ -163,7 +163,7 @@ def match_to_output(
         "minimum_batch_proxy_bytes": 0,
     }
     try:
-        with tempfile.TemporaryDirectory(prefix="xmatch-spill-", dir=scratch_parent) as td:
+        with tempfile.TemporaryDirectory(prefix="xmatcher-spill-", dir=scratch_parent) as td:
             root = Path(td)
             left_dir = root / "left"
             right_dir = root / "right"

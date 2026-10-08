@@ -13,18 +13,18 @@ from .exceptions import ConfigError
 
 
 def bundled_config_path() -> Path:
-    """Return the package-shipped ``xmatch.yaml`` path."""
+    """Return the package-shipped ``xmatcher.yaml`` path."""
     try:
         from importlib.resources import files
 
-        return Path(str(files("xmatch") / "xmatch.yaml"))
+        return Path(str(files("xmatcher") / "xmatcher.yaml"))
     except Exception:
-        return Path(__file__).parent / "xmatch.yaml"
+        return Path(__file__).parent / "xmatcher.yaml"
 
 
 def user_config_path() -> Path:
-    """Canonical user overlay path (``~/.config/xmatch/xmatch.yaml``)."""
-    return Path.home() / ".config" / "xmatch" / "xmatch.yaml"
+    """Canonical user overlay path (``~/.config/xmatcher/xmatcher.yaml``)."""
+    return Path.home() / ".config" / "xmatcher" / "xmatcher.yaml"
 
 
 def find_user_config_path() -> Path | None:
@@ -78,7 +78,7 @@ def load_merged_config(
 
     bundled = bundled_config_path()
     if not bundled.is_file():
-        raise ConfigError("No bundled xmatch.yaml found; pass config_file explicitly.")
+        raise ConfigError("No bundled xmatcher.yaml found; pass config_file explicitly.")
     config = load_yaml_mapping(bundled)
     primary = bundled
     if include_user_overlay:
@@ -86,7 +86,7 @@ def load_merged_config(
         if user is not None:
             config = deep_merge(config, load_yaml_mapping(user))
             primary = user
-        cwd_cfg = Path.cwd() / "xmatch.yaml"
+        cwd_cfg = Path.cwd() / "xmatcher.yaml"
         # Project-local overlay (skip if it is the bundled file or already merged).
         if cwd_cfg.is_file() and cwd_cfg.resolve() not in {
             bundled.resolve(),

@@ -37,7 +37,7 @@ re-scored with a Budavári-style hierarchical Bayes factor that combines:
   50 000 rows).
 
 The output is a ``p_match`` column in [0, 1]. Numeric evaluation lives in
-:mod:`xmatch.bayes`; this module only orchestrates data marshalling.
+:mod:`xmatcher.bayes`; this module only orchestrates data marshalling.
 """
 
 import dataclasses
@@ -65,7 +65,7 @@ _PROPAGATED_COV_EE = "_propagated_cov_ee_arcsec2"
 _PROPAGATED_COV_NN = "_propagated_cov_nn_arcsec2"
 _PROPAGATED_COV_EN = "_propagated_cov_en_arcsec2"
 _PROPAGATED_COV_PREFIX = "_propagated_cov_"
-_EPOCH_SIGMA = "_xmatch_spill_epoch_sigma"
+_EPOCH_SIGMA = "_xmatcher_spill_epoch_sigma"
 
 # Accepted match-criteria vocabularies.  Validated up front so a typo fails
 # loudly: an unknown ``join_type`` used to fall through :func:`_build_result`

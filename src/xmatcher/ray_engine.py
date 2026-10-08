@@ -8,7 +8,7 @@ transparently.
 Usage
 -----
 The public entry point :func:`ray_zone_match` is called from
-:func:`xmatch.matchers.sky_match` when ``engine="ray"`` is selected.
+:func:`xmatcher.matchers.sky_match` when ``engine="ray"`` is selected.
 
 Architecture
 ------------
@@ -207,10 +207,10 @@ def ray_zone_match(
 
     Supports all matchers (``sky``, ``skyerr``, ``skyellipse``, ``lr``, ``ml``,
     ``xgb``, ``auf``, ``macauff``) and N-dimensional ``extra_distance_cols``.
-    Falls back to :func:`xmatch.matchers._zone_match` when Ray is unavailable
+    Falls back to :func:`xmatcher.matchers._zone_match` when Ray is unavailable
     (unless ``fallback_policy="error"``).
 
-    Parameters are identical to :func:`xmatch.matchers._scipy_match`.
+    Parameters are identical to :func:`xmatcher.matchers._scipy_match`.
     """
     import math
 

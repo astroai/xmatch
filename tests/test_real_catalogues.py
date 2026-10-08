@@ -8,7 +8,7 @@ default::
     pytest -m slow --durations=20    # also dumps per-test timings
 
 Each test that needs real catalogue data looks at
-the system temporary directory's ``xmatch-catalogues-v2/<name>_top500.csv`` and triggers an
+the system temporary directory's ``xmatcher-catalogues-v2/<name>_top500.csv`` and triggers an
 ``astroquery``-backed fetch on first access. Subsequent runs read only the
 cached CSV; the network is touched once per clean cache directory.
 
@@ -41,18 +41,18 @@ import numpy as np
 import polars as pl
 import pytest
 
-from xmatch import stilts
-from xmatch.io_utils import astropy_table_to_polars
-from xmatch.matchers import MatchSpec, id_join, sky_match
-from xmatch.sources import CatalogueSource
+from xmatcher import stilts
+from xmatcher.io_utils import astropy_table_to_polars
+from xmatcher.matchers import MatchSpec, id_join, sky_match
+from xmatcher.sources import CatalogueSource
 
 # --------------------------------------------------------------------------- #
 # Cache configuration
 # --------------------------------------------------------------------------- #
 CACHE_DIR = pathlib.Path(
     os.environ.get(
-        "XMATCH_REAL_CATALOGUES_DIR",
-        str(pathlib.Path(tempfile.gettempdir()) / "xmatch-catalogues-v2"),
+        "XMATCHER_REAL_CATALOGUES_DIR",
+        str(pathlib.Path(tempfile.gettempdir()) / "xmatcher-catalogues-v2"),
     )
 )
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -554,10 +554,10 @@ def test_nway_rejects_photometric_prior_missing_from_catalogue(gaia_csv, allwise
     """
     from pathlib import Path
 
-    from xmatch.crossmatch import CrossMatch
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher.crossmatch import CrossMatch
+    from xmatcher.exceptions import CrossMatchError
 
-    config = Path(__file__).parent.parent / "src" / "xmatch" / "xmatch.yaml"
+    config = Path(__file__).parent.parent / "src" / "xmatcher" / "xmatcher.yaml"
     cm = CrossMatch(config_file=config)
 
     with pytest.raises(CrossMatchError, match="must exist in every catalogue"):

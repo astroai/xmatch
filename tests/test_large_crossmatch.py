@@ -1,4 +1,4 @@
-"""Large-catalogue crossmatch tests against the :mod:`xmatch.stilts` backend.
+"""Large-catalogue crossmatch tests against the :mod:`xmatcher.stilts` backend.
 
 The existing unit tests in :mod:`tests.test_matchers` cover STILTS with rows in
 the single digits. They exercise the *math* but say nothing about what happens
@@ -12,7 +12,7 @@ that the STILTS invocation
 * finds **exactly** the matches we planted, no more and no fewer;
 * reports separations consistent with an independent great-circle calculation;
 * produces the right schema when invoked through the high-level
-  :class:`xmatch.CrossMatch` API and writes an output file;
+  :class:`xmatcher.CrossMatch` API and writes an output file;
 * does not silently degrade into another engine if STILTS fails in CI.
 
 The synthetic catalogues are designed so the bulk of each catalogue lives on a
@@ -27,9 +27,9 @@ import numpy as np
 import polars as pl
 import pytest
 
-from xmatch import CrossMatch, stilts
-from xmatch.matchers import MatchSpec
-from xmatch.sources import CatalogueSource
+from xmatcher import CrossMatch, stilts
+from xmatcher.matchers import MatchSpec
+from xmatcher.sources import CatalogueSource
 
 # Skip the entire module when STILTS isn't on the path. Mirrors the convention
 # used in tests/test_matchers.py so a missing-Java environment doesn't
@@ -210,7 +210,7 @@ def test_stilts_high_level_crossmatch_streams_to_parquet(pair, tmp_path):
     """``LazyFrame`` inputs → :meth:`CrossMatch.crossmatch(lazy=True)` →
     ``sink_parquet(engine='streaming')``.
 
-    STILTS materializes the matched table before xmatch wraps it in a
+    STILTS materializes the matched table before xmatcher wraps it in a
     ``LazyFrame``. This checks the returned frame can be streamed to Parquet;
     it does not assert that matching itself stays out of memory.
     """
@@ -236,7 +236,7 @@ def test_stilts_high_level_crossmatch_streams_to_parquet(pair, tmp_path):
     assert plan.strip()
 
     # Sink straight to disk using polars' streaming executor explicitly; this
-    # is stricter than xmatch's own io_utils.write_frame (which lets polars
+    # is stricter than xmatcher's own io_utils.write_frame (which lets polars
     # pick 'auto') so a future default change can't silently regress this test.
     out_path = tmp_path / "result.parquet"
     result_lf.sink_parquet(out_path, engine="streaming")

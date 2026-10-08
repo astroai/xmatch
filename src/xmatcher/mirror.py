@@ -2,9 +2,9 @@
 
 Backs the ``engine=ray-union`` pipeline: every remote input (a TAP table, or a
 HATS catalogue served over HTTP / ``vos:``) is mirrored into a per-catalogue
-cache dir under the cache root (``XMATCH_CACHE_ROOT``; on AstroAI/CANFAR
-sessions ``/arc/projects/hats``, else ``~/.cache/xmatch``), stored through
-:class:`xmatch.storage.Storage` (POSIX dir or VOSpace ``vos:`` URI).  Re-syncs
+cache dir under the cache root (``XMATCHER_CACHE_ROOT``; on AstroAI/CANFAR
+sessions ``/arc/projects/hats``, else ``~/.cache/xmatcher``), stored through
+:class:`xmatcher.storage.Storage` (POSIX dir or VOSpace ``vos:`` URI).  Re-syncs
 are incremental:
 
 * **Remote HATS** — the manifest stores ``{rel: {size}}``; a file whose
@@ -78,7 +78,7 @@ def _min_free_gb(explicit: float | None) -> float:
     """Resolve the free-space floor: explicit > env > 10 GiB default."""
     if explicit is not None:
         return float(explicit)
-    env = os.environ.get("XMATCH_MIN_FREE_GB")
+    env = os.environ.get("XMATCHER_MIN_FREE_GB")
     return float(env) if env else _DEFAULT_MIN_FREE_GB
 
 
@@ -410,7 +410,7 @@ def _read_json(cache: Storage, rel: str) -> dict[str, Any]:
             return {}
         if isinstance(cache, LocalStorage):
             return json.loads(Path(cache.root / rel).read_text())
-        tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-mf-"))
+        tmpdir = Path(tempfile.mkdtemp(prefix="xmatcher-mf-"))
         try:
             local = tmpdir / "manifest.json"
             cache.stage_in(rel, local)
@@ -422,7 +422,7 @@ def _read_json(cache: Storage, rel: str) -> dict[str, Any]:
 
 
 def _write_json(cache: Storage, rel: str, obj: dict[str, Any]) -> None:
-    tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-mf-"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="xmatcher-mf-"))
     local = tmpdir / "manifest.json"
     try:
         local.write_text(json.dumps(obj, indent=2, sort_keys=True))
@@ -578,7 +578,7 @@ def _mirror_remote_hats(
 
     def do_fetch(entry: dict[str, Any]) -> None:
         rel = entry["rel"]
-        tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-"))
+        tmpdir = Path(tempfile.mkdtemp(prefix="xmatcher-"))
         local_tmp = tmpdir / Path(rel).name
         try:
             if _remote_via_storage(fetch):
@@ -731,7 +731,7 @@ def _file_sha256(cache: Storage, rel: str) -> str:
     if isinstance(cache, LocalStorage):
         data = Path(cache.root / rel).read_bytes()
         return hashlib.sha256(data).hexdigest()
-    tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-hash-"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="xmatcher-hash-"))
     try:
         local = tmpdir / "page.parquet"
         cache.stage_in(rel, local)
@@ -1076,7 +1076,7 @@ def _write_hats_native(
     info_df.write_parquet(dataset / "partition_info.parquet")
 
     props = {
-        "obs_collection": out_dir.name or "xmatch",
+        "obs_collection": out_dir.name or "xmatcher",
         "dataproduct_type": "object",
         "hats_nrows": str(total),
         "hats_col_ra": ra_column,
@@ -1131,7 +1131,7 @@ def _rebuild_tap_hats(
         cache.mkdir(prefix)
         return
     frame = pl.concat(frames, how="diagonal_relaxed")
-    tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-hats-"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="xmatcher-hats-"))
     try:
         _write_hats_native(
             frame,
@@ -1279,7 +1279,7 @@ def _replicate_tree(src_storage: Storage, dst_storage: Storage, rel: str) -> Non
     """Copy the mirrored tree at ``rel`` (files only) onto ``dst_storage``."""
     rels: list[str] = []
     _walk_storage(src_storage, rel, rels)
-    tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-repl-"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="xmatcher-repl-"))
     try:
         for r in rels:
             if r.endswith("/"):
@@ -1325,7 +1325,7 @@ def _copy_tree_files(src_storage: Storage, dst_storage: Storage, rel: str) -> No
     see :func:`_walk_all_files`)."""
     rels: list[str] = []
     _walk_all_files(src_storage, rel, rels)
-    tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-tree-"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="xmatcher-tree-"))
     try:
         for r in rels:
             local = tmpdir / Path(r).name
@@ -1388,7 +1388,7 @@ def sync_catalogue(
     and trust the copy — the day-scale re-union pattern ("synced Monday,
     union Tuesday…") never re-pays the probe hours.  ``min_free_gb`` floors
     the free space on ``root`` before any fetch begins (default 10 GiB; env
-    ``XMATCH_MIN_FREE_GB`` or config ``cache.min_free_gb`` override).
+    ``XMATCHER_MIN_FREE_GB`` or config ``cache.min_free_gb`` override).
     """
     from .storage import assert_headroom, default_cache_root
 
@@ -1461,7 +1461,7 @@ def locate_mirrored(
     first one holding the copy — the union reader's fallback across
     replicated cache roots.  ``cache_root`` still wins when both are given
     (single-root callers are unchanged).  Raises :class:`CrossMatchError`
-    when no mirror exists on any probed root (run ``xmatch sync`` or drop
+    when no mirror exists on any probed root (run ``xmatcher sync`` or drop
     ``--no-sync``).
     """
     from .storage import default_cache_root
@@ -1473,7 +1473,9 @@ def locate_mirrored(
         if path is None and src.access_identifier:
             path = Path(src.access_identifier)
         if path is None or not Path(path).is_dir():
-            raise CrossMatchError(f"No local HATS copy for '{src.name}'; run 'xmatch sync' first.")
+            raise CrossMatchError(
+                f"No local HATS copy for '{src.name}'; run 'xmatcher sync' first."
+            )
         return str(path), ""
     if src.access_method not in ("hats", "tap"):
         raise CrossMatchError(
@@ -1490,7 +1492,7 @@ def locate_mirrored(
             return root, rel
     raise CrossMatchError(
         f"Catalogue '{src.name}' is not mirrored yet (probed: {', '.join(cache_roots)}); "
-        f"run 'xmatch sync {src.name}' or drop --no-sync."
+        f"run 'xmatcher sync {src.name}' or drop --no-sync."
     )
 
 
@@ -1531,7 +1533,7 @@ def ensure_mirrored(
         cache = open_storage(root)
         if force or not cache.exists(f"{rel}/properties"):
             frame = io_utils.scan_frame(src.path).collect()
-            tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-hats-"))
+            tmpdir = Path(tempfile.mkdtemp(prefix="xmatcher-hats-"))
             try:
                 _write_hats_native(
                     frame,
@@ -1569,7 +1571,7 @@ def ensure_mirrored(
         raise CrossMatchError(
             f"sync {src.name}: {stats.failed} file(s) failed to mirror; refusing to "
             "match over an incomplete catalogue (re-run to retry, or use "
-            "'xmatch sync --force' to pin down the failures)."
+            "'xmatcher sync --force' to pin down the failures)."
         )
     rel = f"{_safe_name(src.name)}/{_version_dir(src)}"
     return _mirrored_source(src, open_storage(root), rel, root)

@@ -1,9 +1,14 @@
-# xmatch
+# xmatcher
 
-`xmatch` matches and joins astronomical catalogues from local files, HATS trees, and configured remote archives. Matching features depend on the selected engine and the metadata supplied for each catalogue; the guides document those limits and the memory trade-offs.
+`xmatcher` matches and joins astronomical catalogues from local files, HATS trees, and configured remote archives. Matching features depend on the selected engine and the metadata supplied for each catalogue; the guides document those limits and the memory trade-offs.
+
+The current source uses the `xmatcher` package and CLI. The released
+[v0.5.0](https://github.com/astroai/xmatch/releases/tag/v0.5.0) keeps the old
+`xmatch` name; the v0.5.1 tag and PyPI publication are pending. See the
+[migration notes](docs/release-0.5.1.md).
 
 ```bash
-xmatch match catalog1.parquet catalog2.csv -o matches.parquet -r 1.0
+xmatcher match catalog1.parquet catalog2.csv -o matches.parquet -r 1.0
 ```
 
 Inputs can be local Parquet, CSV, TSV, or FITS files, HATS directories, Polars frames, or configured remote catalogues. Coordinate names can be configured or detected. Proper-motion propagation uses declared epoch and motion metadata; mixed coordinate frames are rejected and generic catalogue discovery does not invent positional uncertainties.
@@ -45,7 +50,7 @@ All detailed architectural references and user guides are organized in the [`doc
   - Relational ID joins on survey identifiers (`--id-join`).
   - Multi-catalogue sequential chains (`crossmatch_multi`).
 - **Local Mirroring & Offline Caching**:
-  - `xmatch sync`: Mirror remote TAP and HATS surveys into a durable local HATS cache with keyset paging, rate limiting, and progress checkpoints.
+  - `xmatcher sync`: Mirror remote TAP and HATS surveys into a durable local HATS cache with keyset paging, rate limiting, and progress checkpoints.
 - **Distributed execution**:
   - `engine="ray"` parallelizes pairwise HEALPix candidate searches. The coordinator still holds the input frames and final result in memory.
   - `engine="ray-union"` mirrors inputs into HATS and writes a full-sky, full-outer HATS union. It supports `sky`, `skyerr`, and `skyellipse`; compressed interval planning handles mixed-order/RING layouts and uncertainty or epoch halos in distributed tasks. Planning may scan additional partitions. Output trees add non-null `_union_ra` and `_union_dec` routing columns and declare NESTED ordering.
@@ -59,9 +64,8 @@ Requires Python $\ge 3.13$. The checked Pixi environment and local release gate 
 ### Recommended: Pixi
 
 ```bash
-# Clone the public 0.5.0 release tag
-git clone --branch v0.5.0 https://github.com/astroai/xmatch.git
-cd xmatch
+git clone https://github.com/astroai/xmatcher.git
+cd xmatcher
 
 # Install environment and dependencies
 pixi install
@@ -71,16 +75,13 @@ pixi run preflight-push
 pixi run ci-local
 ```
 
-### Standard: Pip
+### Standard: Pip from source
 
-The source and release assets for version 0.5.0 are publicly available from
-[GitHub](https://github.com/astroai/xmatch/releases/tag/v0.5.0). The PyPI name
-[`xmatch`](https://pypi.org/project/xmatch/) belongs to a different project, so
-this project is not published on PyPI.
+Install from the current source checkout:
 
 ```bash
-git clone --branch v0.5.0 https://github.com/astroai/xmatch.git
-cd xmatch
+git clone https://github.com/astroai/xmatcher.git
+cd xmatcher
 python -m pip install .
 
 # Optional integrations; use only the extras you need
@@ -88,7 +89,7 @@ python -m pip install ".[cds,hats-ray,torchfits,ml]"
 ```
 
 The tensor-native `torchsky` engine is not a package extra: no `torchsky`
-distribution is published on PyPI. To use it, install xmatch alongside a
+distribution is published on PyPI. To use it, install xmatcher alongside a
 compatible Torchsky checkout. The integration was tested with the sibling
 Torchsky 0.4 development source installed editable and Torchfits 1.0.0 from
 PyPI.
@@ -99,23 +100,23 @@ PyPI.
 
 | Task | Command |
 |---|---|
-| Match two local files | `xmatch match cat1.parquet cat2.csv -o matches.parquet -r 1.5` |
-| Match against remote Gaia DR3 | `xmatch match targets.csv gaia -o targets_gaia.parquet -r 1.0` |
-| Astrometric error ellipse match | `xmatch match xray.fits optical.parquet --matcher skyellipse --max-error 3.0` |
-| Proper-motion drift prior match | `xmatch match old_survey.csv gaia --target-epoch 2016.0 --pm-prior -r 2.0` |
-| Relational ID join | `xmatch match cat1.parquet cat2.parquet --id-join --id1 objid --id2 objid` |
-| Multi-survey 3-way chain | `xmatch match gaia wise.csv 2mass.parquet -r 1.5 -o 3way.parquet` |
-| Distributed HATS master union | `xmatch match gaia allwise 2mass des --union --engine ray-union -o /data/master.hats` |
-| Mirror remote surveys to local cache | `xmatch sync gaia allwise 2mass` |
-| Search remote TAP archives | `xmatch search des` |
-| Discover archive schemas | `xmatch discover noirlab --schema nsc_dr2.object` |
+| Match two local files | `xmatcher match cat1.parquet cat2.csv -o matches.parquet -r 1.5` |
+| Match against remote Gaia DR3 | `xmatcher match targets.csv gaia -o targets_gaia.parquet -r 1.0` |
+| Astrometric error ellipse match | `xmatcher match xray.fits optical.parquet --matcher skyellipse --max-error 3.0` |
+| Proper-motion drift prior match | `xmatcher match old_survey.csv gaia --target-epoch 2016.0 --pm-prior -r 2.0` |
+| Relational ID join | `xmatcher match cat1.parquet cat2.parquet --id-join --id1 objid --id2 objid` |
+| Multi-survey 3-way chain | `xmatcher match gaia wise.csv 2mass.parquet -r 1.5 -o 3way.parquet` |
+| Distributed HATS master union | `xmatcher match gaia allwise 2mass des --union --engine ray-union -o /data/master.hats` |
+| Mirror remote surveys to local cache | `xmatcher sync gaia allwise 2mass` |
+| Search remote TAP archives | `xmatcher search des` |
+| Discover archive schemas | `xmatcher discover noirlab --schema nsc_dr2.object` |
 
 ---
 
 ## Python API Quickstart
 
 ```python
-from xmatch import CrossMatch, MatchRequest, MatchSpec
+from xmatcher import CrossMatch, MatchRequest, MatchSpec
 
 cm = CrossMatch()
 

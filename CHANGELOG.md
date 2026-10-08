@@ -1,13 +1,28 @@
 # Changelog
 
-All notable changes to `xmatch` are documented in this file.
+All notable changes to `xmatcher` are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-No changes yet.
+No changes beyond the planned v0.5.1 rename are recorded.
+
+## [0.5.1] — unreleased
+
+### Changed
+
+- **Breaking package and command rename**: Python imports and the CLI move from
+  `xmatch` to `xmatcher`.
+- **Breaking configuration rename**: the bundled and user configuration file
+  becomes `xmatcher.yaml`; environment variables move from the `XMATCH_` prefix
+  to `XMATCHER_`.
+- **Changed local paths**: the default cache moves to `~/.cache/xmatcher`, and
+  the documented CANFAR output root is `/arc/projects/hats/xmatcher`.
+- The persisted `xmatch.*` association schema identifiers remain unchanged.
+
+PyPI publication is pending.
 
 ## [0.5.0] — 2026-10-07
 

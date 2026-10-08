@@ -5,7 +5,7 @@ from importlib.resources import files
 
 import pytest
 
-from xmatch.association import (
+from xmatcher.association import (
     ASSOCIATION_COMPONENT_RELEASE_SCHEMA_VERSION,
     ASSOCIATION_COMPONENT_SCHEMA_VERSION,
     ASSOCIATION_RELEASE_SCHEMA_VERSION,
@@ -21,7 +21,7 @@ from xmatch.association import (
 
 
 def test_component_construction_includes_sources_without_selected_edges(tmp_path) -> None:
-    from xmatch.association import AssociationDecision, construct_association_components
+    from xmatcher.association import AssociationDecision, construct_association_components
 
     directory, manifest = _association_release(tmp_path, "association")
     left_release, right_release = _records()[0].provenance.input_release_ids
@@ -48,7 +48,7 @@ def test_component_construction_includes_sources_without_selected_edges(tmp_path
 
 def _records() -> list[AssociationRecord]:
     payload = json.loads(
-        files("xmatch").joinpath("fixtures/association_v1.json").read_text(encoding="utf-8")
+        files("xmatcher").joinpath("fixtures/association_v1.json").read_text(encoding="utf-8")
     )
     return sorted(
         (AssociationRecord.from_mapping(item) for item in payload["records"]),

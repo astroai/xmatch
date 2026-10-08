@@ -1,21 +1,25 @@
-# xmatch User Guide & Cookbooks
+# xmatcher User Guide & Cookbooks
 
-A practical, end-to-end user manual for astronomical catalogue crossmatching using `xmatch`.
+A practical, end-to-end user manual for astronomical catalogue crossmatching using `xmatcher`.
 
 ---
 
 ## 1. Installation & Environment Setup
 
-`xmatch` requires Python $\ge 3.13$. The checked Pixi environment uses Python 3.13; optional integrations are installed separately for pip users.
+`xmatcher` requires Python $\ge 3.13$. The checked Pixi environment uses Python 3.13; optional integrations are installed separately for pip users.
+
+The current source uses the `xmatcher` package and CLI. The released
+[v0.5.0](https://github.com/astroai/xmatch/releases/tag/v0.5.0) keeps the old
+`xmatch` name; the v0.5.1 tag and PyPI publication are pending. See the
+[migration notes](release-0.5.1.md).
 
 ### Recommended: Pixi Workflow
 
 For reproducibility and automatic resolution of compiled C/Rust/Fortran dependencies (such as `cdshealpix`, `ray`, `numpy`):
 
 ```bash
-# Clone the repository
-git clone https://github.com/astroai/xmatch.git
-cd xmatch
+git clone https://github.com/astroai/xmatcher.git
+cd xmatcher
 
 # Install all environments and dependencies
 pixi install
@@ -24,19 +28,17 @@ pixi install
 pixi run ci-local
 ```
 
-### Pip from a checkout
+### Pip from source
+
+Install from the current source checkout:
 
 ```bash
-git clone https://github.com/astroai/xmatch.git
-cd xmatch
+git clone https://github.com/astroai/xmatcher.git
+cd xmatcher
 
 # Install the core and optional integrations used by this checkout
 python -m pip install ".[cds,hats-ray,torchfits,ml]"
 ```
-
-The PyPI name `xmatch` belongs to another project. The source repository and
-[v0.5.0 GitHub release](https://github.com/astroai/xmatch/releases/tag/v0.5.0)
-are public. Do not use `pip install xmatch` for this project.
 
 #### Optional Dependency Extras
 
@@ -64,19 +66,19 @@ PyPI.
 
 ```bash
 # 1. Match two local files with a 1.5 arcsecond radius
-xmatch match catalog1.parquet catalog2.csv -o matches.parquet -r 1.5
+xmatcher match catalog1.parquet catalog2.csv -o matches.parquet -r 1.5
 
 # 2. Match a local file against remote Gaia DR3 (auto-downloads cone from TAP)
-xmatch match my_targets.csv gaia -o my_gaia.parquet -r 1.0
+xmatcher match my_targets.csv gaia -o my_gaia.parquet -r 1.0
 
 # 3. Full-outer join (union) of three catalogues into a partitioned HATS directory
-xmatch match survey1.parquet survey2.csv survey3.fits --union -o /data/master.hats
+xmatcher match survey1.parquet survey2.csv survey3.fits --union -o /data/master.hats
 ```
 
 ### Python API
 
 ```python
-from xmatch import CrossMatch
+from xmatcher import CrossMatch
 
 cm = CrossMatch()
 
@@ -96,7 +98,7 @@ print(f"Matched {len(df)} pairs. Output columns include: {df.columns[:5]}")
 
 ## 3. Formats & Storage
 
-`xmatch` reads supported formats through Polars and Astropy-backed adapters. File scanning and output serialization can be lazy or streaming, but most match engines collect coordinates and candidate pairs in memory.
+`xmatcher` reads supported formats through Polars and Astropy-backed adapters. File scanning and output serialization can be lazy or streaming, but most match engines collect coordinates and candidate pairs in memory.
 
 ```mermaid
 flowchart LR
@@ -165,8 +167,8 @@ For pairwise local CSV/Parquet matching, `--memory-budget-bytes` enables a
 partitioned spill path when projected inputs exceed the budget:
 
 ```bash
-xmatch match large_a.parquet large_b.parquet \
-  --memory-budget-bytes 1073741824 --scratch-dir /scratch/xmatch \
+xmatcher match large_a.parquet large_b.parquet \
+  --memory-budget-bytes 1073741824 --scratch-dir /scratch/xmatcher \
   --matcher sky --join-type 1or2 -o matches.parquet
 ```
 
@@ -182,18 +184,18 @@ a general memory limit.
 
 ## 4. Remote Archive Federation & Discovery
 
-`xmatch` includes catalogue and endpoint configurations for several TAP services. Availability, access policy, table schemas, and service limits can change; verify them with `xmatch search` / `xmatch describe` before large queries.
+`xmatcher` includes catalogue and endpoint configurations for several TAP services. Availability, access policy, table schemas, and service limits can change; verify them with `xmatcher search` / `xmatcher describe` before large queries.
 
 ### Querying Remote Archives Automatically
 
-When a remote catalogue name is supplied as an input, `xmatch` calculates the bounding spatial cone of the local catalogue, queries the remote archive via TAP/ADQL, downloads the candidate region, and performs local spatial matching:
+When a remote catalogue name is supplied as an input, `xmatcher` calculates the bounding spatial cone of the local catalogue, queries the remote archive via TAP/ADQL, downloads the candidate region, and performs local spatial matching:
 
 ```bash
 # Query Gaia DR3 within the footprint of my_sources.csv
-xmatch match my_sources.csv gaia -r 1.0 -o matches.parquet
+xmatcher match my_sources.csv gaia -r 1.0 -o matches.parquet
 
 # Query with explicit celestial coordinates (e.g. 0.05 degree cone around Vega)
-xmatch match gaia my_catalog.csv --ra 279.23 --dec 38.78 --radius-deg 0.05 -r 1.5
+xmatcher match gaia my_catalog.csv --ra 279.23 --dec 38.78 --radius-deg 0.05 -r 1.5
 ```
 
 The optimized server-side CDS/TAP crossmatch route is limited to simple
@@ -210,48 +212,48 @@ motion margin.
 
 ### Pre-Computed Crossmatch Tables (Fast-Path)
 
-NOIRLab Data Lab provides pre-computed crossmatch tables (e.g., NSC $\times$ Gaia, DES $\times$ Gaia, AllWISE $\times$ Gaia). `xmatch` can match directly against these pre-computed tables, downloading only the matched pairs:
+NOIRLab Data Lab provides pre-computed crossmatch tables (e.g., NSC $\times$ Gaia, DES $\times$ Gaia, AllWISE $\times$ Gaia). `xmatcher` can match directly against these pre-computed tables, downloading only the matched pairs:
 
 ```bash
 # Instant NSC × Gaia match without downloading full survey catalogues
-xmatch match nsc_x_gaia my_stars.csv --ra 279.2 --dec 38.8 --radius-deg 0.01 -r 1.5
+xmatcher match nsc_x_gaia my_stars.csv --ra 279.2 --dec 38.8 --radius-deg 0.01 -r 1.5
 ```
 
 ### Interactive Remote Archive Discovery
 
 ```bash
 # List all built-in catalogue aliases
-xmatch list
+xmatcher list
 
 # Search remote TAP endpoints for datasets matching a keyword
-xmatch search rubin
-xmatch search unWISE
+xmatcher search rubin
+xmatcher search unWISE
 
 # Inspect tables on a specific remote archive (e.g. NOIRLab Data Lab)
-xmatch discover noirlab
+xmatcher discover noirlab
 
 # Inspect column schema and generate YAML configuration snippet
-xmatch discover noirlab --schema nsc_dr2.object
+xmatcher discover noirlab --schema nsc_dr2.object
 
-# Adopt a discovered table into your local xmatch configuration
-xmatch adopt vizier II/349/ps1 --name ps1
+# Adopt a discovered table into your local xmatcher configuration
+xmatcher adopt vizier II/349/ps1 --name ps1
 ```
 
 ---
 
-## 5. Local Mirroring & Offline Caching (`xmatch sync`)
+## 5. Local Mirroring & Offline Caching (`xmatcher sync`)
 
-For repeated analysis or full-sky union operations, `xmatch` can mirror remote catalogues into a local, durable HATS cache (`~/.cache/xmatch` or CANFAR `/arc/projects/hats`).
+For repeated analysis or full-sky union operations, `xmatcher` can mirror remote catalogues into a local, durable HATS cache (`~/.cache/xmatcher` or CANFAR `/arc/projects/hats`). Use `/arc/projects/hats/xmatcher` for the documented working/output directory.
 
 ```bash
 # Mirror full remote surveys into local HATS cache
-xmatch sync gaia allwise twomass
+xmatcher sync gaia allwise twomass
 
 # Re-sync checks TAP page windows or hashes remote HATS partition content.
-xmatch sync gaia
+xmatcher sync gaia
 
 # Force full re-download
-xmatch sync gaia --force
+xmatcher sync gaia --force
 ```
 
 ### Benefits of Local Mirroring:
@@ -271,7 +273,7 @@ require reading substantial remote data.
 ## 6. Crossmatch algorithm cookbook
 
 ```python
-from xmatch import CrossMatch, MatchRequest, MatchSpec, SideOverrides
+from xmatcher import CrossMatch, MatchRequest, MatchSpec, SideOverrides
 
 cm = CrossMatch()
 ```
@@ -292,7 +294,7 @@ Adapts the match radius per row based on positional error columns:
 $$\text{sep} \le N_{\sigma} \cdot (\sigma_1 + \sigma_2)$$
 
 ```python
-# Supply per-side columns/units, or configure equivalent metadata in xmatch.yaml.
+# Supply per-side columns/units, or configure equivalent metadata in xmatcher.yaml.
 spec = MatchSpec(matcher="skyerr", max_error=3.0, find="best")
 req = MatchRequest(
     cat1="gaia_dr3.parquet",
@@ -355,7 +357,7 @@ result = cm.crossmatch_request(req)
 
 Rows away from the requested epoch need a known reference epoch and finite
 proper motions (unless the explicit `pm_prior` model is enabled). Coordinates
-must have compatible declared frames; `xmatch` does not convert frames.
+must have compatible declared frames; `xmatcher` does not convert frames.
 
 ### E. Assumed Proper-Motion Drift Model (Wilson 2023-inspired)
 
@@ -527,8 +529,8 @@ For large local CSV or Parquet pairs, `--memory-budget-bytes` enables the
 partitioned spill path when projected input size exceeds the requested budget:
 
 ```bash
-xmatch match large_a.parquet large_b.parquet \
-  --memory-budget-bytes 1073741824 --scratch-dir /scratch/xmatch \
+xmatcher match large_a.parquet large_b.parquet \
+  --memory-budget-bytes 1073741824 --scratch-dir /scratch/xmatcher \
   --matcher sky --join-type 1or2 -o matches.parquet
 ```
 
@@ -552,7 +554,7 @@ unsupported combinations should raise an error rather than silently changing
 criteria.
 
 ```python
-from xmatch import CrossMatch, MatchRequest, MatchSpec
+from xmatcher import CrossMatch, MatchRequest, MatchSpec
 
 request = MatchRequest(
     cat1="survey_a.parquet",
@@ -591,10 +593,10 @@ from the lowest-indexed catalogue member in each output row; these columns are
 additional to input columns and are the output tree's declared spatial columns.
 
 ```bash
-xmatch sync gaia allwise twomass
-xmatch match gaia allwise twomass \
+xmatcher sync gaia allwise twomass
+xmatcher match gaia allwise twomass \
   --union --engine ray-union \
-  -o /arc/projects/hats/master_union.hats
+  -o /arc/projects/hats/xmatcher/master_union.hats
 ```
 
 Resume state is tied to source identity and metadata. Change the inputs or

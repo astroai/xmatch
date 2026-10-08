@@ -1,6 +1,7 @@
 """Offline tests for release archive integrity checks."""
 
 import io
+import re
 import subprocess
 import sys
 import tarfile
@@ -26,15 +27,38 @@ def _project():
         return tomllib.load(stream)["project"]
 
 
+def _wheel_path(tmp_path):
+    project = _project()
+    return tmp_path / f"{project['name']}-{project['version']}-py3-none-any.whl"
+
+
+def _sdist_path(tmp_path):
+    project = _project()
+    return tmp_path / f"{project['name']}-{project['version']}.tar.gz"
+
+
+def _egg_info_dir(project):
+    return f"{re.sub(r'[-.]+', '_', project['name']).lower()}.egg-info"
+
+
 def test_release_tag_matches_project_version():
     version = _project()["version"]
     check_tag(f"v{version}", version)
 
 
-@pytest.mark.parametrize("tag", ["0.5.0", "v0.5.1", "v0.5.0-rc1"])
+@pytest.mark.parametrize("tag", ["0.5.0", "v0.5.0", "v0.5.1-rc1"])
 def test_release_tag_rejects_other_versions(tag):
+    version = _project()["version"]
     with pytest.raises(SystemExit, match="does not match project version"):
-        check_tag(tag, "0.5.0")
+        check_tag(tag, version)
+
+
+def test_release_checker_tracks_import_package_name():
+    package = package_files(ROOT)
+    package_root = ROOT / "src" / "xmatcher"
+
+    assert package_root / "__init__.py" in package
+    assert all(path.is_relative_to(package_root) for path in package)
 
 
 def _wheel(path, *, extra=(), license_bytes=None, include_license=True, corrupt=None):
@@ -79,9 +103,10 @@ def _wheel(path, *, extra=(), license_bytes=None, include_license=True, corrupt=
 
 
 def _sdist(path, *, extra=()):
+    project = _project()
     package = package_files(ROOT)
-    required = required_sdist_files(ROOT, package)
-    archive_root = "xmatch-0.5.0"
+    required = required_sdist_files(ROOT, package, project)
+    archive_root = f"{project['name']}-{project['version']}"
     with tarfile.open(path, "w:gz") as archive:
         root = tarfile.TarInfo(archive_root)
         root.type = tarfile.DIRTYPE
@@ -93,7 +118,7 @@ def _sdist(path, *, extra=()):
             info = tarfile.TarInfo(f"{archive_root}/{relative}")
             info.size = len(payload)
             archive.addfile(info, io.BytesIO(payload))
-        generated = tarfile.TarInfo(f"{archive_root}/src/xmatch.egg-info/SOURCES.txt")
+        generated = tarfile.TarInfo(f"{archive_root}/src/{_egg_info_dir(project)}/SOURCES.txt")
         generated_data = b"generated metadata\n"
         generated.size = len(generated_data)
         archive.addfile(generated, io.BytesIO(generated_data))
@@ -101,14 +126,14 @@ def _sdist(path, *, extra=()):
 
 
 def test_wheel_accepts_expected_package_and_license(tmp_path):
-    path = tmp_path / "xmatch.whl"
+    path = _wheel_path(tmp_path)
     _wheel(path)
     check_wheel(path, ROOT, _project(), package_files(ROOT))
 
 
 def test_wheel_rejects_unlisted_package_files(tmp_path):
-    path = tmp_path / "xmatch.whl"
-    _wheel(path, extra=("xmatch/obsolete.py",))
+    path = _wheel_path(tmp_path)
+    _wheel(path, extra=(f"{_project()['name']}/obsolete.py",))
     with pytest.raises(SystemExit, match="wheel package contents differ"):
         check_wheel(path, ROOT, _project(), package_files(ROOT))
 
@@ -118,7 +143,7 @@ def test_wheel_rejects_unlisted_package_files(tmp_path):
     [(False, None), (True, b"wrong license\n")],
 )
 def test_wheel_rejects_omitted_or_changed_license(tmp_path, include_license, license_bytes):
-    path = tmp_path / "xmatch.whl"
+    path = _wheel_path(tmp_path)
     _wheel(path, license_bytes=license_bytes, include_license=include_license)
     with pytest.raises(SystemExit, match="license"):
         check_wheel(path, ROOT, _project(), package_files(ROOT))
@@ -128,36 +153,41 @@ def test_wheel_rejects_omitted_or_changed_license(tmp_path, include_license, lic
     "extra",
     [
         "unexpected.txt",
-        "src/xmatch.egg-info/unexpected.txt",
-        "src/xmatch.egg-info/nested/SOURCES.txt",
+        f"src/{_egg_info_dir(_project())}/unexpected.txt",
+        f"src/{_egg_info_dir(_project())}/nested/SOURCES.txt",
     ],
 )
 def test_sdist_rejects_unlisted_source_payload(tmp_path, extra):
-    path = tmp_path / "xmatch.tar.gz"
+    path = _sdist_path(tmp_path)
     required = _sdist(path, extra=(extra,))
     with pytest.raises(SystemExit, match="source archive contents differ"):
         check_sdist(path, ROOT, required, _project()["name"])
 
 
 @pytest.mark.parametrize(
-    "extra", ["unexpected.py", "startup.pth", "xmatch-0.5.0.data/purelib/other.py"]
+    "extra",
+    [
+        "unexpected.py",
+        "startup.pth",
+        f"{_project()['name']}-{_project()['version']}.data/purelib/other.py",
+    ],
 )
 def test_wheel_rejects_payload_outside_package(tmp_path, extra):
-    path = tmp_path / "xmatch.whl"
+    path = _wheel_path(tmp_path)
     _wheel(path, extra=(extra,))
     with pytest.raises(SystemExit, match="wheel contents differ"):
         check_wheel(path, ROOT, _project(), package_files(ROOT))
 
 
 def test_sdist_accepts_declared_sources_and_generated_metadata(tmp_path):
-    path = tmp_path / "xmatch.tar.gz"
+    path = _sdist_path(tmp_path)
     required = _sdist(path)
     check_sdist(path, ROOT, required, _project()["name"])
 
 
 def test_wheel_integrity_checks_still_run_under_python_optimized_mode(tmp_path):
-    path = tmp_path / "xmatch.whl"
-    _wheel(path, corrupt="xmatch/association.py")
+    path = _wheel_path(tmp_path)
+    _wheel(path, corrupt=f"{_project()['name']}/association.py")
 
     result = subprocess.run(
         [

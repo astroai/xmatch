@@ -7630,7 +7630,7 @@ packages:
   size: 433687
   timestamp: 1786599629846
 - pypi: ./
-  name: xmatch
+  name: xmatcher
   requires_dist:
   - numpy>=2.4
   - polars>=1.40

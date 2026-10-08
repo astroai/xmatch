@@ -6,12 +6,12 @@ from importlib.resources import files
 
 import pytest
 
-from xmatch.association import ASSOCIATION_SCHEMA_VERSION, AssociationRecord
+from xmatcher.association import ASSOCIATION_SCHEMA_VERSION, AssociationRecord
 
 
 def _fixture_records() -> list[dict]:
     payload = json.loads(
-        files("xmatch").joinpath("fixtures/association_v1.json").read_text(encoding="utf-8")
+        files("xmatcher").joinpath("fixtures/association_v1.json").read_text(encoding="utf-8")
     )
     assert payload["schema_version"] == ASSOCIATION_SCHEMA_VERSION
     return payload["records"]

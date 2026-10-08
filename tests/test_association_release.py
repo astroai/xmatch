@@ -5,7 +5,7 @@ from importlib.resources import files
 
 import pytest
 
-from xmatch.association import (
+from xmatcher.association import (
     ASSOCIATION_RELEASE_SCHEMA_VERSION,
     AssociationProvenance,
     AssociationRecord,
@@ -18,7 +18,7 @@ from xmatch.association import (
 
 def _records() -> list[AssociationRecord]:
     payload = json.loads(
-        files("xmatch").joinpath("fixtures/association_v1.json").read_text(encoding="utf-8")
+        files("xmatcher").joinpath("fixtures/association_v1.json").read_text(encoding="utf-8")
     )
     records = [AssociationRecord.from_mapping(item) for item in payload["records"]]
     return sorted(records, key=lambda record: record.association_id)
