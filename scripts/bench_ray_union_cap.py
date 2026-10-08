@@ -22,7 +22,7 @@ import numpy as np
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
 
-from xmatch import matchers, ray_union  # noqa: E402
+from xmatcher import matchers, ray_union  # noqa: E402
 
 
 def _angular_sep_arcsec(ra_deg: float, dec_deg: float) -> float:

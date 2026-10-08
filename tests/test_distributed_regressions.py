@@ -7,7 +7,7 @@ import polars as pl
 import pytest
 
 from tests.test_ray_union import _pixeled_catalogue
-from xmatch import hats_native, matchers, ray_union
+from xmatcher import hats_native, matchers, ray_union
 
 
 def _combos(pools, *, max_tuples=10000, matcher="sky", **kwargs):
@@ -73,7 +73,7 @@ def _plan(sources, out, **kwargs):
 
 
 def test_union_memory_guard_uses_binary_gibibytes(tmp_path, monkeypatch):
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher.exceptions import CrossMatchError
 
     sources = [
         _pixeled_catalogue(
@@ -196,7 +196,7 @@ def test_native_hats_handles_different_partition_orders(tmp_path):
 
 
 def test_fof_connects_via_secondary_catalogue():
-    from xmatch import CrossMatch
+    from xmatcher import CrossMatch
 
     frames = [
         pl.DataFrame({"ra": [x / 3600], "dec": [0.0], "id": [i]})
@@ -207,7 +207,7 @@ def test_fof_connects_via_secondary_catalogue():
 
 
 def test_ray_union_honors_error_and_motion_side_overrides():
-    from xmatch.crossmatch import _side_overrides
+    from xmatcher.crossmatch import _side_overrides
 
     supplied = {
         "ra_err_column_1": "err",
@@ -220,8 +220,8 @@ def test_ray_union_honors_error_and_motion_side_overrides():
 
 
 def test_ray_union_rejects_ignored_semantic_options(tmp_path):
-    from xmatch import CrossMatch
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher import CrossMatch
+    from xmatcher.exceptions import CrossMatchError
 
     with pytest.raises(CrossMatchError, match="filter_expr"):
         CrossMatch().union_match(
@@ -233,7 +233,7 @@ def test_ray_union_rejects_ignored_semantic_options(tmp_path):
 
 
 def test_ray_union_rejects_output_overlapping_input(tmp_path):
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher.exceptions import CrossMatchError
 
     src = _pixeled_catalogue(tmp_path / "a", "a", pl.DataFrame({"ra": [0.0], "dec": [0.0]}), 2)
     with pytest.raises(CrossMatchError, match="overlap"):
@@ -242,7 +242,7 @@ def test_ray_union_rejects_output_overlapping_input(tmp_path):
 
 @pytest.mark.parametrize("radius", [float("nan"), float("inf"), -1.0, 0.0])
 def test_union_plan_rejects_nonfinite_or_nonpositive_radius(tmp_path, radius):
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher.exceptions import CrossMatchError
 
     src = _pixeled_catalogue(tmp_path / "a", "a", pl.DataFrame({"ra": [0.0], "dec": [0.0]}), 2)
     with pytest.raises(CrossMatchError, match="radius_arcsec"):
@@ -258,7 +258,7 @@ def test_union_plan_rejects_nonfinite_or_nonpositive_radius(tmp_path, radius):
 
 
 def test_cli_global_config_can_precede_subcommand():
-    from xmatch.cli import _split_subcommand
+    from xmatcher.cli import _split_subcommand
 
     assert _split_subcommand(["--config", "custom.yaml", "list"]) == (
         "list",
@@ -271,16 +271,16 @@ def test_cli_global_config_can_precede_subcommand():
 
 
 def test_cli_invalid_ranking_weights_fail_loudly():
-    from xmatch.cli import _parse_extra_distance_cols
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher.cli import _parse_extra_distance_cols
+    from xmatcher.exceptions import CrossMatchError
 
     with pytest.raises(CrossMatchError, match="weight"):
         _parse_extra_distance_cols("mag:oops")
 
 
 def test_nway_uses_per_axis_uncertainty(monkeypatch):
-    import xmatch.crossmatch as module
-    from xmatch import CrossMatch
+    import xmatcher.crossmatch as module
+    from xmatcher import CrossMatch
 
     captured = []
     original = module.compute_nway_p_match
@@ -303,7 +303,7 @@ def test_nway_uses_per_axis_uncertainty(monkeypatch):
 
 
 def test_mirrored_cone_keeps_exact_centres_at_tiny_radii():
-    from xmatch.crossmatch import _cone_filter_frame
+    from xmatcher.crossmatch import _cone_filter_frame
 
     for dec in np.linspace(-89.0, 89.0, 50):
         frame = pl.DataFrame({"ra": [42.0], "dec": [dec]})
@@ -395,7 +395,7 @@ def test_union_rejects_overlapping_input_tiles():
         "dec",
         partitions=[ray_union.PartitionPlan(1, 0, ""), ray_union.PartitionPlan(2, 1, "")],
     )
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher.exceptions import CrossMatchError
 
     with pytest.raises(CrossMatchError, match="overlap"):
         ray_union._partition_index(cat, 2)
@@ -466,7 +466,7 @@ def test_native_hats_margin_honours_radii_larger_than_adjacent_pixels(monkeypatc
 
 
 def test_nway_photometric_score_is_independent_of_chunk_size():
-    from xmatch import CrossMatch
+    from xmatcher import CrossMatch
 
     left = pl.DataFrame(
         {"ra": [0.0, 1.0, 2.0], "dec": [0.0] * 3, "mag": [0.0, 5.0, 10.0], "err": [10000.0] * 3}
@@ -483,7 +483,7 @@ def test_nway_photometric_score_is_independent_of_chunk_size():
 
 
 def test_nway_empty_result_retains_input_schema():
-    from xmatch import CrossMatch
+    from xmatcher import CrossMatch
 
     left = pl.DataFrame({"ra": [0.0], "dec": [0.0], "id": ["a"]})
     right = pl.DataFrame({"ra": [1.0], "dec": [0.0], "id": ["b"]})
@@ -493,7 +493,7 @@ def test_nway_empty_result_retains_input_schema():
 
 
 def test_nway_scores_use_propagated_covariance(monkeypatch):
-    from xmatch import CrossMatch, crossmatch
+    from xmatcher import CrossMatch, crossmatch
 
     captured = []
 
@@ -518,7 +518,7 @@ def test_nway_scores_use_propagated_covariance(monkeypatch):
 
 
 def test_mirrored_cone_does_not_inflate_tiny_requested_radius():
-    from xmatch.crossmatch import _cone_filter_frame
+    from xmatcher.crossmatch import _cone_filter_frame
 
     frame = pl.DataFrame({"ra": [42.0, 42.0 + 1e-8], "dec": [0.0, 0.0]})
     selected = _cone_filter_frame(frame, "ra", "dec", 42.0, 0.0, 1e-9)
@@ -534,8 +534,8 @@ def test_union_tuple_cap_handles_products_larger_than_int64():
 
 
 def test_remote_projection_preserves_coordinates_and_scoring_columns(monkeypatch):
-    from xmatch import CrossMatch, MatchRequest, crossmatch, remote_tap
-    from xmatch.sources import CatalogueSource
+    from xmatcher import CrossMatch, MatchRequest, crossmatch, remote_tap
+    from xmatcher.sources import CatalogueSource
 
     captured = []
     source = CatalogueSource(
@@ -569,7 +569,7 @@ def test_remote_projection_preserves_coordinates_and_scoring_columns(monkeypatch
 
 
 def test_shared_endpoint_is_applied_to_multi_source_resolution():
-    from xmatch.crossmatch import _side_overrides
+    from xmatcher.crossmatch import _side_overrides
 
     assert (
         _side_overrides({"endpoint": "vizier", "endpoint_2": "noirlab"}, 1)["endpoint"] == "vizier"
@@ -580,8 +580,8 @@ def test_shared_endpoint_is_applied_to_multi_source_resolution():
 
 
 def test_nway_requires_declared_scoring_uncertainties():
-    from xmatch import CrossMatch
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher import CrossMatch
+    from xmatcher.exceptions import CrossMatchError
 
     frame = pl.DataFrame({"ra": [42.0], "dec": [5.0]})
     with pytest.raises(CrossMatchError, match="positional.*error"):
@@ -591,7 +591,7 @@ def test_nway_requires_declared_scoring_uncertainties():
 def test_nonlocal_partition_fingerprint_detects_same_size_edits(tmp_path, monkeypatch):
     import shutil
 
-    from xmatch.storage import Storage
+    from xmatcher.storage import Storage
 
     file = tmp_path / "part"
     file.write_bytes(b"first")
@@ -611,8 +611,8 @@ def test_nonlocal_partition_fingerprint_detects_same_size_edits(tmp_path, monkey
 
 
 def test_tap_same_service_best_uses_canonical_matcher(monkeypatch):
-    from xmatch import CrossMatch, MatchRequest, remote_tap
-    from xmatch.sources import CatalogueSource
+    from xmatcher import CrossMatch, MatchRequest, remote_tap
+    from xmatcher.sources import CatalogueSource
 
     left = CatalogueSource(
         "a",
@@ -644,8 +644,8 @@ def test_tap_same_service_best_uses_canonical_matcher(monkeypatch):
 
 
 def test_cds_uncertainty_request_uses_canonical_matcher(monkeypatch):
-    from xmatch import CrossMatch, MatchRequest, remote_cds
-    from xmatch.sources import CatalogueSource
+    from xmatcher import CrossMatch, MatchRequest, remote_cds
+    from xmatcher.sources import CatalogueSource
 
     left = CatalogueSource(
         "a", is_local=True, ra_column="ra", dec_column="dec", default_pos_error_arcsec=0.01
@@ -668,7 +668,7 @@ def test_cds_uncertainty_request_uses_canonical_matcher(monkeypatch):
 
 
 def test_nway_accepts_explicit_uncertainties_for_every_catalogue(monkeypatch):
-    from xmatch import CrossMatch, crossmatch
+    from xmatcher import CrossMatch, crossmatch
 
     captured = []
 
@@ -691,8 +691,8 @@ def test_nway_accepts_explicit_uncertainties_for_every_catalogue(monkeypatch):
 def test_mirrored_cone_honours_ring_partition_ordering(tmp_path, monkeypatch):
     import cdshealpix
 
-    from xmatch import mirror
-    from xmatch.crossmatch import _try_mirrored_cone
+    from xmatcher import mirror
+    from xmatcher.crossmatch import _try_mirrored_cone
 
     source = _pixeled_catalogue(
         tmp_path / "mirror", "mirror", pl.DataFrame({"ra": [42.0], "dec": [5.0]}), 6
@@ -721,8 +721,8 @@ def test_mirrored_cone_honours_ring_partition_ordering(tmp_path, monkeypatch):
     "ra,dec,radius", [(np.nan, 5.0, 0.1), (42.0, 95.0, 0.1), (42.0, 5.0, -1.0)]
 )
 def test_cached_remote_download_validates_region_before_cache(monkeypatch, ra, dec, radius):
-    from xmatch import CrossMatch, MatchRequest, crossmatch
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher import CrossMatch, MatchRequest, crossmatch
+    from xmatcher.exceptions import CrossMatchError
 
     cm = CrossMatch()
     source = cm.resolve_source("gaia_esa", {})
@@ -738,8 +738,8 @@ def test_cached_remote_download_validates_region_before_cache(monkeypatch, ra, d
     "spec", [matchers.MatchSpec(matcher="skyerr"), matchers.MatchSpec(target_epoch=2020.0)]
 )
 def test_remote_variable_halos_require_explicit_region(monkeypatch, spec):
-    from xmatch import CrossMatch, MatchRequest, crossmatch
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher import CrossMatch, MatchRequest, crossmatch
+    from xmatcher.exceptions import CrossMatchError
 
     cm = CrossMatch()
     frame = pl.DataFrame({"ra": [42.0], "dec": [5.0]})
@@ -758,7 +758,7 @@ def test_ray_pixel_tree_respects_one_cpu_allocation(monkeypatch, find):
     import ray
     import scipy.spatial
 
-    from xmatch import matchers, ray_engine
+    from xmatcher import matchers, ray_engine
 
     real_tree = scipy.spatial.cKDTree
     calls = []
@@ -795,8 +795,8 @@ def test_ray_pixel_tree_respects_one_cpu_allocation(monkeypatch, find):
 
 
 def test_native_hats_ray_worker_limits_tree_threads(monkeypatch):
-    from xmatch import hats_native, matchers
-    from xmatch.sources import CatalogueSource
+    from xmatcher import hats_native, matchers
+    from xmatcher.sources import CatalogueSource
 
     actual_match = matchers._scipy_match
     calls = []
@@ -821,9 +821,9 @@ def test_strict_ray_preserves_failed_explicit_address(monkeypatch, tmp_path, bac
 
     import ray
 
-    from xmatch import ray_engine
-    from xmatch.exceptions import CrossMatchError
-    from xmatch.sources import CatalogueSource
+    from xmatcher import ray_engine
+    from xmatcher.exceptions import CrossMatchError
+    from xmatcher.sources import CatalogueSource
 
     address = "unreachable-test-address:6379"
     calls = []
@@ -859,8 +859,8 @@ def test_ray_address_warning_fallback_preserves_environment(monkeypatch, caplog)
 
     import ray
 
-    from xmatch import ray_engine
-    from xmatch.sources import CatalogueSource
+    from xmatcher import ray_engine
+    from xmatcher.sources import CatalogueSource
 
     def init(**kwargs):
         raise ConnectionError("unreachable")

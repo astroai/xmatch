@@ -1,4 +1,4 @@
-"""Shared pytest fixtures and hooks for the xmatch test suite."""
+"""Shared pytest fixtures and hooks for the xmatcher test suite."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     sep = "=" * 120
     print("\n" + sep)
-    print("BENCHMARK RESULTS — xmatch matcher engine comparison")
+    print("BENCHMARK RESULTS — xmatcher matcher engine comparison")
     print(sep)
     header = (
         f"{'Scenario':<22} {'N₁':>6} {'N₂':>6} {'r(″)':>5} {'Engine':>10} "

@@ -3,8 +3,8 @@ requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "xmatch"
-version = "0.5.0"
+name = "xmatcher"
+version = "0.5.1"
 description = "High-performance, format-agnostic astronomical catalogue crossmatching and multi-survey union toolkit."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -54,13 +54,13 @@ dev = [
 ]
 
 [project.scripts]
-xmatch = "xmatch.cli:main"
+xmatcher = "xmatcher.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/astroai/xmatch"
-Repository = "https://github.com/astroai/xmatch"
-Documentation = "https://github.com/astroai/xmatch/tree/main/docs"
-Issues = "https://github.com/astroai/xmatch/issues"
+Homepage = "https://github.com/astroai/xmatcher"
+Repository = "https://github.com/astroai/xmatcher"
+Documentation = "https://github.com/astroai/xmatcher/tree/main/docs"
+Issues = "https://github.com/astroai/xmatcher/issues"
 
 # --- Tool specific configuration (e.g. for linters/formatters) ---
 [tool.ruff]
@@ -90,7 +90,7 @@ ignore-words-list = "aas,anc,fof,hav,nd,ned"
 skip = "*.ipynb,pyproject.toml,*.json,pixi.lock,paper/*.cls"
 
 [tool.setuptools.package-data]
-"xmatch" = ["*.yaml", "fixtures/*.json"]
+"xmatcher" = ["*.yaml", "fixtures/*.json"]
 
 [tool.pytest.ini_options]
 # Register custom markers so pytest doesn't emit "unknown marker" warnings.

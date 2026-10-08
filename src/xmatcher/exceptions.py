@@ -1,6 +1,6 @@
-"""Custom exceptions raised by the xmatch package.
+"""Custom exceptions raised by the xmatcher package.
 
-Every public exception is documented in :mod:`xmatch.__init__` and inherits
+Every public exception is documented in :mod:`xmatcher.__init__` and inherits
 from :class:`CrossMatchError` so callers can catch the full family with a
 single ``except CrossMatchError``. Exceptions that are never raised by the
 current implementation have been pruned to keep the surface honest.
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 
 class CrossMatchError(Exception):
-    """Base class for every public xmatch exception.
+    """Base class for every public xmatcher exception.
 
     Subclasses may attach an optional ``source`` attribute — the
     user-supplied identifier that triggered the failure — so the CLI's

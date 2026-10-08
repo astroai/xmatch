@@ -14,7 +14,7 @@ flux, uncertainties, limit conventions, times, methods, and raw property evidenc
 products; matching defaults are not a complete observation selection.
 
 ```python
-from xmatch import CrossMatch, write_observation_release, write_candidate_release
+from xmatcher import CrossMatch, write_observation_release, write_candidate_release
 
 cm = CrossMatch()
 sources = [
@@ -88,7 +88,7 @@ Physical covariance currently conditions on radial velocity: a source must decla
 `release_metadata["radial_velocity_uncertainty"] = "deterministic"` for this path.
 It does not propagate an unknown RV variance or promise a full six-parameter
 covariance model. Jacobian transport requires a separately installed compatible
-Torchsky checkout; no PyPI distribution or xmatch extra is available. The
+Torchsky checkout; no `xmatcher[torchsky]` extra is available. The
 integration was tested with the sibling Torchsky 0.4 development source
 installed editable and Torchfits 1.0.0 from PyPI.
 An explicitly requested missing-motion prior remains an assumed population
@@ -106,7 +106,7 @@ points also validate declared frames instead of comparing incompatible coordinat
 
 ```python
 import polars as pl
-from xmatch import normalize_candidate_hypotheses
+from xmatcher import normalize_candidate_hypotheses
 
 sources = pl.scan_parquet("releases/candidates-1/sources.parquet")
 pairs = pl.scan_parquet("releases/candidates-1/candidates.parquet")

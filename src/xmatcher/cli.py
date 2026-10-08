@@ -1,19 +1,19 @@
-"""Command-line interface for the *xmatch* cross-match tool.
+"""Command-line interface for the *xmatcher* cross-match tool.
 
 This module exposes a single entry point, :func:`main`, that powers the
-``xmatch`` console script defined in ``pyproject.toml``.
+``xmatcher`` console script defined in ``pyproject.toml``.
 
 The CLI is split into:
 
 * :class:`Console` — a tiny ANSI-colour helper that auto-disables for
-  non-TTY streams, ``NO_COLOR`` (https://no-color.org/), ``XMATCH_NO_COLOR``,
+  non-TTY streams, ``NO_COLOR`` (https://no-color.org/), ``XMATCHER_NO_COLOR``,
   or ``--no-color``.
 * Nine dedicated subcommand parsers (``match``, ``list``, ``describe``,
   ``discover``, ``search``, ``adopt``, ``sync``, ``completion``, ``doctor``).
   Each lives in its own function that produces an argparse ``Namespace`` plus
   a colour-aware printer so help, output, and errors are easy to scan.
 * :func:`main` which dispatches to the requested subcommand, or defaults to
-  ``match`` when given positional catalogues directly (``xmatch cat1 cat2``).
+  ``match`` when given positional catalogues directly (``xmatcher cat1 cat2``).
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ class Console:
 
     * ``NO_COLOR`` environment variable set to any non-empty value
       → colour disabled.
-    * ``XMATCH_NO_COLOR`` environment variable (project equivalent) →
+    * ``XMATCHER_NO_COLOR`` environment variable (project equivalent) →
       colour disabled.
     * Both ``stdout`` and ``stderr`` being a TTY → colour enabled.
     * Anywhere else (pipe, redirect, pytest capsys, CI logs) →
@@ -105,12 +105,12 @@ class Console:
     def __init__(self, *, enabled: bool | None = None) -> None:
         if enabled is None:
             # Honour https://no-color.org/ (presence/any value disables) plus
-            # the project-specific XMATCH_NO_COLOR.  Falls back to a TTY
+            # the project-specific XMATCHER_NO_COLOR.  Falls back to a TTY
             # check on stdout AND stderr so pipes, CI logs, and pytest
             # capsys fixtures all see plain output.
             disabled = (
                 "NO_COLOR" in os.environ
-                or "XMATCH_NO_COLOR" in os.environ
+                or "XMATCHER_NO_COLOR" in os.environ
                 or not sys.stdout.isatty()
                 or not sys.stderr.isatty()
             )
@@ -166,7 +166,7 @@ class Progress:
 
     Renders a Unicode-Braille spinner + label + elapsed time + status to
     stderr, in-place via CR + clear-to-EOL.  Silently no-ops when
-    ``enabled`` is False (non-TTY, CI logs, ``XMATCH_NO_PROGRESS=1``).
+    ``enabled`` is False (non-TTY, CI logs, ``XMATCHER_NO_PROGRESS=1``).
 
     Status updates are emitted via :meth:`update` — backends pass the
     callback through to the engine to surface server-side or client-side
@@ -209,7 +209,7 @@ class Progress:
         self._start_ts = time.monotonic()
         self._thread = threading.Thread(
             target=self._animate,
-            name="xmatch-progress",
+            name="xmatcher-progress",
             daemon=True,
         )
         self._thread.start()
@@ -256,11 +256,11 @@ class Progress:
 def _make_console(no_color: bool = False) -> Console:
     """Construct a :class:`Console` with the user's preference applied.
 
-    Honour ``--no-color``, the ``NO_COLOR`` and ``XMATCH_NO_COLOR``
+    Honour ``--no-color``, the ``NO_COLOR`` and ``XMATCHER_NO_COLOR``
     environment variables (presence-based per https://no-color.org/),
     and fall back to auto-detection (TTY on both stdout and stderr).
     """
-    if no_color or "NO_COLOR" in os.environ or "XMATCH_NO_COLOR" in os.environ:
+    if no_color or "NO_COLOR" in os.environ or "XMATCHER_NO_COLOR" in os.environ:
         return Console(enabled=False)
     return Console()
 
@@ -292,125 +292,125 @@ TAGLINE = (
 TOP_EXAMPLES = """\
 Examples:
   # Match two local files; CSV result on stdout
-  xmatch a.parquet b.csv
+  xmatcher a.parquet b.csv
 
   # Save matches to a Parquet file
-  xmatch a.parquet b.csv -o matches.parquet -r 1.5 --engine fast
+  xmatcher a.parquet b.csv -o matches.parquet -r 1.5 --engine fast
 
   # Match a local file against a configured remote catalogue
-  xmatch my_sources.csv gaia -o my_gaia.parquet -r 2.0
+  xmatcher my_sources.csv gaia -o my_gaia.parquet -r 2.0
 
   # Build a master union catalogue across N catalogues
-  xmatch match gaia allwise.csv twomass.csv --union -o master.parquet
+  xmatcher match gaia allwise.csv twomass.csv --union -o master.parquet
 
   # Inspection / discovery
-  xmatch list
-  xmatch describe gaia
-  xmatch discover noirlab --schema nsc_dr2.object
-  xmatch search gaia
-  xmatch adopt vizier II/349/ps1 --name ps1
+  xmatcher list
+  xmatcher describe gaia
+  xmatcher discover noirlab --schema nsc_dr2.object
+  xmatcher search gaia
+  xmatcher adopt vizier II/349/ps1 --name ps1
 
   # Shell tab completion (bash | zsh | fish) — emit, then `eval` or save
-  eval "$(xmatch completion bash)"
-  # or: xmatch completion zsh > "$HOME/.zsh/completions/_xmatch"
-  # or: xmatch completion fish > "$HOME/.config/fish/completions/xmatch.fish"
+  eval "$(xmatcher completion bash)"
+  # or: xmatcher completion zsh > "$HOME/.zsh/completions/_xmatcher"
+  # or: xmatcher completion fish > "$HOME/.config/fish/completions/xmatcher.fish"
 
   # When piping into files or CI logs, disable colour:
-  xmatch --no-color list > catalogues.txt
+  xmatcher --no-color list > catalogues.txt
 """
 
 MATCH_EXAMPLES = """\
 Examples:
   # Two local files, default radius (1 arcsec)
-  xmatch match a.parquet b.csv
+  xmatcher match a.parquet b.csv
 
   # Choose engine, output, radius
-  xmatch match a.parquet b.csv --engine fast -r 1.5 -o matches.parquet
+  xmatcher match a.parquet b.csv --engine fast -r 1.5 -o matches.parquet
 
   # Bayesian p_match with photometric priors
-  xmatch match a.parquet b.csv --engine fast --probabilistic --priors g,r -o m.parquet
+  xmatcher match a.parquet b.csv --engine fast --probabilistic --priors g,r -o m.parquet
 
   # ID join instead of sky position
-  xmatch match a.csv b.csv --id-join --id1 source_id --id2 source_id
+  xmatcher match a.csv b.csv --id-join --id1 source_id --id2 source_id
 
   # N-way pairwise match across 3 catalogues
-  xmatch match gaia allwise.csv twomass.csv -r 1.5 -o nway.parquet
+  xmatcher match gaia allwise.csv twomass.csv -r 1.5 -o nway.parquet
 
   # Master union catalogue (-o master.hats preferred for spatial queries)
-  xmatch match gaia allwise.csv twomass.csv --union -o master.hats --hats-threshold 50000
+  xmatcher match gaia allwise.csv twomass.csv --union -o master.hats --hats-threshold 50000
 
   # Friends-of-Friends transitive closure
-  xmatch match gaia allwise.csv twomass.csv --fof -o bundles.parquet
+  xmatcher match gaia allwise.csv twomass.csv --fof -o bundles.parquet
 """
 
 LIST_EXAMPLES = """\
 Examples:
-  xmatch list
-  xmatch list --no-color    # plain text, friendly to pipes
+  xmatcher list
+  xmatcher list --no-color    # plain text, friendly to pipes
 """
 
 DESCRIBE_EXAMPLES = """\
 Examples:
-  xmatch describe gaia
-  xmatch describe nsc_noao
+  xmatcher describe gaia
+  xmatcher describe nsc_noao
 """
 
 DISCOVER_EXAMPLES = """\
 Examples:
-  xmatch discover noirlab
-  xmatch discover noirlab --schema nsc_dr2.object
-  xmatch discover https://gea.esac.esa.int/tap-server/tap
+  xmatcher discover noirlab
+  xmatcher discover noirlab --schema nsc_dr2.object
+  xmatcher discover https://gea.esac.esa.int/tap-server/tap
 """
 
 SEARCH_EXAMPLES = """\
 Examples:
-  xmatch search           # all tables on every known endpoint
-  xmatch search gaia      # only tables whose name matches "gaia"
+  xmatcher search           # all tables on every known endpoint
+  xmatcher search gaia      # only tables whose name matches "gaia"
 """
 
 ADOPT_EXAMPLES = """\
 Examples:
-  # Probe VizieR and append to ~/.config/xmatch/xmatch.yaml
-  xmatch adopt vizier II/349/ps1 --name ps1
+  # Probe VizieR and append to ~/.config/xmatcher/xmatcher.yaml
+  xmatcher adopt vizier II/349/ps1 --name ps1
 
   # Preview the YAML without writing
-  xmatch adopt noirlab catwise2020.main --name catwise --dry-run
+  xmatcher adopt noirlab catwise2020.main --name catwise --dry-run
 
   # Match an ad-hoc table id without adopting (endpoint auto-guessed for VizieR)
-  xmatch match sources.csv II/349/ps1 --ra 150.1 --dec 2.18 --radius-deg 0.05
+  xmatcher match sources.csv II/349/ps1 --ra 150.1 --dec 2.18 --radius-deg 0.05
 """
 
 COMPLETION_EXAMPLES = """\
 Examples:
   # bash — source directly into the current shell
-  eval "$(xmatch completion bash)"
+  eval "$(xmatcher completion bash)"
 
   # bash — save into the user-level completion directory (loads at login)
-  xmatch completion bash > ~/.local/share/bash-completion/completions/xmatch
+  xmatcher completion bash > ~/.local/share/bash-completion/completions/xmatcher
 
   # zsh — drop into a $fpath directory (e.g. $ZDOTDIR/completions)
-  xmatch completion zsh > "${ZDOTDIR:-$HOME}/.zsh/completions/_xmatch"
+  xmatcher completion zsh > "${ZDOTDIR:-$HOME}/.zsh/completions/_xmatcher"
 
   # fish — standard user-level completion path
-  xmatch completion fish > ~/.config/fish/completions/xmatch.fish
+  xmatcher completion fish > ~/.config/fish/completions/xmatcher.fish
 
   # Inspect the script before installing
-  xmatch completion bash | less
+  xmatcher completion bash | less
 """
 
 DOCTOR_EXAMPLES = """\
 Examples:
   # Human-readable drift report against the bundled baseline
-  xmatch doctor
+  xmatcher doctor
 
   # Machine-readable JSON for CI
-  xmatch doctor --json
+  xmatcher doctor --json
 
   # Strict mode — exit 1 on any drift (including user-only or missing entries)
-  xmatch doctor --strict
+  xmatcher doctor --strict
 
   # Quiet — just emit a single summary line
-  xmatch doctor --quiet
+  xmatcher doctor --quiet
 """
 
 # Field classifications used by `_diff_configs` to bucket catalogue / archive
@@ -446,10 +446,10 @@ INFORMATIONAL_CATALOGUE_FIELDS: frozenset[str] = frozenset(
 )
 
 
-# Fallback catalogue / endpoint lists used when the active xmatch.yaml
+# Fallback catalogue / endpoint lists used when the active xmatcher.yaml
 # cannot be loaded at completion-emission time.  Kept small so emitted
 # shell scripts stay lightweight; users with extensive local configs
-# will see their full catalogue set when ``xmatch completion`` is run
+# will see their full catalogue set when ``xmatcher completion`` is run
 # from that environment, so the fallback is only here to guarantee
 # completion never breaks.
 _FALLBACK_CATALOGUES: tuple[str, ...] = (
@@ -481,9 +481,9 @@ def _collect_completion_names(
 
     ``catalogues`` is the union of catalogue names, aliases, and public
     TAP endpoint short-names (so a user can complete any of them when
-    typing a positional for ``xmatch match`` / ``xmatch describe`` /
-    ``xmatch discover``).  ``endpoints`` is the smaller set of TAP
-    endpoint short-names used by ``xmatch discover`` specifically.
+    typing a positional for ``xmatcher match`` / ``xmatcher describe`` /
+    ``xmatcher discover``).  ``endpoints`` is the smaller set of TAP
+    endpoint short-names used by ``xmatcher discover`` specifically.
 
     Falls back to :data:`_FALLBACK_CATALOGUES` /
     :data:`_FALLBACK_ENDPOINTS` whenever any lookup fails — so the
@@ -502,7 +502,7 @@ def _collect_completion_names(
             for ep_name in get_public_endpoints():
                 endpoints.add(ep_name)
                 # Public TAP endpoints are also valid positional names
-                # for ``xmatch match`` (e.g. ``xmatch a.csv gaia``).
+                # for ``xmatcher match`` (e.g. ``xmatcher a.csv gaia``).
                 catalogues.add(ep_name)
         except Exception as exc:  # noqa: BLE001
             logger.debug("completion: could not enumerate endpoints: %s", exc)
@@ -520,7 +520,7 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     ``-v/--verbose``, ``--config``, ``--no-color``, ``--version``, and
     ``--help`` are attached to every subparser so users can use them
     either before or after the subcommand keyword (e.g. both
-    ``xmatch -v list`` and ``xmatch list --no-color`` work).
+    ``xmatcher -v list`` and ``xmatcher list --no-color`` work).
     """
     parser.add_argument(
         "-v",
@@ -532,7 +532,7 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--config",
         dest="config_file",
-        help="Path to a custom xmatch.yaml (default: bundled or ~/.config/xmatch/xmatch.yaml).",
+        help="Path to a custom xmatcher.yaml (default: bundled or ~/.config/xmatcher/xmatcher.yaml).",
     )
     parser.add_argument(
         "--no-color",
@@ -544,7 +544,7 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"xmatch {__version__}",
+        version=f"xmatcher {__version__}",
     )
 
 
@@ -690,9 +690,9 @@ def _build_params(args) -> dict:
 
 
 def _build_match_subparser() -> argparse.ArgumentParser:
-    """Standalone parser for the ``match`` subcommand (and default ``xmatch CAT1 CAT2``)."""
+    """Standalone parser for the ``match`` subcommand (and default ``xmatcher CAT1 CAT2``)."""
     parser = argparse.ArgumentParser(
-        prog="xmatch match",
+        prog="xmatcher match",
         description=(
             "Cross-match two or more catalogues.\n\n"
             "Inputs may be local Parquet/CSV/TSV/FITS files, Polars frames,\n"
@@ -835,8 +835,8 @@ def _build_match_subparser() -> argparse.ArgumentParser:
     g_ray.add_argument(
         "--cache-root",
         dest="cache_root",
-        help="Durable cache root for mirrored HATS catalogues (default: $XMATCH_CACHE_ROOT "
-        "or, on AstroAI/CANFAR sessions, /arc/projects/hats; else ~/.cache/xmatch).",
+        help="Durable cache root for mirrored HATS catalogues (default: $XMATCHER_CACHE_ROOT "
+        "or, on AstroAI/CANFAR sessions, /arc/projects/hats; else ~/.cache/xmatcher).",
     )
     g_ray.add_argument(
         "--task-rows",
@@ -877,7 +877,7 @@ def _build_match_subparser() -> argparse.ArgumentParser:
         dest="min_free_gb",
         type=float,
         help="Fail fast when the cache root or output filesystem has less free space "
-        "than this many GiB (default 10.0; env XMATCH_MIN_FREE_GB overrides).",
+        "than this many GiB (default 10.0; env XMATCHER_MIN_FREE_GB overrides).",
     )
 
     g_id = parser.add_argument_group("ID join")
@@ -992,7 +992,7 @@ def _build_match_subparser() -> argparse.ArgumentParser:
 def _build_sync_subparser() -> argparse.ArgumentParser:
     """Standalone parser for the ``sync`` subcommand."""
     parser = argparse.ArgumentParser(
-        prog="xmatch sync",
+        prog="xmatcher sync",
         description=(
             "Mirror remote catalogues (TAP, or HATS over HTTP / vos:) into the durable "
             "cache root as HATS, with incremental re-sync on later runs."
@@ -1000,9 +1000,9 @@ def _build_sync_subparser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  xmatch sync gaia allwise twomass\n"
-            "  xmatch sync my_tap_table --rate-limit 2 --threads 4 --cache-root /data/xmatch-cache\n"
-            "  xmatch sync --force allwise        # refetch everything\n"
+            "  xmatcher sync gaia allwise twomass\n"
+            "  xmatcher sync my_tap_table --rate-limit 2 --threads 4 --cache-root /data/xmatcher-cache\n"
+            "  xmatcher sync --force allwise        # refetch everything\n"
         ),
     )
     parser.add_argument(
@@ -1026,8 +1026,8 @@ def _build_sync_subparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cache-root",
         dest="cache_root",
-        help="Durable cache root for mirrored HATS catalogues (default: $XMATCH_CACHE_ROOT "
-        "or, on AstroAI/CANFAR sessions, /arc/projects/hats; else ~/.cache/xmatch).",
+        help="Durable cache root for mirrored HATS catalogues (default: $XMATCHER_CACHE_ROOT "
+        "or, on AstroAI/CANFAR sessions, /arc/projects/hats; else ~/.cache/xmatcher).",
     )
     parser.add_argument(
         "--threads",
@@ -1055,7 +1055,7 @@ def _build_sync_subparser() -> argparse.ArgumentParser:
         dest="min_free_gb",
         type=float,
         help="Fail fast when the cache root has less free space than this many GiB "
-        "(default 10.0; env XMATCH_MIN_FREE_GB overrides).",
+        "(default 10.0; env XMATCHER_MIN_FREE_GB overrides).",
     )
     _add_global_options(parser)
     return parser
@@ -1063,7 +1063,7 @@ def _build_sync_subparser() -> argparse.ArgumentParser:
 
 def _build_list_subparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="xmatch list",
+        prog="xmatcher list",
         description="List every catalogue defined in the active config.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=LIST_EXAMPLES,
@@ -1074,7 +1074,7 @@ def _build_list_subparser() -> argparse.ArgumentParser:
 
 def _build_describe_subparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="xmatch describe",
+        prog="xmatcher describe",
         description="Print full metadata (columns, access info, defaults) for a named catalogue.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=DESCRIBE_EXAMPLES,
@@ -1086,7 +1086,7 @@ def _build_describe_subparser() -> argparse.ArgumentParser:
 
 def _build_discover_subparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="xmatch discover",
+        prog="xmatcher discover",
         description="Browse tables on a remote TAP endpoint; with --schema, dump column metadata.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=DISCOVER_EXAMPLES,
@@ -1107,7 +1107,7 @@ def _build_discover_subparser() -> argparse.ArgumentParser:
 
 def _build_search_subparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="xmatch search",
+        prog="xmatcher search",
         description="Search every known TAP endpoint for tables whose name matches a substring.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=SEARCH_EXAMPLES,
@@ -1124,10 +1124,10 @@ def _build_search_subparser() -> argparse.ArgumentParser:
 
 def _build_adopt_subparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="xmatch adopt",
+        prog="xmatcher adopt",
         description=(
             "Probe a remote TAP table and append a catalogue entry to "
-            "~/.config/xmatch/xmatch.yaml (merged over the bundled config)."
+            "~/.config/xmatcher/xmatcher.yaml (merged over the bundled config)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=ADOPT_EXAMPLES,
@@ -1161,12 +1161,12 @@ def _build_adopt_subparser() -> argparse.ArgumentParser:
 def _build_completion_subparser() -> argparse.ArgumentParser:
     """Standalone parser for the ``completion`` subcommand."""
     parser = argparse.ArgumentParser(
-        prog="xmatch completion",
+        prog="xmatcher completion",
         description=(
             "Emit a shell-completion script for the requested shell.\n\n"
             "Catalogue names and TAP endpoints are resolved from the active\n"
-            "xmatch.yaml at emission time and embedded into the script, so\n"
-            "`xmatch completion` always reflects the user's current config.\n"
+            "xmatcher.yaml at emission time and embedded into the script, so\n"
+            "`xmatcher completion` always reflects the user's current config.\n"
             "If the config can't be loaded a small hardcoded list is used\n"
             "so completion is never broken."
         ),
@@ -1185,7 +1185,7 @@ def _build_completion_subparser() -> argparse.ArgumentParser:
 def _build_doctor_subparser() -> argparse.ArgumentParser:
     """Standalone parser for the ``doctor`` subcommand.
 
-    The ``doctor`` subcommand compares the user's active ``xmatch.yaml``
+    The ``doctor`` subcommand compares the user's active ``xmatcher.yaml``
     against the bundled baseline and reports drift.  Output is human-readable
     by default; ``--json`` emits a structured report on ``stdout``;
     ``--strict`` elevates intentional-override drift (missing-in-user /
@@ -1193,9 +1193,9 @@ def _build_doctor_subparser() -> argparse.ArgumentParser:
     an exact match to the baseline.
     """
     parser = argparse.ArgumentParser(
-        prog="xmatch doctor",
+        prog="xmatcher doctor",
         description=(
-            "Validate the active xmatch.yaml against the bundled baseline\n"
+            "Validate the active xmatcher.yaml against the bundled baseline\n"
             "and report drift.\n\n"
             "Three categories of drift are tracked:\n\n"
             "  - outdated fields    : a catalogue/alias exists in both\n"
@@ -1291,22 +1291,22 @@ def _emit_bash(catalogues: Sequence[str], endpoints: Sequence[str]) -> str:
     cat_array = "\n".join(f"    {_bash_quote_array_entry(c)}" for c in catalogues)
     ep_array = "\n".join(f"    {_bash_quote_array_entry(c)}" for c in endpoints)
     return f"""\
-# bash completion for xmatch — generated by `xmatch completion bash`.
+# bash completion for xmatcher — generated by `xmatcher completion bash`.
 # Install (current shell only):
-#   eval "$(xmatch completion bash)"
+#   eval "$(xmatcher completion bash)"
 # Install persistently:
-#   xmatch completion bash > ~/.local/share/bash-completion/completions/xmatch
+#   xmatcher completion bash > ~/.local/share/bash-completion/completions/xmatcher
 
-_xmatch_catalogues=(
+_xmatcher_catalogues=(
 {cat_array}
 )
-_xmatch_endpoints=(
+_xmatcher_endpoints=(
 {ep_array}
 )
-_xmatch_shells=( bash zsh fish )
-_xmatch_subcommands=( match list describe discover search adopt completion sync doctor )
+_xmatcher_shells=( bash zsh fish )
+_xmatcher_subcommands=( match list describe discover search adopt completion sync doctor )
 
-_xmatch() {{
+_xmatcher() {{
     local cur="" words="" cword=0 i subcmd=""
     # Use bash-completion's _init_completion if available, otherwise
     # fall back to raw COMP_WORDS parsing so we never require an extra
@@ -1333,7 +1333,7 @@ _xmatch() {{
 
     # Subcommand keyword position (1st positional, before any subcmd).
     if [[ -z "$subcmd" && "$cur" != -* ]]; then
-        COMPREPLY=( $(compgen -W "${{_xmatch_subcommands[*]}}" -- "$cur") )
+        COMPREPLY=( $(compgen -W "${{_xmatcher_subcommands[*]}}" -- "$cur") )
         return 0
     fi
 
@@ -1345,18 +1345,18 @@ _xmatch() {{
 
     case "$subcmd" in
         match|describe|sync)
-            COMPREPLY=( $(compgen -W "${{_xmatch_catalogues[*]}}" -- "$cur") )
+            COMPREPLY=( $(compgen -W "${{_xmatcher_catalogues[*]}}" -- "$cur") )
             ;;
         discover|adopt)
-            COMPREPLY=( $(compgen -W "${{_xmatch_endpoints[*]}}" -- "$cur") )
+            COMPREPLY=( $(compgen -W "${{_xmatcher_endpoints[*]}}" -- "$cur") )
             ;;
         completion)
-            COMPREPLY=( $(compgen -W "${{_xmatch_shells[*]}}" -- "$cur") )
+            COMPREPLY=( $(compgen -W "${{_xmatcher_shells[*]}}" -- "$cur") )
             ;;
     esac
     return 0
 }}
-complete -F _xmatch xmatch
+complete -F _xmatcher xmatcher
 """
 
 
@@ -1367,12 +1367,12 @@ def _emit_zsh(catalogues: Sequence[str], endpoints: Sequence[str]) -> str:
     # The literal ``{{``/``}}`` in the script below are escaped because
     # this Python string is an f-string; raw zsh sees single braces.
     return f"""\
-#compdef xmatch
-# zsh completion for xmatch — generated by `xmatch completion zsh`.
+#compdef xmatcher
+# zsh completion for xmatcher — generated by `xmatcher completion zsh`.
 # Install:
-#   xmatch completion zsh > "${{ZDOTDIR:-$HOME}}/.zsh/completions/_xmatch"
+#   xmatcher completion zsh > "${{ZDOTDIR:-$HOME}}/.zsh/completions/_xmatcher"
 
-_xmatch_subcommands=(
+_xmatcher_subcommands=(
     'match:cross-match two or more catalogues'
     'sync:mirror remote catalogues into the local HATS cache'
     'list:list every configured catalogue'
@@ -1383,53 +1383,53 @@ _xmatch_subcommands=(
     'completion:emit a shell completion script'
     'doctor:report drift against the bundled baseline'
 )
-_xmatch_catalogues=( {cat_array} )
-_xmatch_endpoints=( {ep_array} )
-_xmatch_shells=( bash zsh fish )
+_xmatcher_catalogues=( {cat_array} )
+_xmatcher_endpoints=( {ep_array} )
+_xmatcher_shells=( bash zsh fish )
 
-_xmatch() {{
+_xmatcher() {{
     local state
     _arguments -C \\
         '(-h --help)'{{-h,--help}}'[show help and exit]' \\
         '(-v --verbose)'{{-v,--verbose}}'[increase verbosity]' \\
-        '--config[custom xmatch.yaml]:file:_files' \\
+        '--config[custom xmatcher.yaml]:file:_files' \\
         '--no-color[disable ANSI colours]' \\
         '--version[show version and exit]' \\
         '*:: :->rest'
     case $state in
         rest)
             if (( CURRENT == 1 )); then
-                _describe 'subcommand' _xmatch_subcommands
+                _describe 'subcommand' _xmatcher_subcommands
                 return
             fi
             case $words[1] in
                 match|describe|sync)
-                    _describe 'catalogue' _xmatch_catalogues
+                    _describe 'catalogue' _xmatcher_catalogues
                     ;;
                 discover|adopt)
-                    _describe 'endpoint' _xmatch_endpoints
+                    _describe 'endpoint' _xmatcher_endpoints
                     ;;
                 completion)
-                    _describe 'shell' _xmatch_shells
+                    _describe 'shell' _xmatcher_shells
                     ;;
             esac
             ;;
     esac
 }}
-_xmatch "$@"
+_xmatcher "$@"
 """
 
 
 def _emit_fish(catalogues: Sequence[str], endpoints: Sequence[str]) -> str:
     """Return the fish completion-script body."""
-    cat_lines = "\n".join(f"set -a _xmatch_catalogues {_fish_quote(c)}" for c in catalogues)
-    ep_lines = "\n".join(f"set -a _xmatch_endpoints {_fish_quote(c)}" for c in endpoints)
+    cat_lines = "\n".join(f"set -a _xmatcher_catalogues {_fish_quote(c)}" for c in catalogues)
+    ep_lines = "\n".join(f"set -a _xmatcher_endpoints {_fish_quote(c)}" for c in endpoints)
     return f"""\
-# fish completion for xmatch — generated by `xmatch completion fish`.
+# fish completion for xmatcher — generated by `xmatcher completion fish`.
 # Install:
-#   xmatch completion fish > ~/.config/fish/completions/xmatch.fish
+#   xmatcher completion fish > ~/.config/fish/completions/xmatcher.fish
 
-function _xmatch_subcmd
+function _xmatcher_subcmd
     for token in $argv
         switch $token
             case match list describe discover search adopt completion sync
@@ -1439,43 +1439,43 @@ function _xmatch_subcmd
     end
 end
 
-function _xmatch_needs_catalogue
-    set -l cmd (_xmatch_subcmd $argv)
+function _xmatcher_needs_catalogue
+    set -l cmd (_xmatcher_subcmd $argv)
     contains -- $cmd match describe
 end
 
-function _xmatch_needs_endpoint
-    set -l cmd (_xmatch_subcmd $argv)
+function _xmatcher_needs_endpoint
+    set -l cmd (_xmatcher_subcmd $argv)
     contains -- $cmd discover adopt
 end
 
-function _xmatch_needs_shell
-    set -l cmd (_xmatch_subcmd $argv)
+function _xmatcher_needs_shell
+    set -l cmd (_xmatcher_subcmd $argv)
     test "$cmd" = completion
 end
 
-set -l _xmatch_subcommands match list describe discover search adopt completion sync doctor
+set -l _xmatcher_subcommands match list describe discover search adopt completion sync doctor
 
 {cat_lines}
 
 {ep_lines}
 
 # Subcommand keyword (1st positional, no subcommand typed yet).
-complete -c xmatch -f -n 'test (count (commandline -opc)) -eq 1' -a '$_xmatch_subcommands'
+complete -c xmatcher -f -n 'test (count (commandline -opc)) -eq 1' -a '$_xmatcher_subcommands'
 
-# Catalogue names for `xmatch match <TAB>` and `xmatch describe <TAB>`.
-complete -c xmatch -f -n '_xmatch_needs_catalogue; and test (count (commandline -opc)) -eq 2' -a '$_xmatch_catalogues'
+# Catalogue names for `xmatcher match <TAB>` and `xmatcher describe <TAB>`.
+complete -c xmatcher -f -n '_xmatcher_needs_catalogue; and test (count (commandline -opc)) -eq 2' -a '$_xmatcher_catalogues'
 
-# Endpoint names for `xmatch discover <TAB>`.
-complete -c xmatch -f -n '_xmatch_needs_endpoint; and test (count (commandline -opc)) -eq 2' -a '$_xmatch_endpoints'
+# Endpoint names for `xmatcher discover <TAB>`.
+complete -c xmatcher -f -n '_xmatcher_needs_endpoint; and test (count (commandline -opc)) -eq 2' -a '$_xmatcher_endpoints'
 
-# Shell names for `xmatch completion <TAB>`.
-complete -c xmatch -f -n '_xmatch_needs_shell; and test (count (commandline -opc)) -eq 2' -a 'bash zsh fish'
+# Shell names for `xmatcher completion <TAB>`.
+complete -c xmatcher -f -n '_xmatcher_needs_shell; and test (count (commandline -opc)) -eq 2' -a 'bash zsh fish'
 """
 
 
 def _build_top_parser() -> argparse.ArgumentParser:
-    """The top-level parser shown by ``xmatch --help``.
+    """The top-level parser shown by ``xmatcher --help``.
 
     Carries *no positional* and only the global options
     (``-v``, ``--config``, ``--no-color``, ``--version``).  Subcommand
@@ -1484,25 +1484,25 @@ def _build_top_parser() -> argparse.ArgumentParser:
     output clean (subcommands are listed in the description) and avoids
     argparse's subparsers "ambiguous option" restrictions.  This parser
     also serves as the top-level help blurb so users running
-    ``xmatch --help`` see the friendly one-screen summary instead of the
+    ``xmatcher --help`` see the friendly one-screen summary instead of the
     full flat-form help.
     """
     subcommand_blurb = (
         "\n\nAvailable commands:\n"
-        "  match       cross-match catalogues (the default for `xmatch CAT1 CAT2`)\n"
+        "  match       cross-match catalogues (the default for `xmatcher CAT1 CAT2`)\n"
         "  list        list every configured catalogue\n"
         "  describe    show columns & access info for a catalogue\n"
         "  discover    browse tables and columns on a remote TAP endpoint\n"
         "  search      search every endpoint for tables matching a substring\n"
-        "  adopt       save a remote table into ~/.config/xmatch/xmatch.yaml\n"
+        "  adopt       save a remote table into ~/.config/xmatcher/xmatcher.yaml\n"
         "  sync        mirror remote catalogues into the local HATS cache\n"
         "  completion  emit a shell tab-completion script (bash | zsh | fish)\n"
-        "  doctor      report drift between your xmatch.yaml and the bundled baseline\n"
+        "  doctor      report drift between your xmatcher.yaml and the bundled baseline\n"
         "\n"
-        "Run `xmatch COMMAND --help` for command-specific options."
+        "Run `xmatcher COMMAND --help` for command-specific options."
     )
     parser = argparse.ArgumentParser(
-        prog="xmatch",
+        prog="xmatcher",
         description=TAGLINE + subcommand_blurb,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=TOP_EXAMPLES,
@@ -1520,7 +1520,7 @@ def list_catalogues(cm: CrossMatch, console: Console) -> None:
     """Print all configured catalogues — colour-aware, table-formatted.
 
     Shows memorable survey names first. Archive/table details live in
-    ``xmatch describe`` so users are not nudged to paste ACCESS ids.
+    ``xmatcher describe`` so users are not nudged to paste ACCESS ids.
     """
     widths = (20, 8, 56)
     header = f"{'NAME':<{widths[0]}}  {'ROWS':>{widths[1]}}  DESCRIPTION"
@@ -1558,7 +1558,7 @@ def list_catalogues(cm: CrossMatch, console: Console) -> None:
             _emit(name, mirror=True)
     sys.stdout.write("\n")
     console.info(f"{len(cm.catalogues_config)} catalogues, {len(cm.aliases_config)} aliases.")
-    console.hint("Use 'xmatch describe <name>' for archive/table/column details.")
+    console.hint("Use 'xmatcher describe <name>' for archive/table/column details.")
     console.hint("Match with the NAME column (e.g. ps1, desils), not the remote table id.")
 
 
@@ -1669,8 +1669,8 @@ def handle_search(cm: CrossMatch, pattern: str, console: Console) -> int:
                     sys.stdout.write(f"  {_pad(console.cyan(full), 40)} {desc_short}\n")
     if not found_any:
         console.error("\nNo matching tables found.")
-        console.hint("Tip: use 'xmatch discover <endpoint>' for known endpoint names.")
-        console.hint("     or 'xmatch adopt <endpoint> <table> --name <short>' to save one.")
+        console.hint("Tip: use 'xmatcher discover <endpoint>' for known endpoint names.")
+        console.hint("     or 'xmatcher adopt <endpoint> <table> --name <short>' to save one.")
         return 1
     return 0
 
@@ -1741,7 +1741,7 @@ def handle_discover(
                 archive=archive_name,
                 service_id=service_id,
             )
-            tip = f"# ─── Suggested entry (or: xmatch adopt {endpoint} {schema_table}) ───"
+            tip = f"# ─── Suggested entry (or: xmatcher adopt {endpoint} {schema_table}) ───"
             sys.stdout.write(f"\n{console.dim(tip)}\n")
             sys.stdout.write(format_catalogue_yaml(short_name, entry))
         except Exception as exc:
@@ -1756,7 +1756,7 @@ def handle_discover(
             if schema.get("dec_column"):
                 sys.stdout.write(f'    dec_column: "{schema["dec_column"]}"\n')
         console.hint(
-            f"Tip: `xmatch adopt {endpoint} {schema_table}` writes this into {user_config_path()}."
+            f"Tip: `xmatcher adopt {endpoint} {schema_table}` writes this into {user_config_path()}."
         )
     else:
         try:
@@ -1776,8 +1776,10 @@ def handle_discover(
             full = f"{schema_name}.{table_name}" if schema_name else table_name
             desc_short = (desc[:80] + "…") if len(desc) > 80 else desc
             sys.stdout.write(f"  {_pad(console.cyan(full), 45)}  {desc_short}\n")
-        console.hint(f"Tip: use 'xmatch discover {endpoint} --schema <table>' for column details.")
-        console.hint(f"     or 'xmatch adopt {endpoint} <table>' to save a user-config entry.")
+        console.hint(
+            f"Tip: use 'xmatcher discover {endpoint} --schema <table>' for column details."
+        )
+        console.hint(f"     or 'xmatcher adopt {endpoint} <table>' to save a user-config entry.")
     return 0
 
 
@@ -1803,7 +1805,7 @@ def handle_adopt(
     if archive_name is None:
         console.error(
             f"Endpoint '{endpoint}' has no bundled archive mapping; "
-            "cannot adopt into xmatch.yaml yet."
+            "cannot adopt into xmatcher.yaml yet."
         )
         return 1
     if archive_name not in cm.archives_config:
@@ -1877,8 +1879,10 @@ def handle_adopt(
     console.info(f"Adopted {console.bold(name)} → {path}")
     if alias:
         console.info(f"Alias {console.cyan(alias.lower())} → {name}")
-    console.hint(f"Try: xmatch describe {alias or name}")
-    console.hint(f"     xmatch match <local.parquet> {alias or name} --ra … --dec … --radius-deg …")
+    console.hint(f"Try: xmatcher describe {alias or name}")
+    console.hint(
+        f"     xmatcher match <local.parquet> {alias or name} --ra … --dec … --radius-deg …"
+    )
     return 0
 
 
@@ -1891,9 +1895,9 @@ def _resolve_output_path(output_file: str | None) -> str | None:
     """Resolve a bare relative output name against the platform output root.
 
     On AstroAI/CANFAR sessions (shared ``/arc``) bare names like
-    ``full.hats`` land under ``/arc/projects/hats/xmatch/`` — never a
+    ``full.hats`` land under ``/arc/projects/hats/xmatcher/`` — never a
     pod-local home or cwd.  Explicit paths (absolute or containing a
-    directory) are respected verbatim; ``XMATCH_OUTPUT_ROOT`` overrides the
+    directory) are respected verbatim; ``XMATCHER_OUTPUT_ROOT`` overrides the
     platform default (empty disables it).  Off the platform this is a
     no-op.
     """
@@ -1916,8 +1920,8 @@ def _execute_match(args, cm: CrossMatch, console: Console) -> int:
         args.output_file = _resolve_output_path(args.output_file)
     if len(args.catalogues) < 2:
         console.error("Error: at least two catalogues are required for a crossmatch.")
-        console.hint("Try 'xmatch --help' for usage, 'xmatch list' for catalogues,")
-        console.hint("     'xmatch discover <endpoint>' to explore remote tables.")
+        console.hint("Try 'xmatcher --help' for usage, 'xmatcher list' for catalogues,")
+        console.hint("     'xmatcher discover <endpoint>' to explore remote tables.")
         return 2
 
     params = _build_params(args)
@@ -2080,11 +2084,11 @@ def _run_simple_describe(argv: Sequence[str]) -> int:
 
 
 def _run_completion(argv: Sequence[str]) -> int:
-    """Dispatch ``xmatch completion <shell>``: emit a completion script to stdout.
+    """Dispatch ``xmatcher completion <shell>``: emit a completion script to stdout.
 
-    Catalogue and endpoint names are pulled from the active ``xmatch.yaml``
-    so ``xmatch match <TAB>``, ``xmatch describe <TAB>``, and
-    ``xmatch discover <TAB>`` complete against the user's *actual*
+    Catalogue and endpoint names are pulled from the active ``xmatcher.yaml``
+    so ``xmatcher match <TAB>``, ``xmatcher describe <TAB>``, and
+    ``xmatcher discover <TAB>`` complete against the user's *actual*
     catalogue set.  When the config can't be loaded (:func:`CrossMatch`
     raises on a missing/broken file), the emitters fall back to a
     short hardcoded list so completion is never broken.
@@ -2175,10 +2179,10 @@ def _split_subcommand(argv: Sequence[str]) -> tuple[str | None, list[str]]:
 
     Returns ``(keyword, remaining)`` where ``remaining`` is ``argv`` with
     the located keyword removed and any leading flag-only tokens kept (so
-    ``xmatch -v list`` becomes ``("list", ["-v"])``).
+    ``xmatcher -v list`` becomes ``("list", ["-v"])``).
 
     Flag tokens are skipped while looking for the keyword — so
-    ``xmatch --no-color describe gaia`` is correctly recognised as
+    ``xmatcher --no-color describe gaia`` is correctly recognised as
     ``describe`` with remaining ``["--no-color", "gaia"]``.
 
     Returns ``(None, list(argv))`` when no keyword is found, so callers
@@ -2203,7 +2207,7 @@ def _split_subcommand(argv: Sequence[str]) -> tuple[str | None, list[str]]:
 
 
 def _load_bundled_config() -> tuple[Path, dict[str, Any]]:
-    """Load the bundled ``xmatch.yaml`` that ships with the package.
+    """Load the bundled ``xmatcher.yaml`` that ships with the package.
 
     This is the *baseline* used by :func:`_run_doctor` to detect drift in the
     user's active config.  We resolve it via ``importlib.resources`` so the
@@ -2212,14 +2216,14 @@ def _load_bundled_config() -> tuple[Path, dict[str, Any]]:
     """
     from importlib.resources import files
 
-    bundled_path = Path(str(files("xmatch") / "xmatch.yaml"))
+    bundled_path = Path(str(files("xmatcher") / "xmatcher.yaml"))
     try:
         with open(bundled_path) as fh:
             data = yaml.safe_load(fh)
     except (OSError, yaml.YAMLError) as exc:
-        raise ConfigError(f"Could not read bundled xmatch.yaml: {exc}") from exc
+        raise ConfigError(f"Could not read bundled xmatcher.yaml: {exc}") from exc
     if not isinstance(data, dict):
-        raise ConfigError("Bundled xmatch.yaml is not a YAML mapping.")
+        raise ConfigError("Bundled xmatcher.yaml is not a YAML mapping.")
     return bundled_path, data
 
 
@@ -2238,7 +2242,7 @@ def _normalise_for_compare(value: Any) -> Any:
       common false-positive source.
     """
     if isinstance(value, list):
-        # Tuples are not permitted in xmatch.yaml so a list is unambiguous.
+        # Tuples are not permitted in xmatcher.yaml so a list is unambiguous.
         return frozenset(_normalise_for_compare(v) for v in value)
     if isinstance(value, int) and not isinstance(value, bool):
         return float(value)
@@ -2431,14 +2435,14 @@ def _emit_doctor_human(
         marker = "[strict] " if strict and rc == 0 else ""
         verb = "drift" if rc else "matches baseline"
         sys.stdout.write(
-            f"xmatch doctor: {n_outdated} outdated, "
+            f"xmatcher doctor: {n_outdated} outdated, "
             f"{n_alias} alias redirect(s), {n_missing} missing, "
             f"{n_user_only} user-only — {marker}{verb}.\n"
         )
         return rc
 
     # ---- header ---------------------------------------------------
-    console.header("xmatch doctor — configuration drift report")
+    console.header("xmatcher doctor — configuration drift report")
     console.info(
         f"  active config:   {console.cyan(str(active_path) if active_path else '(bundled default)')}"
     )
@@ -2510,12 +2514,12 @@ def _emit_doctor_human(
     n_alias = len(report["alias_redirects"])
     if rc == 0:
         console.info(
-            f"xmatch doctor: {n_outdated} outdated, {n_alias} alias redirect(s), "
+            f"xmatcher doctor: {n_outdated} outdated, {n_alias} alias redirect(s), "
             f"{n_missing} missing, {n_user_only} user-only — matches baseline."
         )
     else:
         console.error(
-            f"xmatch doctor: {n_outdated} outdated, {n_alias} alias redirect(s), "
+            f"xmatcher doctor: {n_outdated} outdated, {n_alias} alias redirect(s), "
             f"{n_missing} missing, {n_user_only} user-only — drift detected."
         )
     return rc
@@ -2558,9 +2562,9 @@ def _emit_doctor_json(
 
 
 def _run_doctor(argv: Sequence[str]) -> int:
-    """Dispatch ``xmatch doctor``: compare active config to bundled baseline.
+    """Dispatch ``xmatcher doctor``: compare active config to bundled baseline.
 
-    Loads the user's active ``xmatch.yaml`` (via :class:`CrossMatch` so the
+    Loads the user's active ``xmatcher.yaml`` (via :class:`CrossMatch` so the
     resolver logic matches every other subcommand) and the bundled yaml via
     :func:`_load_bundled_config`, builds a drift report, then renders it
     either human-readable or JSON based on the flags.
@@ -2582,7 +2586,7 @@ def _run_doctor(argv: Sequence[str]) -> int:
         return 2
 
     # Load the user's active config.  We use CrossMatch directly so the
-    # default-resolution chain (--config > ~/.config/xmatch > bundled) is
+    # default-resolution chain (--config > ~/.config/xmatcher > bundled) is
     # shared with every other subcommand.  Falling back to the bundled
     # config here would be misleading — the user just asked "how does my
     # config differ?" and the answer is "there is no user config".
@@ -2621,18 +2625,18 @@ def _run_doctor(argv: Sequence[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point for the ``xmatch`` console script and ``python -m xmatch``.
+    """Entry point for the ``xmatcher`` console script and ``python -m xmatcher``.
 
     Dispatch rules (in order):
 
-    * ``xmatch --help`` / ``xmatch -h``  → top-level help blurb showing the
+    * ``xmatcher --help`` / ``xmatcher -h``  → top-level help blurb showing the
       subcommands and a few examples (via :func:`_build_top_parser`).
-    * ``xmatch --version``            → handled natively by every parser
+    * ``xmatcher --version``            → handled natively by every parser
       via ``argparse``'s ``action="version"`` (prints version, exits 0).
-    * ``xmatch <subcommand> …``      → dedicated subcommand parser, with
+    * ``xmatcher <subcommand> …``      → dedicated subcommand parser, with
       grouped options and colour-aware output.
     * Anything else                    → defaults to the ``match`` subcommand
-      so ``xmatch cat1 cat2`` works directly without an explicit ``match``
+      so ``xmatcher cat1 cat2`` works directly without an explicit ``match``
       keyword.
     """
     argv_list = list(argv) if argv is not None else sys.argv[1:]

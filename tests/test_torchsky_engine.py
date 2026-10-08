@@ -6,13 +6,13 @@ import numpy as np
 import polars as pl
 import pytest
 
-from xmatch.astro_utils import (
+from xmatcher.astro_utils import (
     propagate_proper_motion_with_jacobian,
     propagate_space_motion_with_jacobian,
 )
-from xmatch.exceptions import CrossMatchError
-from xmatch.matchers import MatchSpec, sky_match
-from xmatch.sources import CatalogueSource
+from xmatcher.exceptions import CrossMatchError
+from xmatcher.matchers import MatchSpec, sky_match
+from xmatcher.sources import CatalogueSource
 
 pytest.importorskip("torch")
 pytest.importorskip("torchsky")

@@ -1,8 +1,8 @@
 """Tiny in-process TAP (UWS async) server for mirror tests, all on 127.0.0.1.
 
 Implements exactly the UWS wire contract pyvo 1.8 uses for
-``submit_job -> run -> fetch_result`` and the query shapes the xmatch
-mirror emits (:mod:`xmatch.mirror._mirror_tap`):
+``submit_job -> run -> fetch_result`` and the query shapes the xmatcher
+mirror emits (:mod:`xmatcher.mirror._mirror_tap`):
 
 * page fetch:  ``SELECT ... FROM t AS <alias> ORDER BY t."KEY" LIMIT n OFFSET m``
 * count probe: ``SELECT COUNT(*) AS n FROM t AS <alias> WHERE t."KEY" >= lo AND t."KEY" <= hi``

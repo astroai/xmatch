@@ -1,4 +1,4 @@
-"""Typed request objects for xmatch crossmatch operations.
+"""Typed request objects for xmatcher crossmatch operations.
 
 The :class:`MatchRequest` dataclass consolidates all match parameters into a
 fully-typed specification. Side-level column overrides are bundled into
@@ -7,7 +7,7 @@ dict twice.
 
 .. code-block:: python
 
-    from xmatch import CrossMatch, MatchRequest, MatchSpec, SideOverrides
+    from xmatcher import CrossMatch, MatchRequest, MatchSpec, SideOverrides
 
     cm = CrossMatch()
     req = MatchRequest(

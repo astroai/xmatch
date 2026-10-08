@@ -1,4 +1,4 @@
-"""xmatch: cross-match astronomical catalogues (local files, remote archives, HATS).
+"""xmatcher: cross-match astronomical catalogues (local files, remote archives, HATS).
 
 Key high-level operations:
 
@@ -40,7 +40,7 @@ from .observations import (
 from .request import MatchRequest, SideOverrides  # noqa: F401
 from .sources import CatalogueSource
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 __all__ = [
     # Main entry points

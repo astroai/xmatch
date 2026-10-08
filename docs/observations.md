@@ -1,6 +1,6 @@
 # Source and measurement releases
 
-`xmatch.observations` builds lazy, source-preserving measurement tables. It
+`xmatcher.observations` builds lazy, source-preserving measurement tables. It
 records supplied conventions and upstream evidence; it does not choose physical
 counterparts, adopt conflicting properties, or infer limits from missing data.
 
@@ -13,8 +13,8 @@ accepted as authoritative IDs.
 
 ```python
 import polars as pl
-from xmatch import CrossMatch
-from xmatch.observations import (
+from xmatcher import CrossMatch
+from xmatcher.observations import (
     normalize_photometry,
     normalize_property_evidence,
     source_inventory,
@@ -73,7 +73,7 @@ manifest = write_observation_release(
 assert verify_observation_release("pilot-release") == manifest
 ```
 
-The same metadata keys work in a catalogue entry of `xmatch.yaml`; no second
+The same metadata keys work in a catalogue entry of `xmatcher.yaml`; no second
 registry is created. Existing catalogue entries without audited photometry
 metadata continue to work for matching. They must receive explicit namespaces
 and mappings before publication as observation releases. Default matching

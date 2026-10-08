@@ -28,8 +28,8 @@ import polars as pl
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
-from xmatch.matchers import MatchSpec, sky_match  # noqa: E402
-from xmatch.sources import CatalogueSource  # noqa: E402
+from xmatcher.matchers import MatchSpec, sky_match  # noqa: E402
+from xmatcher.sources import CatalogueSource  # noqa: E402
 
 
 def _src() -> CatalogueSource:
@@ -160,7 +160,7 @@ def main() -> int:
     if args.chunk_size is not None and args.chunk_size < 1:
         parser.error("--chunk-size must be positive")
 
-    from xmatch import matchers  # noqa: PLC0415
+    from xmatcher import matchers  # noqa: PLC0415
 
     saved_chunk_size = matchers._ND_CHUNK_SIZE
     if args.chunk_size is not None:

@@ -1,9 +1,9 @@
-"""CLI wiring tests for ``xmatch sync`` and the ray-union match route.
+"""CLI wiring tests for ``xmatcher sync`` and the ray-union match route.
 
-* ``xmatch sync NAME --config cfg.yaml --cache-root dir`` mirrors a TAP
+* ``xmatcher sync NAME --config cfg.yaml --cache-root dir`` mirrors a TAP
   catalogue through the real CLI; a second run is a zero-download
   incremental (the fake server records every query).
-* ``xmatch match a.hats b.hats --engine ray-union -o out.hats`` runs the
+* ``xmatcher match a.hats b.hats --engine ray-union -o out.hats`` runs the
   distributed pipeline end to end from the CLI and yields a hats-readable
   joined catalogue.
 * Unknown catalogue handles in ``sync`` exit 1 with an error message.
@@ -17,9 +17,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from xmatch import hats_native, mirror
-from xmatch.cli import main
-from xmatch.sources import CatalogueSource
+from xmatcher import hats_native, mirror
+from xmatcher.cli import main
+from xmatcher.sources import CatalogueSource
 
 from .tap_fake import FakeTAPServer, make_rows
 
@@ -54,7 +54,7 @@ catalogues:
 
 
 def _config_path(tmp_path: Path, tap_url: str) -> Path:
-    cfg = tmp_path / "xmatch.yaml"
+    cfg = tmp_path / "xmatcher.yaml"
     cfg.write_text(_cat_yaml(tap_url))
     return cfg
 
@@ -126,7 +126,7 @@ def _hats_dir(path: Path, name: str, df: pl.DataFrame) -> Path:
     (root / "dataset" / "Norder=0" / "Dir=0").mkdir(parents=True)
     df.write_parquet(root / "dataset" / "Norder=0" / "Dir=0" / "Npix=0.parquet")
     (root / "properties").write_text(
-        "dataproduct_type=object\nobs_collection=xmatch-test\n"
+        "dataproduct_type=object\nobs_collection=xmatcher-test\n"
         "hats_col_ra=ra\nhats_col_dec=dec\nhats_ordering=NESTED\nhats_nrows=%d\n" % df.height
     )
     return root
@@ -192,16 +192,16 @@ def test_cli_match_ray_union_from_local_hats(tmp_path) -> None:
 
 def test_cli_resolves_bare_output_under_platform_root(monkeypatch) -> None:
     """On the platform a bare -o name lands under the output root; explicit
-    paths and off-platform runs are untouched (XMATCH_OUTPUT_ROOT override
+    paths and off-platform runs are untouched (XMATCHER_OUTPUT_ROOT override
     rides through default_output_root)."""
-    from xmatch.cli import _resolve_output_path
+    from xmatcher.cli import _resolve_output_path
 
-    monkeypatch.setattr("xmatch.cli.default_output_root", lambda: "/arc/projects/hats/xmatch")
-    assert _resolve_output_path("full.hats") == "/arc/projects/hats/xmatch/full.hats"
-    assert _resolve_output_path("out.parquet") == "/arc/projects/hats/xmatch/out.parquet"
+    monkeypatch.setattr("xmatcher.cli.default_output_root", lambda: "/arc/projects/hats/xmatcher")
+    assert _resolve_output_path("full.hats") == "/arc/projects/hats/xmatcher/full.hats"
+    assert _resolve_output_path("out.parquet") == "/arc/projects/hats/xmatcher/out.parquet"
     assert _resolve_output_path("/abs/full.hats") == "/abs/full.hats"
     assert _resolve_output_path("sub/full.hats") == "sub/full.hats"
     assert _resolve_output_path(None) is None
 
-    monkeypatch.setattr("xmatch.cli.default_output_root", lambda: None)
+    monkeypatch.setattr("xmatcher.cli.default_output_root", lambda: None)
     assert _resolve_output_path("full.hats") == "full.hats"

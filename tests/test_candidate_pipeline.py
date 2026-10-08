@@ -5,12 +5,12 @@ import math
 import polars as pl
 import pytest
 
-from xmatch.candidates import (
+from xmatcher.candidates import (
     normalize_candidate_hypotheses,
     verify_candidate_release,
     write_candidate_release,
 )
-from xmatch.sources import CatalogueSource
+from xmatcher.sources import CatalogueSource
 
 
 def _source(name, ra, dec, *, ids=None, **metadata):
@@ -222,8 +222,8 @@ def test_hypotheses_orient_pairs_and_do_not_compete_between_surveys():
 
 
 def test_frame_overrides_reach_typed_and_params_matching():
-    from xmatch import CrossMatch, MatchRequest, SideOverrides
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher import CrossMatch, MatchRequest, SideOverrides
+    from xmatcher.exceptions import CrossMatchError
 
     frame = pl.DataFrame({"id": [1], "ra": [10.0], "dec": [0.0]})
     with pytest.raises(CrossMatchError, match="frame"):
@@ -242,8 +242,8 @@ def test_frame_overrides_reach_typed_and_params_matching():
 
 @pytest.mark.parametrize("motion", [{"target_epoch": 2016.0}, {"pm_prior": True}])
 def test_distributed_union_rejects_unimplemented_motion(tmp_path, motion):
-    from xmatch import CrossMatch
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher import CrossMatch
+    from xmatcher.exceptions import CrossMatchError
 
     frame = pl.DataFrame({"id": [1], "ra": [10.0], "dec": [0.0]})
     with pytest.raises(CrossMatchError, match="ray-union.*motion"):
@@ -257,8 +257,8 @@ def test_distributed_union_rejects_unimplemented_motion(tmp_path, motion):
 
 
 def test_distributed_entry_point_rejects_mixed_frames(tmp_path):
-    from xmatch.exceptions import CrossMatchError
-    from xmatch.ray_union import ray_union_match
+    from xmatcher.exceptions import CrossMatchError
+    from xmatcher.ray_union import ray_union_match
 
     with pytest.raises(CrossMatchError, match="frame"):
         ray_union_match(
@@ -276,7 +276,7 @@ def test_candidate_validation_failure_does_not_publish(tmp_path, monkeypatch):
     def reject(_):
         raise ValueError("invalid proposed release")
 
-    monkeypatch.setattr("xmatch.candidates.verify_candidate_release", reject)
+    monkeypatch.setattr("xmatcher.candidates.verify_candidate_release", reject)
     with pytest.raises(ValueError, match="invalid proposed release"):
         write_candidate_release(tmp_path / "release", [_source("one", [0.0], [0.0])])
     assert not (tmp_path / "release").exists()
@@ -284,7 +284,7 @@ def test_candidate_validation_failure_does_not_publish(tmp_path, monkeypatch):
 
 
 def test_forced_spill_aligns_epochs_before_partitioning(tmp_path):
-    from xmatch import CrossMatch, MatchRequest, MatchSpec, SideOverrides
+    from xmatcher import CrossMatch, MatchRequest, MatchSpec, SideOverrides
 
     # A high-motion star crosses an RA partition boundary and the seam.
     left = pl.DataFrame(
@@ -316,8 +316,8 @@ def test_forced_spill_aligns_epochs_before_partitioning(tmp_path):
 
 
 def test_target_epoch_spill_rejects_missing_motion_instead_of_assuming_stationary(tmp_path):
-    from xmatch import CrossMatch, MatchRequest, MatchSpec, SideOverrides
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher import CrossMatch, MatchRequest, MatchSpec, SideOverrides
+    from xmatcher.exceptions import CrossMatchError
 
     path = tmp_path / "input.parquet"
     pl.DataFrame({"id": [1], "ra": [10.0], "dec": [0.0], "pad": ["x" * 2000]}).write_parquet(path)

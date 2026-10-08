@@ -64,7 +64,7 @@ def download_from_cds(
     except ImportError as exc:
         raise CrossMatchError(
             "CDS/VizieR access requires the optional 'astroquery' package. "
-            "Install it with `pip install 'xmatch[cds]'` or `pip install astroquery`."
+            "Install it with `pip install 'xmatcher[cds]'` or `pip install astroquery`."
         ) from exc
 
     vizier = Vizier(columns=list(columns or src.default_columns or ["*"]), row_limit=-1)
@@ -124,7 +124,7 @@ def cds_xmatch_local_remote(
     except ImportError as exc:
         raise CrossMatchError(
             "CDS XMatch access requires the optional 'astroquery' package. "
-            "Install it with `pip install 'xmatch[cds]'` or `pip install astroquery`."
+            "Install it with `pip install 'xmatcher[cds]'` or `pip install astroquery`."
         ) from exc
 
     from .io_utils import polars_to_astropy

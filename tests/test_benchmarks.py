@@ -1,6 +1,6 @@
-"""Real-catalogue benchmark suite comparing xmatch matcher engines.
+"""Real-catalogue benchmark suite comparing xmatcher matcher engines.
 
-Runs the three xmatch in-process tiers (astropy, fast/cKDTree, zone/HEALPix)
+Runs the three xmatcher in-process tiers (astropy, fast/cKDTree, zone/HEALPix)
 plus STILTS (when ``--run-stilts`` is passed) against real astronomical
 catalogues.  Measures wall-clock time, match counts, and separation agreement
 between engines.
@@ -25,9 +25,9 @@ import polars as pl
 import pytest
 
 from tests.conftest import BENCH_RESULTS  # shared accumulator
-from xmatch import stilts
-from xmatch.matchers import MatchSpec, sky_match
-from xmatch.sources import CatalogueSource
+from xmatcher import stilts
+from xmatcher.matchers import MatchSpec, sky_match
+from xmatcher.sources import CatalogueSource
 
 # --------------------------------------------------------------------------- #
 # Imports from the real-catalogue test module (tests/ is a package).

@@ -5,8 +5,8 @@ from unittest import mock
 import polars as pl
 import pytest
 
-from xmatch import io_utils
-from xmatch.exceptions import InputError
+from xmatcher import io_utils
+from xmatcher.exceptions import InputError
 
 
 @pytest.fixture
@@ -199,7 +199,7 @@ def test_write_frame_hats_suffix_routes_to_write_hats(tmp_path):
     sample = pl.DataFrame({"ra": [10.0, 20.0], "dec": [5.0, 10.0], "mag": [10.0, 12.0]})
     hats_dir = tmp_path / "result.hats"
 
-    with mock.patch("xmatch.io_utils.write_hats") as mock_write_hats:
+    with mock.patch("xmatcher.io_utils.write_hats") as mock_write_hats:
         io_utils.write_frame(sample, hats_dir)
         mock_write_hats.assert_called_once()
         _, kwargs = mock_write_hats.call_args
@@ -213,7 +213,7 @@ def test_write_frame_hats_respects_threshold(tmp_path):
     sample = pl.DataFrame({"ra": [10.0], "dec": [5.0]})
     hats_dir = tmp_path / "big.hats"
 
-    with mock.patch("xmatch.io_utils.write_hats") as mock_write_hats:
+    with mock.patch("xmatcher.io_utils.write_hats") as mock_write_hats:
         io_utils.write_frame(sample, hats_dir, hats_threshold=42_000)
         _, kwargs = mock_write_hats.call_args
         assert kwargs["threshold"] == 42_000
@@ -224,7 +224,7 @@ def test_write_frame_hats_custom_ra_dec(tmp_path):
     sample = pl.DataFrame({"alpha": [10.0], "delta": [5.0]})
     hats_dir = tmp_path / "custom.hats"
 
-    with mock.patch("xmatch.io_utils.write_hats") as mock_write_hats:
+    with mock.patch("xmatcher.io_utils.write_hats") as mock_write_hats:
         io_utils.write_frame(
             sample,
             hats_dir,
@@ -266,7 +266,7 @@ def test_write_hats_collects_lazy_frame(tmp_path):
 
     with (
         mock.patch.dict("sys.modules", {"cdshealpix": mock.MagicMock()}),
-        mock.patch("xmatch.mirror._write_hats_native") as mock_native,
+        mock.patch("xmatcher.mirror._write_hats_native") as mock_native,
     ):
         io_utils.write_hats(lf, hats_dir)
         call_args, kwargs = mock_native.call_args

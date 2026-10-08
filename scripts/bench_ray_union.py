@@ -22,9 +22,9 @@ import polars as pl
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from xmatch import hats_native, ray_union  # noqa: E402
-from xmatch.mirror import _write_hats_native  # noqa: E402
-from xmatch.sources import CatalogueSource  # noqa: E402
+from xmatcher import hats_native, ray_union  # noqa: E402
+from xmatcher.mirror import _write_hats_native  # noqa: E402
+from xmatcher.sources import CatalogueSource  # noqa: E402
 
 
 def main() -> None:
@@ -61,7 +61,7 @@ def main() -> None:
         )
     durations = []
     try:
-        with tempfile.TemporaryDirectory(prefix="xmatch-union-bench-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="xmatcher-union-bench-") as temporary:
             root = args.work_dir or Path(temporary)
             root.mkdir(parents=True, exist_ok=True)
             # A unique run directory preserves any caller-owned work-dir data.

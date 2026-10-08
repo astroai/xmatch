@@ -2,7 +2,7 @@
 
 The oracle re-implements the documented union semantics from scratch
 (pairwise separations + star-shaped row-set enumeration), so a mismatch
-means :mod:`xmatch.ray_union` drifted from its spec rather than from
+means :mod:`xmatcher.ray_union` drifted from its spec rather than from
 itself.  All inputs are tiny deterministic frames; ``ray.init`` runs
 once per test through :func:`ray_union_match`.
 """
@@ -17,8 +17,8 @@ import numpy as np
 import polars as pl
 import pytest
 
-from xmatch import hats_native, matchers, ray_union
-from xmatch.sources import CatalogueSource
+from xmatcher import hats_native, matchers, ray_union
+from xmatcher.sources import CatalogueSource
 
 HAVE_RAY = importlib.util.find_spec("ray") is not None
 
@@ -33,7 +33,7 @@ def _catalogue(path: Path, name: str, df: pl.DataFrame) -> CatalogueSource:
     (path / "dataset" / "Norder=0" / "Dir=0").mkdir(parents=True, exist_ok=True)
     df.write_parquet(path / "dataset" / "Norder=0" / "Dir=0" / "Npix=0.parquet")
     (path / "properties").write_text(
-        "dataproduct_type=object\nobs_collection=xmatch-test\n"
+        "dataproduct_type=object\nobs_collection=xmatcher-test\n"
         "hats_col_ra=ra\nhats_col_dec=dec\nhats_ordering=NESTED\nhats_nrows=%d\n" % df.height
     )
     return CatalogueSource(name=name, is_local=True, path=path, ra_column="ra", dec_column="dec")
@@ -446,7 +446,7 @@ def test_cone_ranges_cover_parent_pixels_and_all_children() -> None:
 
 def _tiled_catalogue(root: Path, name: str, df: pl.DataFrame, threshold: int) -> CatalogueSource:
     """Local HATS catalogue with real (threshold-tiled) partitions."""
-    from xmatch.mirror import _write_hats_native
+    from xmatcher.mirror import _write_hats_native
 
     _write_hats_native(df, root, ra_column="ra", dec_column="dec", threshold=threshold)
     return CatalogueSource(name=name, is_local=True, path=root, ra_column="ra", dec_column="dec")
@@ -606,7 +606,7 @@ def test_driver_progress_state_and_run_log(tmp_path: Path) -> None:
     """A real (tiny) ray-union leaves a progress trail + audit log."""
     import json as _json
 
-    from xmatch import CrossMatch
+    from xmatcher import CrossMatch
 
     a = _catalogue(
         tmp_path / "a",
@@ -683,7 +683,7 @@ def _pixeled_catalogue(path: Path, name: str, df: pl.DataFrame, order: int) -> C
         rel.parent.mkdir(parents=True, exist_ok=True)
         sub.write_parquet(rel)
     (path / "properties").write_text(
-        "dataproduct_type=object\nobs_collection=xmatch-test\n"
+        "dataproduct_type=object\nobs_collection=xmatcher-test\n"
         "hats_col_ra=ra\nhats_col_dec=dec\nhats_ordering=NESTED\n"
         "hats_nrows=%d\nhats_max_depth=%d\n" % (df.height, order)
     )
@@ -712,7 +712,7 @@ def _ring_catalogue(path: Path, name: str, df: pl.DataFrame, order: int) -> Cata
         rel.parent.mkdir(parents=True, exist_ok=True)
         sub.write_parquet(rel)
     (path / "properties").write_text(
-        "dataproduct_type=object\nobs_collection=xmatch-test\n"
+        "dataproduct_type=object\nobs_collection=xmatcher-test\n"
         "hats_col_ra=ra\nhats_col_dec=dec\nhats_ordering=RING\n"
         "hats_nrows=%d\nhats_max_depth=%d\n" % (df.height, order)
     )
@@ -726,7 +726,7 @@ def test_union_mixed_orders_oracle(tmp_path: Path) -> None:
     deeper catalogues' pixels are searched with the full radius and every
     in-radius pair is found whatever the input tilings.
     """
-    from xmatch.storage import open_storage
+    from xmatcher.storage import open_storage
 
     a = pl.DataFrame(
         {
@@ -922,7 +922,7 @@ def _deep_pixel_catalogue(root: Path, name: str, df: pl.DataFrame, order: int) -
         rel.parent.mkdir(parents=True, exist_ok=True)
         sub.write_parquet(rel)
     (root / "properties").write_text(
-        "dataproduct_type=object\nobs_collection=xmatch-test\n"
+        "dataproduct_type=object\nobs_collection=xmatcher-test\n"
         "hats_col_ra=ra\nhats_col_dec=dec\nhats_ordering=NESTED\n"
         "hats_nrows=%d\nhats_max_depth=%d\n" % (df.height, order)
     )
@@ -1118,7 +1118,7 @@ def test_resume_invalidates_changed_input_and_preserves_existing_ray(tmp_path):
 
 
 def test_resume_rejects_missing_or_corrupt_fingerprint(tmp_path):
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher.exceptions import CrossMatchError
 
     a = _pixeled_catalogue(tmp_path / "a", "a", pl.DataFrame({"ra": [42.0], "dec": [5.0]}), 2)
     out = tmp_path / "out"

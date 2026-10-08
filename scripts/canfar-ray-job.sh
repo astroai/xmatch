@@ -1,7 +1,7 @@
 #!/bin/sh
 # scripts/canfar-ray-job.sh
 #
-# Run an xmatch command as a Ray Job on the CANFAR science platform
+# Run an xmatcher command as a Ray Job on the CANFAR science platform
 # (https://www.opencadc.org/canfar/ — VOSpace + Skaha container sessions;
 # there is no Slurm).  Ray runs as a contributed `ray-manager` Skaha
 # session (the head) plus headless `ray-worker` sessions (the workers);
@@ -17,19 +17,19 @@
 #
 # The ray-manager session itself is started from the AstroAI hub ("Start
 # batch compute") or with:
-#   canfar create --cpu 2 --memory 8 --name xmatch-ray contributed images.canfar.net/astroai/ray-manager:<tag>
+#   canfar create --cpu 2 --memory 8 --name xmatcher-ray contributed images.canfar.net/astroai/ray-manager:<tag>
 # (or pass --create-manager IMAGE to have this script create it first).
 #
 # Usage (from any AstroAI/CANFAR session with the platform CLIs on PATH):
 #   scripts/canfar-ray-job.sh \
-#       --command "pixi run python scripts/bench_ray_union.py --rows 100000 --repeat 1 --warmup 0 --work-dir /arc/projects/hats/xmatch-bench-unique"
+#       --command "pixi run python scripts/bench_ray_union.py --rows 100000 --repeat 1 --warmup 0 --work-dir /arc/projects/hats/xmatcher-bench-unique"
 #
 # IMPORTANT — the union cache must be visible to every worker pod.  On the
 # platform the defaults are already shared: the mirrored-HATS cache root is
 # /arc/projects/hats (inputs) and bare relative outputs land in
-# /arc/projects/hats/xmatch — never a pod-local home.  Override with
-# `--env XMATCH_CACHE_ROOT=vos:hats` (VOSpace root) or XMATCH_OUTPUT_ROOT=...
-# and `-o vos:hats/xmatch/name.hats` works too (staged locally, uploaded;
+# /arc/projects/hats/xmatcher — never a pod-local home.  Override with
+# `--env XMATCHER_CACHE_ROOT=vos:hats` (VOSpace root) or XMATCHER_OUTPUT_ROOT=...
+# and `-o vos:hats/xmatcher/name.hats` works too (staged locally, uploaded;
 # resume pulls the remote tree back first).  Bare output names share the
 # root: use a distinct name per run — a rerun with different parameters
 # wipes the previous run's stale chunks.  CANFAR `/scratch` is per-pod and
@@ -53,7 +53,7 @@
 #                        land in the repo.  From a laptop, self-locate:
 #                        --command "bash -lc 'cd /arc/... && pixi run ...'"
 #   --create-manager IMG create a 2-CPU/8-GiB ray-manager session first
-#   --manager-name NAME  manager session name (default xmatch-ray)
+#   --manager-name NAME  manager session name (default xmatcher-ray)
 #   --manager URL        manager connect URL (cluster start --address)
 #   --address URL        Jobs API URL (skip cluster start)
 #   --dry-run            print exactly what would run; runs nothing
@@ -69,7 +69,7 @@ CMD=""
 ENVS=""
 CWD=""
 CREATE_MANAGER=""
-MGR_NAME="xmatch-ray"
+MGR_NAME="xmatcher-ray"
 MANAGER=""
 ADDRESS=""
 DRY_RUN=0

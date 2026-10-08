@@ -11,11 +11,11 @@ import polars as pl
 import pytest
 from astropy.coordinates import SkyCoord
 
-from xmatch import CrossMatch
-from xmatch.exceptions import CrossMatchError
-from xmatch.matchers import MatchSpec
-from xmatch.request import MatchRequest
-from xmatch.sources import CatalogueSource
+from xmatcher import CrossMatch
+from xmatcher.exceptions import CrossMatchError
+from xmatcher.matchers import MatchSpec
+from xmatcher.request import MatchRequest
+from xmatcher.sources import CatalogueSource
 
 
 @pytest.fixture
@@ -29,15 +29,15 @@ def _isolated_cache(monkeypatch, tmp_path):
 
     The pairwise cone-download path now serves from a mirrored HATS copy
     when one exists; without this fixture a mirror on the developer's
-    machine (~/.cache/xmatch) would silently divert the mocked-download
+    machine (~/.cache/xmatcher) would silently divert the mocked-download
     tests.
     """
-    monkeypatch.setenv("XMATCH_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setenv("XMATCHER_CACHE_ROOT", str(tmp_path / "cache"))
 
 
 def test_local_vs_remote_tap_downloads_then_matches(cm, monkeypatch):
     """A local frame vs a TAP catalogue: download is mocked, match runs locally."""
-    import xmatch.remote_tap as rt
+    import xmatcher.remote_tap as rt
 
     def fake_download(src, **kwargs):
         # Returns rows near the local source so a match is found.
@@ -53,7 +53,7 @@ def test_local_vs_remote_tap_downloads_then_matches(cm, monkeypatch):
 
 def test_local_vs_remote_forwards_correct_side_columns(cm, monkeypatch):
     """columns_2 (remote is side 2) must reach the download, not columns_1."""
-    import xmatch.remote_tap as rt
+    import xmatcher.remote_tap as rt
 
     captured = {}
 
@@ -68,7 +68,7 @@ def test_local_vs_remote_forwards_correct_side_columns(cm, monkeypatch):
 
 
 def test_target_epoch_forces_remote_space_motion_columns(cm, monkeypatch):
-    import xmatch.remote_tap as rt
+    import xmatcher.remote_tap as rt
 
     captured = {}
 
@@ -103,7 +103,7 @@ def test_target_epoch_forces_remote_space_motion_columns(cm, monkeypatch):
 
 
 def test_target_epoch_skyellipse_forces_remote_astrometric_covariance(cm, monkeypatch):
-    import xmatch.remote_tap as rt
+    import xmatcher.remote_tap as rt
 
     captured = {}
 
@@ -133,7 +133,7 @@ def test_target_epoch_skyellipse_forces_remote_astrometric_covariance(cm, monkey
 
 
 def test_target_epoch_bypasses_unpropagated_tap_self_join(cm, monkeypatch):
-    import xmatch.remote_tap as rt
+    import xmatcher.remote_tap as rt
 
     src1 = cm.resolve_source("gaia_esa", {})
     src2 = cm.resolve_source("gaia_esa", {})
@@ -168,7 +168,7 @@ def test_target_epoch_bypasses_unpropagated_tap_self_join(cm, monkeypatch):
 
 
 def test_target_epoch_bypasses_unpropagated_cds_xmatch(cm, monkeypatch):
-    import xmatch.remote_cds as rc
+    import xmatcher.remote_cds as rc
 
     local = cm.resolve_source(pl.DataFrame({"ra": [10.0], "dec": [5.0]}), {})
     remote = cm.resolve_source("gaia_cds", {})
@@ -203,7 +203,7 @@ def test_target_epoch_bypasses_unpropagated_cds_xmatch(cm, monkeypatch):
 
 
 def test_download_remote_requires_region_when_no_local(cm):
-    from xmatch.exceptions import CrossMatchError
+    from xmatcher.exceptions import CrossMatchError
 
     src = cm.resolve_source("gaia_esa", {})
     req = MatchRequest("gaia", "gaia")  # no ra/dec/radius set
@@ -212,7 +212,7 @@ def test_download_remote_requires_region_when_no_local(cm):
 
 
 def test_datalab_cone_box_is_a_conservative_spherical_bound():
-    from xmatch.remote_tap import _cone_predicate
+    from xmatcher.remote_tap import _cone_predicate
 
     # Independent spherical geometry check: this source is inside the 1 deg
     # cone despite being 180 deg away in RA because the cone reaches the pole.
@@ -253,7 +253,7 @@ def test_datalab_cone_box_is_a_conservative_spherical_bound():
     ],
 )
 def test_tap_download_rejects_partial_or_invalid_cone_before_network(monkeypatch, region):
-    import xmatch.remote_tap as rt
+    import xmatcher.remote_tap as rt
 
     def no_network(*args, **kwargs):
         raise AssertionError("invalid cone input reached the TAP service")
@@ -282,7 +282,7 @@ def test_tap_download_rejects_partial_or_invalid_cone_before_network(monkeypatch
     ],
 )
 def test_cds_download_rejects_invalid_region_before_network(region):
-    import xmatch.remote_cds as rc
+    import xmatcher.remote_cds as rc
 
     src = CatalogueSource(
         name="viz",
@@ -297,7 +297,7 @@ def test_cds_download_rejects_invalid_region_before_network(region):
 def test_cds_download_normalizes_ra_before_query(monkeypatch):
     from astropy.table import Table
 
-    import xmatch.remote_cds as rc
+    import xmatcher.remote_cds as rc
 
     captured = {}
 
@@ -330,7 +330,7 @@ def test_cds_download_normalizes_ra_before_query(monkeypatch):
 def test_tap_self_join_builds_query_and_parses(monkeypatch):
     from astropy.table import Table
 
-    import xmatch.remote_tap as rt
+    import xmatcher.remote_tap as rt
 
     captured = {}
 
@@ -374,7 +374,7 @@ def test_cds_xmatch_local_remote_rejoins_on_surrogate_id(monkeypatch):
     """CDS XMatch result is joined back to the full local rows via a surrogate id."""
     from astropy.table import Table
 
-    import xmatch.remote_cds as rc
+    import xmatcher.remote_cds as rc
 
     class FakeXMatch:
         def query(self, cat1, cat2, max_distance, colRA1, colDec1):
@@ -411,7 +411,7 @@ def test_cds_xmatch_local_remote_rejoins_on_surrogate_id(monkeypatch):
     ],
 )
 def test_tap_self_join_rejects_unsupported_semantics_before_network(monkeypatch, spec):
-    import xmatch.remote_tap as rt
+    import xmatcher.remote_tap as rt
 
     def no_network(*args, **kwargs):
         raise AssertionError("unsupported TAP self-join reached the service")
@@ -430,7 +430,7 @@ def test_tap_self_join_rejects_unsupported_semantics_before_network(monkeypatch,
 
 
 def test_cds_xmatch_rejects_unsupported_semantics_before_importing_optional_client():
-    import xmatch.remote_cds as rc
+    import xmatcher.remote_cds as rc
 
     local_src = CatalogueSource(name="local", is_local=True, ra_column="ra", dec_column="dec")
     remote_src = CatalogueSource(name="viz", is_local=False, access_identifier="I/355/gaiadr3")
@@ -444,7 +444,7 @@ def test_cds_xmatch_rejects_unsupported_semantics_before_importing_optional_clie
 
 
 def test_tap_without_projection_selects_all_columns():
-    from xmatch.remote_tap import _select_columns
+    from xmatcher.remote_tap import _select_columns
 
     src = CatalogueSource(
         name="tap",
@@ -459,7 +459,7 @@ def test_tap_without_projection_selects_all_columns():
 
 def _write_fake_mirror(cm, tmp_path, rows):
     """Build a minimal mirrored HATS copy for ``gaia_cds`` under tmp_path cache."""
-    from xmatch.mirror import _safe_name, _version_dir
+    from xmatcher.mirror import _safe_name, _version_dir
 
     src = cm.resolve_source("gaia_cds", {})
     hats = Path(tmp_path / "cache") / f"{_safe_name(src.name)}/{_version_dir(src)}"
@@ -472,7 +472,7 @@ def _write_fake_mirror(cm, tmp_path, rows):
 def test_mirrored_hats_cone_serves_download_without_tap(cm, monkeypatch, tmp_path):
     """A mirrored HATS copy in the cache serves the pairwise cone download:
     no TAP call happens and rows come from the local partitions."""
-    import xmatch.remote_tap as rt
+    import xmatcher.remote_tap as rt
 
     def _no_tap(*args, **kwargs):
         raise AssertionError("mirrored cone must not hit TAP")
@@ -505,7 +505,7 @@ def test_mirrored_hats_cone_serves_download_without_tap(cm, monkeypatch, tmp_pat
 
 def test_mirrored_cone_falls_back_to_tap_when_column_missing(cm, monkeypatch, tmp_path):
     """Requested columns the mirror does not hold fall back to the live TAP."""
-    import xmatch.remote_tap as rt
+    import xmatcher.remote_tap as rt
 
     captured = {}
 

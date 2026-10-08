@@ -1,9 +1,12 @@
 import json
+import tomllib
+from pathlib import Path
 
 import polars as pl
 import pytest
 
-from xmatch.cli import Progress, main
+import xmatcher
+from xmatcher.cli import Progress, main
 
 
 @pytest.fixture
@@ -21,19 +24,26 @@ def mock_bundled_config(monkeypatch):
 
     import yaml
 
-    import xmatch.cli
+    import xmatcher.cli
 
     def fake_load():
-        return Path("bundled_xmatch.yaml"), yaml.safe_load(_BUNDLED_TEXT)
+        return Path("bundled_xmatcher.yaml"), yaml.safe_load(_BUNDLED_TEXT)
 
-    monkeypatch.setattr(xmatch.cli, "_load_bundled_config", fake_load)
+    monkeypatch.setattr(xmatcher.cli, "_load_bundled_config", fake_load)
 
 
 def test_cli_version(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["--version"])
     assert exc.value.code == 0
-    assert "xmatch" in capsys.readouterr().out
+    out = capsys.readouterr().out.strip()
+    project = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())[
+        "project"
+    ]
+    assert project["name"] == "xmatcher"
+    assert project["scripts"]["xmatcher"] == "xmatcher.cli:main"
+    assert xmatcher.__version__ == project["version"]
+    assert out == f"xmatcher {project['version']}"
 
 
 def test_cli_requires_two_catalogues(capsys):
@@ -90,7 +100,7 @@ def test_cli_describe_no_dangling_whitespace_without_suggestion(capsys):
 
 # ---------------------------------------------------------------- did you mean?
 def test_cli_describe_suggests_close_match_for_typo(capsys):
-    """`xmatch describe typo` must append a "Did you mean?" hint."""
+    """`xmatcher describe typo` must append a "Did you mean?" hint."""
     assert main(["describe", "gaiaesa"]) == 1
     err = capsys.readouterr().err
     assert "Catalogue 'gaiaesa' not found." in err
@@ -99,7 +109,7 @@ def test_cli_describe_suggests_close_match_for_typo(capsys):
 
 
 def test_cli_suggests_for_unknown_catalogue_argument(capsys):
-    """Top-level `xmatch typo1 typo2` must surface the suggestion on stderr."""
+    """Top-level `xmatcher typo1 typo2` must surface the suggestion on stderr."""
     assert main(["gaia_esa_typo", "totally_xyz_qq"]) == 1
     err = capsys.readouterr().err
     assert "Error" in err
@@ -109,7 +119,7 @@ def test_cli_suggests_for_unknown_catalogue_argument(capsys):
 
 
 def test_cli_multi_three_way(local_files, capsys):
-    """`xmatch a.csv b.parquet a.csv` — 3-way crossmatch via CLI."""
+    """`xmatcher a.csv b.parquet a.csv` — 3-way crossmatch via CLI."""
     a, b = local_files
     assert main([str(a), str(b), str(a), "-r", "1.0"]) == 0
     out = capsys.readouterr().out
@@ -125,7 +135,7 @@ def test_cli_requires_at_least_two_catalogues(capsys):
 
 # ----------------------------------------------------------------- modern UX
 def test_cli_subcommand_match_equivalent_to_shorthand(local_files, capsys):
-    """`xmatch match cat1 cat2` must produce the same result as `xmatch cat1 cat2`."""
+    """`xmatcher match cat1 cat2` must produce the same result as `xmatcher cat1 cat2`."""
     a, b = local_files
     rc = main(["match", str(a), str(b), "-r", "1.0"])
     assert rc == 0
@@ -135,7 +145,7 @@ def test_cli_subcommand_match_equivalent_to_shorthand(local_files, capsys):
 
 
 def test_cli_subcommand_describe_unknown_returns_error(capsys):
-    """`xmatch describe typo` surfaces a "Did you mean" hint on stderr, rc=1."""
+    """`xmatcher describe typo` surfaces a "Did you mean" hint on stderr, rc=1."""
     rc = main(["describe", "gaiaesa"])
     assert rc == 1
     err = capsys.readouterr().err
@@ -145,15 +155,15 @@ def test_cli_subcommand_describe_unknown_returns_error(capsys):
 
 
 def test_cli_version_via_subcommand(capsys):
-    """`xmatch match --version` should print "xmatch" and exit 0."""
+    """`xmatcher match --version` should print "xmatcher" and exit 0."""
     with pytest.raises(SystemExit) as exc:
         main(["match", "--version"])
     assert exc.value.code == 0
-    assert "xmatch" in capsys.readouterr().out
+    assert "xmatcher" in capsys.readouterr().out
 
 
 def test_cli_top_level_help_lists_subcommands(capsys):
-    """The top-level `xmatch --help` advertises every subcommand."""
+    """The top-level `xmatcher --help` advertises every subcommand."""
     # argparse exits on -h/--help; capture stdout and verify.
     with pytest.raises(SystemExit) as exc:
         main(["--help"])
@@ -164,17 +174,17 @@ def test_cli_top_level_help_lists_subcommands(capsys):
 
 
 def test_cli_top_level_help_includes_examples(capsys):
-    """The top-level `xmatch --help` shows the example block."""
+    """The top-level `xmatcher --help` shows the example block."""
     with pytest.raises(SystemExit) as exc:
         main(["--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "Examples:" in out
-    assert "xmatch a.parquet b.csv" in out
+    assert "xmatcher a.parquet b.csv" in out
 
 
 def test_cli_match_help_uses_grouped_sections(capsys):
-    """`xmatch match --help` should show the grouped option headings."""
+    """`xmatcher match --help` should show the grouped option headings."""
     with pytest.raises(SystemExit) as exc:
         main(["match", "--help"])
     assert exc.value.code == 0
@@ -195,9 +205,9 @@ def test_cli_match_help_uses_grouped_sections(capsys):
 
 
 def test_cli_no_color_flag_disables(capsys, monkeypatch):
-    """`xmatch --no-color list` writes plain text without ANSI escape codes."""
+    """`xmatcher --no-color list` writes plain text without ANSI escape codes."""
     monkeypatch.delenv("NO_COLOR", raising=False)
-    monkeypatch.delenv("XMATCH_NO_COLOR", raising=False)
+    monkeypatch.delenv("XMATCHER_NO_COLOR", raising=False)
     # Even if running under a TTY, --no-color wins.
     rc = main(["--no-color", "list"])
     assert rc == 0
@@ -208,7 +218,7 @@ def test_cli_no_color_flag_disables(capsys, monkeypatch):
 def test_cli_no_color_env_var_disables(monkeypatch, capsys):
     """Setting NO_COLOR=1 disables colour even on a TTY-mocked stream."""
     monkeypatch.setenv("NO_COLOR", "1")
-    monkeypatch.delenv("XMATCH_NO_COLOR", raising=False)
+    monkeypatch.delenv("XMATCHER_NO_COLOR", raising=False)
     rc = main(["list"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -225,14 +235,14 @@ def test_cli_color_auto_disabled_under_capsys(capsys):
 
 
 def test_cli_global_flag_before_subcommand(capsys):
-    """`xmatch -v list` should still work: '-v' is consumed by `_add_global_options`."""
+    """`xmatcher -v list` should still work: '-v' is consumed by `_add_global_options`."""
     rc = main(["-v", "list"])
     assert rc == 0
     assert "gaia" in capsys.readouterr().out
 
 
 def test_cli_global_flag_after_subcommand(capsys):
-    """`xmatch list --no-color` should also work (subparser inherits globals)."""
+    """`xmatcher list --no-color` should also work (subparser inherits globals)."""
     rc = main(["list", "--no-color"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -300,7 +310,7 @@ def test_progress_update_replaces_status(capfd):
     assert "second" in err
 
 
-# Minimal xmatch.yaml fixture used by every doctor test.  By design this
+# Minimal xmatcher.yaml fixture used by every doctor test.  By design this
 # is *not* the entire bundled config; we only need enough to exercise the
 # diff logic.  ``--config`` lets each test point at its own copy with a
 # single ``.replace()`` mutation to introduce drift.
@@ -355,75 +365,75 @@ _BUNDLED_TEXT = (
 
 
 def _write_doctor_fixture(tmp_path, body: str) -> str:
-    """Write a test xmatch.yaml under tmp_path and return its path."""
-    fixture = tmp_path / "xmatch_fixture_doctor.yaml"
+    """Write a test xmatcher.yaml under tmp_path and return its path."""
+    fixture = tmp_path / "xmatcher_fixture_doctor.yaml"
     fixture.write_text(body)
     return str(fixture)
 
 
 def test_cli_completion_bash_emits_script(capsys):
-    """`xmatch completion bash` writes a usable bash completion script."""
+    """`xmatcher completion bash` writes a usable bash completion script."""
     rc = main(["completion", "bash"])
     assert rc == 0
     out = capsys.readouterr().out
     # Header / registration:
-    assert "complete -F _xmatch xmatch" in out
-    assert "_xmatch()" in out
+    assert "complete -F _xmatcher xmatcher" in out
+    assert "_xmatcher()" in out
     # Embedded catalogue list (must include at least one real name):
-    assert "_xmatch_catalogues=" in out
+    assert "_xmatcher_catalogues=" in out
     assert "gaia" in out, "bundled gaia_esa catalogue should be embedded"
     # All subcommands advertised:
     assert "match list describe discover search adopt completion" in out
     # compgen against the catalogue var:
-    assert 'compgen -W "${_xmatch_catalogues[*]}"' in out
+    assert 'compgen -W "${_xmatcher_catalogues[*]}"' in out
 
 
 def test_cli_completion_zsh_emits_script(capsys):
-    """`xmatch completion zsh` writes a `#compdef`-driven zsh script."""
+    """`xmatcher completion zsh` writes a `#compdef`-driven zsh script."""
     rc = main(["completion", "zsh"])
     assert rc == 0
     out = capsys.readouterr().out
     # Standard zsh markers + real catalogue name:
-    assert "#compdef xmatch" in out
-    assert "_xmatch_catalogues=" in out
+    assert "#compdef xmatcher" in out
+    assert "_xmatcher_catalogues=" in out
     assert "gaia" in out
     # All subcommands advertised with descriptions:
     for sub in ("match", "list", "describe", "discover", "search", "completion"):
         assert sub in out, f"zsh completion missing subcommand {sub!r}"
     # Uses _describe (the modern zsh helper):
     assert "_describe" in out
-    assert "_xmatch_subcommands" in out
+    assert "_xmatcher_subcommands" in out
 
 
 def test_cli_completion_fish_emits_script(capsys):
-    """`xmatch completion fish` writes a fish script with `complete -c xmatch`."""
+    """`xmatcher completion fish` writes a fish script with `complete -c xmatcher`."""
     rc = main(["completion", "fish"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "complete -c xmatch" in out
+    assert "complete -c xmatcher" in out
     assert "gaia" in out, "fish script should embed real catalogue names"
     # All subcommands advertised:
     assert "match list describe discover search adopt completion" in out
     # Fish predicates for each subcommand family:
-    assert "_xmatch_needs_catalogue" in out
-    assert "_xmatch_needs_endpoint" in out
-    assert "_xmatch_needs_shell" in out
+    assert "_xmatcher_needs_catalogue" in out
+    assert "_xmatcher_needs_endpoint" in out
+    assert "_xmatcher_needs_shell" in out
 
 
 def test_cli_completion_unsupported_shell_exits_2():
-    """`xmatch completion powershell` is rejected by argparse (SystemExit 2)."""
+    """`xmatcher completion powershell` is rejected by argparse (SystemExit 2)."""
     with pytest.raises(SystemExit) as exc:
         main(["completion", "powershell"])
     assert exc.value.code == 2
 
 
 def test_cli_completion_help_supported_via_subcommand(capsys):
-    """`xmatch completion --help` prints the completion sub-command help."""
+    """`xmatcher completion --help` prints the completion sub-command help."""
     with pytest.raises(SystemExit) as exc:
         main(["completion", "--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "xmatch completion" in out
+    assert "xmatcher completion" in out
     # All three shells must appear in choices:
     for shell in ("bash", "zsh", "fish"):
         assert shell in out, f"completion --help missing shell {shell!r}"
@@ -432,7 +442,7 @@ def test_cli_completion_help_supported_via_subcommand(capsys):
 
 def test_cli_completion_falls_back_to_default_catalogues_when_config_missing(monkeypatch, capsys):
     """Missing config => catalog loop falls back to a hardcoded list, not crash."""
-    monkeypatch.setenv("XMATCH_NO_COLOR", "1")  # ensure plain output
+    monkeypatch.setenv("XMATCHER_NO_COLOR", "1")  # ensure plain output
     # --config comes AFTER the subcommand keyword so _split_subcommand
     # sees `completion` as the first non-flag token and routes to the
     # completion subparser.
@@ -440,28 +450,28 @@ def test_cli_completion_falls_back_to_default_catalogues_when_config_missing(mon
         [
             "completion",
             "--config",
-            "/tmp/this_yaml_does_not_exist_for_xmatch_7e1a3d.yaml",
+            "/tmp/this_yaml_does_not_exist_for_xmatcher_7e1a3d.yaml",
             "bash",
         ]
     )
     assert rc == 0
     out, err = capsys.readouterr()
     # Fallback list still advertises the common names + a hint to stderr:
-    assert "_xmatch_catalogues=" in out
+    assert "_xmatcher_catalogues=" in out
     assert "gaia" in out
-    assert "complete -F _xmatch xmatch" in out
+    assert "complete -F _xmatcher xmatcher" in out
     assert (
         "Couldn't load config" in err or "fallback" in err.lower()
     )  # ----------------------------------------------------------- doctor
 
 
 def test_cli_doctor_help_lists_options(capsys):
-    """`xmatch doctor --help` shows the options and a description."""
+    """`xmatcher doctor --help` shows the options and a description."""
     with pytest.raises(SystemExit) as exc:
         main(["doctor", "--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "xmatch doctor" in out
+    assert "xmatcher doctor" in out
     for opt in ("--strict", "--quiet", "--json"):
         assert opt in out, f"doctor --help missing flag {opt}"
     assert "drift" in out.lower()
@@ -608,5 +618,5 @@ def test_cli_completion_dispatches_through_main(capsys):
     rc = main(["-v", "completion", "zsh"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "#compdef xmatch" in out
+    assert "#compdef xmatcher" in out
     assert "gaia" in out

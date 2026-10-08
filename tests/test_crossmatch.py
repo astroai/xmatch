@@ -3,13 +3,13 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from xmatch import CrossMatch
-from xmatch.exceptions import ConfigError, CrossMatchError, InputError
+from xmatcher import CrossMatch
+from xmatcher.exceptions import ConfigError, CrossMatchError, InputError
 
 
 @pytest.fixture
 def cm():
-    return CrossMatch()  # uses the bundled xmatch.yaml
+    return CrossMatch()  # uses the bundled xmatcher.yaml
 
 
 # ------------------------------------------------------------------ config
@@ -206,7 +206,7 @@ def test_id_join_without_ra_dec_columns(cm):
 
 def test_sky_match_still_errors_when_ra_dec_missing(cm):
     """A sky match on a table without RA/Dec-named columns must fail loudly."""
-    from xmatch.exceptions import CrossMatchError as _Cme
+    from xmatcher.exceptions import CrossMatchError as _Cme
 
     a = pl.DataFrame({"object_id": [1], "mag_g": [1.0]})
     b = pl.DataFrame({"object_id": [1], "mag_g": [1.0]})
@@ -292,7 +292,7 @@ def test_suggest_case_insensitive_aliases(cm):
 
 def test_input_error_carries_source(cm):
     """InputError raised from resolve_source carries the user input as `.source`."""
-    from xmatch.exceptions import InputError
+    from xmatcher.exceptions import InputError
 
     with pytest.raises(InputError) as info:
         cm.resolve_source("gaia_typo_xyz", {})
@@ -777,7 +777,7 @@ def test_fof_match_column_averaging_and_strings():
 
 # ---------------------------------------------------------- union auto-route
 def _fake_remote(name: str = "remote-survey"):
-    from xmatch.sources import CatalogueSource
+    from xmatcher.sources import CatalogueSource
 
     return CatalogueSource(
         name=name,
@@ -854,7 +854,7 @@ def _tiny_hats(tmp_path, name: str, ra: float, dec: float) -> Path:
         d / "dataset" / "Norder=0" / "Dir=0" / "Npix=0.parquet"
     )
     (d / "properties").write_text(
-        "dataproduct_type=object\nobs_collection=xmatch-test\n"
+        "dataproduct_type=object\nobs_collection=xmatcher-test\n"
         "hats_col_ra=ra\nhats_col_dec=dec\nhats_ordering=NESTED\nhats_nrows=1\n"
     )
     return d
@@ -864,7 +864,7 @@ def test_ray_union_driver_retries_transient_failures(monkeypatch, tmp_path):
     """--retries N: a driver death resumes; run.jsonl records every attempt."""
     import json as _json
 
-    import xmatch.ray_union as ru
+    import xmatcher.ray_union as ru
 
     calls = {"n": 0}
 
@@ -895,7 +895,7 @@ def test_ray_union_driver_retries_transient_failures(monkeypatch, tmp_path):
 
 def test_ray_union_driver_retries_exhausted_reraise(monkeypatch, tmp_path):
     """After --retries N failures the original error still propagates."""
-    import xmatch.ray_union as ru
+    import xmatcher.ray_union as ru
 
     def always_boom(*args, **kwargs):
         raise RuntimeError("driver death")
@@ -922,7 +922,7 @@ def test_ray_union_no_sync_reads_surviving_replica(tmp_path):
     ("no HATS partitions") even though a copy was present.
     """
     pytest.importorskip("ray")
-    from xmatch.mirror import _safe_name, _version_dir
+    from xmatcher.mirror import _safe_name, _version_dir
 
     cm = CrossMatch()
     primary = tmp_path / "primary"
@@ -955,8 +955,8 @@ def test_union_vos_output_stages_local_and_uploads(monkeypatch, tmp_path):
     """-o vos:... output: the engine writes a local staging dir (an existing
     remote tree is pulled back first, so resume continues) and the completed
     tree is uploaded on success."""
-    import xmatch.ray_union as ru
-    from xmatch.storage import LocalStorage
+    import xmatcher.ray_union as ru
+    from xmatcher.storage import LocalStorage
 
     seen: dict = {}
 
@@ -978,18 +978,18 @@ def test_union_vos_output_stages_local_and_uploads(monkeypatch, tmp_path):
     vos_root = tmp_path / "vosroot"
     (vos_root / "full.hats").mkdir(parents=True)
     (vos_root / "full.hats" / "old_marker").write_text("pre-existing\n")
-    monkeypatch.setattr("xmatch.storage.open_storage", lambda root: LocalStorage(vos_root))
+    monkeypatch.setattr("xmatcher.storage.open_storage", lambda root: LocalStorage(vos_root))
 
     cm = CrossMatch()
     cm.union_match(
         [str(_tiny_hats(tmp_path, "a", 0.0, 0.0)), str(_tiny_hats(tmp_path, "b", 0.01, 0.01))],
-        output_file="vos:hats/xmatch/full.hats",
+        output_file="vos:hats/xmatcher/full.hats",
         engine="ray-union",
         no_sync=True,
         radius_arcsec=1.5,
     )
     # the engine worked on a local staging dir, with the old tree pulled back
-    assert seen["engine_output"] != "vos:hats/xmatch/full.hats"
+    assert seen["engine_output"] != "vos:hats/xmatcher/full.hats"
     assert seen["engine_output"].endswith("full.hats")
     assert "old_marker" in seen["staged_files"]
     # and the completed tree was uploaded to the vos: root
@@ -1000,22 +1000,22 @@ def test_union_vos_output_stages_local_and_uploads(monkeypatch, tmp_path):
 def test_io_vos_output_staged_upload(monkeypatch, tmp_path):
     """write_frame with a vos: output stages locally and uploads through the
     storage layer (VOSpace has no POSIX path)."""
-    from xmatch import io_utils
-    from xmatch.storage import LocalStorage
+    from xmatcher import io_utils
+    from xmatcher.storage import LocalStorage
 
     fake = LocalStorage(tmp_path / "vosroot")
-    monkeypatch.setattr("xmatch.storage.open_storage", lambda root: fake)
+    monkeypatch.setattr("xmatcher.storage.open_storage", lambda root: fake)
 
     io_utils.write_frame(
         pl.DataFrame({"ra": [1.0], "dec": [2.0], "m": [3.0]}),
-        "vos:hats/xmatch/out.parquet",
+        "vos:hats/xmatcher/out.parquet",
     )
     assert fake.exists("out.parquet")
     assert pl.read_parquet(tmp_path / "vosroot" / "out.parquet").height == 1
 
     io_utils.write_frame(
         pl.DataFrame({"ra": [1.0], "dec": [2.0]}),
-        "vos:hats/xmatch/out.csv",
+        "vos:hats/xmatcher/out.csv",
     )
     assert fake.exists("out.csv")
     assert "ra,dec" in (tmp_path / "vosroot" / "out.csv").read_text()

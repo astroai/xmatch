@@ -1,7 +1,7 @@
 """Distributed N-survey full-outer-join (union) crossmatch on a Ray cluster.
 
 Pipeline for the ``engine=ray-union`` route: every input catalogue is
-mirrored (see :mod:`xmatch.mirror`) into the xmatch cache as a local HATS
+mirrored (see :mod:`xmatcher.mirror`) into the xmatcher cache as a local HATS
 catalogue; :func:`build_union_plan` builds a serialisable :class:`UnionPlan`;
 Ray worker tasks then produce one row per match set
 
@@ -1373,7 +1373,7 @@ def _read_hats_properties(storage: Storage, rel: str) -> dict[str, str]:
                     continue
                 text = p.read_text()
             else:
-                tmpdir = Path(tempfile.mkdtemp(prefix="xmatch-hatsprops-"))
+                tmpdir = Path(tempfile.mkdtemp(prefix="xmatcher-hatsprops-"))
                 try:
                     local = tmpdir / "properties"
                     storage.stage_in(full, local)
@@ -1621,7 +1621,7 @@ def _input_fingerprint(plan: UnionPlan) -> list[dict[str, Any]]:
             else:
                 # Remote stores lack a revision/mtime contract. Read each file
                 # once for freshness instead of silently reusing stale chunks.
-                with tempfile.TemporaryDirectory(prefix="xmatch-fingerprint-") as directory:
+                with tempfile.TemporaryDirectory(prefix="xmatcher-fingerprint-") as directory:
                     local = Path(directory) / "partition.parquet"
                     storage.stage_in(part.rel, local)
                     with local.open("rb") as stream:

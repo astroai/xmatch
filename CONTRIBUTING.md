@@ -1,6 +1,6 @@
-# Contributing to xmatch
+# Contributing to xmatcher
 
-Thank you for contributing to `xmatch`!
+Thank you for contributing to `xmatcher`!
 
 Before publishing, build the wheel and source archive with `uv build`, then run
 `pixi run python scripts/check_release.py`. This verifies current source bytes,
@@ -11,8 +11,8 @@ package data, metadata, and the fixtures/helpers needed to run the archived test
 We recommend [Pixi](https://pixi.sh) for a reproducible environment with all compiled dependencies (`polars`, `scipy`, `astropy`, `cdshealpix`, `ray`):
 
 ```bash
-git clone https://github.com/astroai/xmatch.git
-cd xmatch
+git clone https://github.com/astroai/xmatcher.git
+cd xmatcher
 pixi install
 ```
 
@@ -59,4 +59,4 @@ The offline `ci-local` gate does not establish that optional integrations, remot
 ## Pull Requests
 
 - Follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `perf:`, `refactor:`, `test:`).
-- Ensure `pixi run ci-local` and any relevant optional integration checks pass before opening a pull request against `astroai/xmatch`.
+- Ensure `pixi run ci-local` and any relevant optional integration checks pass before opening a pull request against `astroai/xmatcher`.

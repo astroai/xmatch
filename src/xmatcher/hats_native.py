@@ -1,4 +1,4 @@
-"""HATS-native crossmatch via xmatch matchers.
+"""HATS-native crossmatch via xmatcher matchers.
 
 One task per left HATS pixel; right side loads the same pixel plus HEALPix
 neighbours for boundary-safe matching. Engines ``fast``/``zone``/``ray``/…

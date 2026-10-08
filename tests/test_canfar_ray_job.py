@@ -29,7 +29,7 @@ def test_canfar_ray_job_syntax() -> None:
 def test_canfar_ray_job_dry_run_output() -> None:
     """``--dry-run`` prints the plan, exits 0, never touches the platform."""
     res = subprocess.run(
-        ["bash", str(SCRIPT), "--dry-run", "--command", "pixi run xmatch --help"],
+        ["bash", str(SCRIPT), "--dry-run", "--command", "pixi run xmatcher --help"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -63,18 +63,18 @@ def test_canfar_ray_job_manager_uses_supported_resource_flags() -> None:
             str(SCRIPT),
             "--dry-run",
             "--command",
-            "pixi run xmatch --help",
+            "pixi run xmatcher --help",
             "--create-manager",
             "images.canfar.net/astroai/ray-manager:latest",
             "--manager-name",
-            "xmatch-test",
+            "xmatcher-test",
         ],
         capture_output=True,
         text=True,
         timeout=60,
     )
     assert res.returncode == 0, res.stderr
-    assert "canfar create --cpu 2 --memory 8 --name xmatch-test contributed" in res.stdout
+    assert "canfar create --cpu 2 --memory 8 --name xmatcher-test contributed" in res.stdout
     assert "--cores 2" not in res.stdout
     assert "--ram 8" not in res.stdout
 
@@ -82,7 +82,7 @@ def test_canfar_ray_job_manager_uses_supported_resource_flags() -> None:
 def test_canfar_ray_job_uses_current_address_environment_variable() -> None:
     env = dict(os.environ, CANFAR_RAY_JOBS_ADDRESS="https://ray.example/jobs")
     res = subprocess.run(
-        ["bash", str(SCRIPT), "--dry-run", "--command", "pixi run xmatch --help"],
+        ["bash", str(SCRIPT), "--dry-run", "--command", "pixi run xmatcher --help"],
         capture_output=True,
         text=True,
         timeout=60,

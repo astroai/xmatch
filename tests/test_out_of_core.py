@@ -8,9 +8,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from xmatch import CrossMatch, MatchRequest, MatchSpec, SideOverrides
-from xmatch.cli import _build_match_subparser
-from xmatch.exceptions import CrossMatchError
+from xmatcher import CrossMatch, MatchRequest, MatchSpec, SideOverrides
+from xmatcher.cli import _build_match_subparser
+from xmatcher.exceptions import CrossMatchError
 
 
 def _catalogues(tmp_path: Path) -> tuple[Path, Path]:
@@ -313,7 +313,7 @@ def test_spill_failure_is_atomic_and_cleans_scratch(tmp_path, monkeypatch, join_
     def fail(*args, **kwargs):
         raise RuntimeError("injected batch failure")
 
-    monkeypatch.setattr("xmatch.out_of_core.sky_match", fail)
+    monkeypatch.setattr("xmatcher.out_of_core.sky_match", fail)
     with pytest.raises(RuntimeError, match="injected batch failure"):
         CrossMatch().crossmatch(
             p1,
@@ -337,7 +337,7 @@ def test_large_fits_is_rejected_before_the_eager_reader(tmp_path, monkeypatch):
     def must_not_read(path):
         raise AssertionError("large FITS should be rejected before eager reading")
 
-    monkeypatch.setattr("xmatch.io_utils._read_fits", must_not_read)
+    monkeypatch.setattr("xmatcher.io_utils._read_fits", must_not_read)
     with pytest.raises(CrossMatchError, match="CSV/Parquet"):
         CrossMatch().crossmatch(
             left,
@@ -367,11 +367,11 @@ def test_cli_exposes_bounded_memory_controls():
             "--memory-budget-bytes",
             "8192",
             "--scratch-dir",
-            "/tmp/xmatch",
+            "/tmp/xmatcher",
             "--partition-order",
             "4",
         ]
     )
     assert args.memory_budget_bytes == 8192
-    assert args.scratch_dir == "/tmp/xmatch"
+    assert args.scratch_dir == "/tmp/xmatcher"
     assert args.partition_order == "4"

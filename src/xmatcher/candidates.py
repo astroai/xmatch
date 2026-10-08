@@ -27,6 +27,7 @@ from .out_of_core import match_to_output
 from .request import MatchRequest
 from .sources import CatalogueSource
 
+# Persisted v1 wire names stay fixed across the package rename to preserve releases.
 _SCHEMA = "xmatch.candidates.release.v1"
 _PAIR_SCHEMA = {
     "source_id": pl.String,

@@ -1,12 +1,12 @@
 [workspace]
-name = "xmatch"
+name = "xmatcher"
 channels = ["conda-forge"]
 platforms = ["osx-arm64", "linux-64"]
 
 [tasks]
 lint = "ruff check ."
 format = "ruff format ."
-preflight-push = "ruff check . && ruff format --check . && mypy src/xmatch tests scripts && python -m compileall -q src/xmatch tests scripts"
+preflight-push = "ruff check . && ruff format --check . && mypy src/xmatcher tests scripts && python -m compileall -q src/xmatcher tests scripts"
 ci-local = { cmd = "python -m pytest -m 'not slow and not bench' -q --strict-markers", depends-on = ["preflight-push"] }
 test = "python -m pytest"
 
@@ -27,7 +27,7 @@ pytest = ">=9.0"
 mypy = ">=2.0"
 
 [pypi-dependencies]
-xmatch = { path = ".", editable = true }
+xmatcher = { path = ".", editable = true }
 # HATS-native Ray union engine: always in the dev env so CI runs the new tests.
 # (Optional extras `hats` / `hats-ray` / `ray` in pyproject.toml stay for pip users.)
 hats = ">=0.7"

@@ -1,7 +1,7 @@
 """Polars-first I/O helpers for reading and writing astronomical catalogues.
 
 All catalogue data flows through :class:`polars.LazyFrame` internally. This
-module centralises the conversions to/from the formats xmatch understands
+module centralises the conversions to/from the formats xmatcher understands
 (Parquet, CSV, FITS) and the interop with astropy ``Table`` objects returned by
 TAP/CDS services.
 
@@ -237,7 +237,7 @@ def write_hats(
 
         raise CrossMatchError(
             "HATS output requires the optional 'cdshealpix' package. "
-            "Install it with `pip install xmatch[hats]`."
+            "Install it with `pip install xmatcher[hats]`."
         ) from exc
 
     if isinstance(frame, pl.LazyFrame):
@@ -271,7 +271,7 @@ def _write_frame_vospace(
     """Write a frame to a ``vos:`` node: VOSpace has no POSIX path, so the
     frame is written to a local staging area and uploaded through the storage
     layer (single files via ``stage_out``; HATS trees file-by-file via
-    :func:`xmatch.mirror._replicate_tree`).
+    :func:`xmatcher.mirror._replicate_tree`).
     """
     import shutil
     import tempfile
@@ -284,7 +284,7 @@ def _write_frame_vospace(
     storage = open_storage(root)
     suffix = Path(rel).suffix.lower()
     if suffix == ".hats":
-        staging = Path(tempfile.mkdtemp(prefix="xmatch-hats-vos-"))
+        staging = Path(tempfile.mkdtemp(prefix="xmatcher-hats-vos-"))
         try:
             write_hats(
                 frame,
@@ -301,7 +301,7 @@ def _write_frame_vospace(
         logger.info("Wrote HATS catalogue to %s", output_file)
         return
 
-    staging = Path(tempfile.mkdtemp(prefix="xmatch-out-vos-"))
+    staging = Path(tempfile.mkdtemp(prefix="xmatcher-out-vos-"))
     try:
         local = staging / Path(rel).name
         lf = to_lazy(frame)
@@ -339,7 +339,7 @@ def write_frame(
     the spatial columns for partitioning; ``hats_threshold`` controls the
     maximum rows per HEALPix pixel.
 
-    A ``vos:`` output (e.g. ``vos:hats/xmatch/full.hats``) is staged locally
+    A ``vos:`` output (e.g. ``vos:hats/xmatcher/full.hats``) is staged locally
     and uploaded through the storage layer.
     """
     if isinstance(output_file, str) and output_file.startswith("vos:"):

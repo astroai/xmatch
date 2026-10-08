@@ -55,15 +55,15 @@ jobs:
 
       - name: Install wheel without dependencies
         run: |
-          mkdir -p "${RUNNER_TEMP}/xmatch-wheel"
-          uv pip install --python .pixi/envs/default/bin/python --target "${RUNNER_TEMP}/xmatch-wheel" --no-deps dist/*.whl
+          mkdir -p "${RUNNER_TEMP}/xmatcher-wheel"
+          uv pip install --python .pixi/envs/default/bin/python --target "${RUNNER_TEMP}/xmatcher-wheel" --no-deps dist/*.whl
 
       - name: Smoke-test the installed wheel and console script
         env:
-          PYTHONPATH: ${{ runner.temp }}/xmatch-wheel
+          PYTHONPATH: ${{ runner.temp }}/xmatcher-wheel
         run: |
-          pixi run --as-is python -c 'import os; from pathlib import Path; import xmatch; root = Path(os.environ["PYTHONPATH"]).resolve(); path = Path(xmatch.__file__).resolve(); assert path.is_relative_to(root), (path, root); print(path)'
-          "${RUNNER_TEMP}/xmatch-wheel/bin/xmatch" --help
+          pixi run --as-is python -c 'import os; from pathlib import Path; import xmatcher; root = Path(os.environ["PYTHONPATH"]).resolve(); path = Path(xmatcher.__file__).resolve(); assert path.is_relative_to(root), (path, root); print(path)'
+          "${RUNNER_TEMP}/xmatcher-wheel/bin/xmatcher" --help
       - name: Prepare verified release assets
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -101,4 +101,37 @@ jobs:
           sha256sum --check SHA256SUMS
           test "$(gh api "repos/$GH_REPO/commits/$GITHUB_REF_NAME" --jq .sha)" = "$GITHUB_SHA"
           gh release create "$GITHUB_REF_NAME" *.whl *.tar.gz SHA256SUMS \
-            --verify-tag --title "xmatch $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+            --verify-tag --title "xmatcher $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+
+  pypi:
+    name: Publish package to PyPI
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/xmatcher/
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      # ponytail: Reuse the verified release archives; publishing never rebuilds them.
+      - name: Download and verify tested distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --name release-dist --dir dist
+          cd dist
+          sha256sum --check SHA256SUMS
+          test "$(gh api "repos/$GH_REPO/commits/$GITHUB_REF_NAME" --jq .sha)" = "$GITHUB_SHA"
+          mkdir pypi
+          cp -- *.whl *.tar.gz pypi/
+          test "$(find pypi -maxdepth 1 -type f | wc -l)" -eq 2
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/pypi/

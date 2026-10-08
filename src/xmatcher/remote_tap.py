@@ -94,7 +94,7 @@ def download_from_tap(
     """Download a (optionally cone-limited) catalogue from a TAP service.
 
     ``progress_cb`` (when supplied) is forwarded to
-    :func:`xmatch.tap.execute_tap_query` so the CLI can surface
+    :func:`xmatcher.tap.execute_tap_query` so the CLI can surface
     ``"submitting"`` / ``"phase: queued"`` / ``"fetching N rows"`` updates
     as the async TAP job progresses.
     """

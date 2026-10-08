@@ -5,8 +5,8 @@ from unittest.mock import patch
 import pytest
 import pyvo
 
-from xmatch import tap
-from xmatch.exceptions import TapError
+from xmatcher import tap
+from xmatcher.exceptions import TapError
 
 from . import tap_fake
 from .tap_fake import FakeTAPServer, make_rows

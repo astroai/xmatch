@@ -24,7 +24,7 @@ def package_files(root: Path) -> list[Path]:
     return sorted(
         path
         for pattern in ("*.py", "*.yaml", "fixtures/*.json")
-        for path in (root / "src/xmatch").glob(pattern)
+        for path in (root / "src/xmatcher").glob(pattern)
     )
 
 
@@ -75,7 +75,7 @@ def check_wheel(wheel_path: Path, root: Path, project: dict, package: list[Path]
         names = wheel.namelist()
         _require(len(names) == len(set(names)), "wheel contains duplicate member names")
         actual_package = {
-            name for name in names if name.startswith("xmatch/") and not name.endswith("/")
+            name for name in names if name.startswith("xmatcher/") and not name.endswith("/")
         }
         _require(
             actual_package == expected_package,

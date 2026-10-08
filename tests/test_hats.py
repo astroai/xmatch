@@ -5,7 +5,7 @@ from unittest import mock
 import polars as pl
 import pytest
 
-from xmatch import CrossMatch, hats_native, io_utils
+from xmatcher import CrossMatch, hats_native, io_utils
 
 
 @pytest.fixture

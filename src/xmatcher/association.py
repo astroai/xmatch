@@ -14,6 +14,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+# Persisted v1 wire names stay fixed across the package rename to preserve IDs.
 ASSOCIATION_SCHEMA_VERSION = "xmatch.association.v1"
 ASSOCIATION_RELEASE_SCHEMA_VERSION = "xmatch.association.release.v1"
 ASSOCIATION_COMPONENT_SCHEMA_VERSION = "xmatch.association.component.v1"

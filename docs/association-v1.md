@@ -2,12 +2,12 @@
 
 > [!NOTE]
 > This document is the normative schema and release directory specification for the `xmatch.association.v1` contract.
-> - For the Python API reference, see [`docs/api.md`](api.md#association-contract--provenance-graph-xmatchassociation).
+> - For the Python API reference, see [`docs/api.md`](api.md#association-contract--provenance-graph-xmatcherassociation).
 > - For the graph association and identity algorithm formulation, see [`docs/algorithms.md`](algorithms.md#11-graph-association--provenance-identity-xmatchassociationv1).
 
 This contract records evaluated source/candidate pairs. It does not define a
 permanent celestial-object identifier, claim that a selected candidate is true,
-or coalesce redshift evidence. Xmatch owns candidate generation and association;
+or coalesce redshift evidence. Xmatcher owns candidate generation and association;
 Zensus owns evidence conflict handling; applications own training-view reduction.
 
 Every record contains release-scoped opaque `evidence_id`, `source_id`, and
@@ -49,7 +49,7 @@ parent is lineage between immutable releases; it does not assert that graph
 components or release-scoped object IDs remain stable across releases.
 
 ```python
-from xmatch.association import (
+from xmatcher.association import (
     iter_association_release,
     verify_association_release,
     write_association_release,
@@ -96,7 +96,7 @@ parent component release, representing new components, continuity/splits, and
 merges respectively.
 
 ```python
-from xmatch.association import (
+from xmatcher.association import (
     AssociationComponent,
     AssociationComponentMember,
     verify_association_release,
@@ -140,11 +140,11 @@ assertions when a catalogue is republished under a different
 parent member to one fully namespaced current member; the manifest binds the
 direct parent/current association releases, row count, and canonical byte
 checksum. Both sides must be unique, so catalogue splits, merges, or uncertain
-matches cannot be mislabeled as identity equivalence. Xmatch never infers these
+matches cannot be mislabeled as identity equivalence. Xmatcher never infers these
 rows from equal bare IDs.
 
 ```python
-from xmatch.association import (
+from xmatcher.association import (
     AssociationComponentMember,
     AssociationMemberEquivalence,
     write_association_member_equivalence_release,
@@ -186,7 +186,7 @@ pass the reviewed `member_equivalence_directory` to construction, delta
 publication, and endpoint-aware delta verification.
 
 ```python
-from xmatch.association import (
+from xmatcher.association import (
     AssociationDecision,
     construct_association_components,
     verify_association_component_delta_release,
