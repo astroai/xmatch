@@ -46,6 +46,7 @@ def test_roundtrip_fits(tmp_path, sample):
 def test_fits_read_prefers_torchfits_polars(tmp_path, sample, monkeypatch):
     """The optional Torchfits backend feeds its Polars frame through unchanged."""
     path = tmp_path / "x.fits"
+    io_utils.write_frame(sample, path)
     fake_table = mock.Mock()
     fake_table.read_polars.return_value = SimpleNamespace(frame=sample)
     monkeypatch.setitem(sys.modules, "torchfits", SimpleNamespace(table=fake_table))
@@ -54,6 +55,91 @@ def test_fits_read_prefers_torchfits_polars(tmp_path, sample, monkeypatch):
 
     fake_table.read_polars.assert_called_once_with(str(path), hdu=1)
     assert back.equals(sample)
+
+
+def test_fits_read_preserves_nulls_when_torchfits_loses_masks(tmp_path, monkeypatch):
+    """A lossy Torchfits result must fall back to the FITS null masks."""
+    source = pl.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "name": ["ok", "", None],
+            "mag": [12.3, 12.4, None],
+            "count": [7, 8, None],
+        }
+    )
+    path = tmp_path / "nullable.fits"
+    io_utils.write_frame(source, path)
+
+    # Emulate Torchfits exposing masked values as ordinary data and omitting mask metadata.
+    lossy = pl.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "name": ["ok", "", ""],
+            "mag": [12.3, 12.4, float("nan")],
+            "count": [7, 8, 9],
+        }
+    )
+    fake_table = mock.Mock()
+    fake_table.read_polars.return_value = SimpleNamespace(frame=lossy)
+    monkeypatch.setitem(sys.modules, "torchfits", SimpleNamespace(table=fake_table))
+
+    back = io_utils.scan_frame(path).collect()
+
+    assert back["name"].to_list() == ["ok", "", None]
+    assert back["mag"].to_list() == [12.3, 12.4, None]
+    assert back["count"].to_list() == [7, 8, None]
+
+
+def test_roundtrip_nullable_fits(tmp_path):
+    """The default FITS writer and reader preserve masks and unmasked empty strings."""
+    source = pl.DataFrame(
+        {
+            "count": [7, None],
+            "name": ["", None],
+            "mag": [12.3, None],
+        }
+    )
+    path = tmp_path / "nullable.fits"
+    io_utils.write_frame(source, path)
+
+    back = io_utils.scan_frame(path).collect()
+
+    assert back["count"].to_list() == [7, None]
+    assert back["name"].to_list() == ["", None]
+    assert back["mag"].to_list() == [12.3, None]
+
+
+def test_roundtrip_integer_only_nullable_fits(tmp_path):
+    """Serialized mask metadata preserves integer nulls without sentinel columns."""
+    source = pl.DataFrame({"count": [7, None]})
+    path = tmp_path / "integer-nullable.fits"
+    io_utils.write_frame(source, path)
+
+    back = io_utils.scan_frame(path).collect()
+
+    assert back["count"].to_list() == [7, None]
+
+
+def test_fits_read_preserves_external_tnull_without_other_null_markers(tmp_path, monkeypatch):
+    """An external FITS TNULL column still triggers the Astropy fallback."""
+    from astropy.io import fits
+    from astropy.table import MaskedColumn, Table
+
+    source = Table({"count": MaskedColumn([7, 8, 9], mask=[False, True, False])})
+    path = tmp_path / "external-tnull.fits"
+    source.write(path, format="fits", overwrite=True)
+    with fits.open(path) as hdus:
+        null_count = hdus[1].header["TNULL1"]
+
+    fake_table = mock.Mock()
+    fake_table.read_polars.return_value = SimpleNamespace(
+        frame=pl.DataFrame({"count": [7, null_count, 9]})
+    )
+    monkeypatch.setitem(sys.modules, "torchfits", SimpleNamespace(table=fake_table))
+
+    back = io_utils.scan_frame(path).collect()
+
+    assert back["count"].to_list() == [7, None, 9]
 
 
 def test_roundtrip_fits_with_torchfits_when_installed(tmp_path, sample):
@@ -68,6 +154,27 @@ def test_roundtrip_fits_with_torchfits_when_installed(tmp_path, sample):
 
     read.assert_called_once_with(str(path), hdu=1)
     assert back.sort("id").equals(sample.sort("id"))
+
+
+def test_roundtrip_nullable_fits_with_torchfits_when_installed(tmp_path):
+    """The real optional reader must preserve masked FITS cells end to end."""
+    pytest.importorskip("torchfits")
+    source = pl.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "name": ["ok", "", None],
+            "mag": [12.3, 12.4, None],
+            "count": [7, 8, None],
+        }
+    )
+    path = tmp_path / "nullable.fits"
+    io_utils.write_frame(source, path)
+
+    back = io_utils.scan_frame(path).collect()
+
+    assert back["name"].to_list() == ["ok", "", None]
+    assert back["mag"].to_list() == [12.3, 12.4, None]
+    assert back["count"].to_list() == [7, 8, None]
 
 
 def test_fits_read_falls_back_to_astropy_when_torchfits_rejects(tmp_path, sample, monkeypatch):

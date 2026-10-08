@@ -5,7 +5,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from xmatcher import CatalogueSource, MatchSpec, hats_native
+from xmatcher import CatalogueSource, MatchSpec, hats_native, mirror
 from xmatcher.exceptions import CrossMatchError
 
 
@@ -16,6 +16,21 @@ def _write_hats(root: Path, rows: list[dict], order: int = 0, pix: int = 0) -> P
     pix_dir.mkdir(parents=True)
     pl.DataFrame(rows).write_parquet(pix_dir / "catalog.parquet")
     return root
+
+
+def test_native_hats_rejects_missing_advertised_data(tmp_path: Path) -> None:
+    root = tmp_path / "broken"
+    mirror._write_hats_native(
+        pl.DataFrame({"id": [1], "ra": [10.0], "dec": [5.0]}),
+        root,
+        ra_column="ra",
+        dec_column="dec",
+    )
+    for _, _, pixel in hats_native.list_hats_pixels(root):
+        pixel.unlink()
+    source = CatalogueSource(name="broken", is_local=True, path=root)
+    with pytest.raises(CrossMatchError, match="missing.*partition"):
+        hats_native.load_hats_all(source)
 
 
 def test_list_and_load_hats_pixels(tmp_path: Path):
@@ -159,6 +174,44 @@ def test_hats_native_requires_hats_side():
             local_lf1=pl.DataFrame({"ra": [0.0], "dec": [0.0]}).lazy(),
             local_lf2=pl.DataFrame({"ra": [0.0], "dec": [0.0]}).lazy(),
         )
+
+
+def test_empty_native_hats_retains_schema_through_full_outer_match(tmp_path: Path) -> None:
+    """Zero-pixel HATS keeps its metadata schema for null-extended output."""
+    empty_path = tmp_path / "empty"
+    empty_frame = pl.DataFrame(schema={"id": pl.Int64, "ra": pl.Float64, "dec": pl.Float64})
+    mirror._write_hats_native(empty_frame, empty_path, ra_column="ra", dec_column="dec")
+    empty_src = CatalogueSource(
+        name="empty",
+        is_local=True,
+        access_method="hats",
+        path=empty_path,
+        ra_column="ra",
+        dec_column="dec",
+    )
+    empty_read = hats_native.load_hats_all(empty_src)
+    assert empty_read.height == 0
+    assert empty_read.schema == empty_frame.schema
+
+    nonempty_path = _write_hats(tmp_path / "nonempty", [{"id": 7, "ra": 10.0, "dec": 5.0}])
+    nonempty_src = CatalogueSource(
+        name="nonempty",
+        is_local=True,
+        access_method="hats",
+        path=nonempty_path,
+        ra_column="ra",
+        dec_column="dec",
+    )
+    result = hats_native.hats_native_crossmatch(
+        nonempty_src,
+        empty_src,
+        MatchSpec(radius_arcsec=2.0, join_type="1or2"),
+        engine="fast",
+    )
+
+    assert result.height == 1
+    assert {"id", "ra", "dec", "id_2", "ra_2", "dec_2"} <= set(result.columns)
+    assert result["id_2"].null_count() == 1
 
 
 def test_margin_pixels_includes_healpix_neighbors():

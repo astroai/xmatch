@@ -335,7 +335,9 @@ def _build_result(
 # --------------------------------------------------------------------------- #
 def _has_error_info(src: CatalogueSource) -> bool:
     return (
-        bool(src.ra_err_column and src.dec_err_column) or src.default_pos_error_arcsec is not None
+        bool(src.ra_err_column and src.dec_err_column)
+        or bool(src.astrometric_covariance_columns)
+        or src.default_pos_error_arcsec is not None
     )
 
 
@@ -471,6 +473,14 @@ def _pos_covariance(
                 )
         else:
             rho = np.zeros(df.height, dtype=float)
+        # Independent variance additions preserve the measured cross covariance.
+        denominator = np.sqrt(sigma_sq_ra * sigma_sq_dec)
+        rho = np.divide(
+            rho * ra_e * de_e,
+            denominator,
+            out=np.zeros_like(rho),
+            where=denominator > 0.0,
+        )
         result = sigma_sq_ra, sigma_sq_dec, rho
     elif src.astrometric_covariance_columns:
         astrometric = _astrometric_covariance_mas(df, src)
@@ -494,7 +504,13 @@ def _pos_covariance(
         if drift_sq is not None:
             sigma_sq_ra = sigma_sq_ra + drift_sq
             sigma_sq_dec = sigma_sq_dec + drift_sq
-        rho = positional[:, 0, 1] / np.sqrt(positional[:, 0, 0] * positional[:, 1, 1])
+        denominator = np.sqrt(sigma_sq_ra * sigma_sq_dec)
+        rho = np.divide(
+            positional[:, 0, 1],
+            denominator,
+            out=np.zeros(df.height, dtype=float),
+            where=denominator > 0.0,
+        )
         result = sigma_sq_ra, sigma_sq_dec, rho
     elif floor is not None:
         floor_sq = floor * floor
@@ -603,7 +619,7 @@ def _mahalanobis_pairwise(
 
     d2 = inv11 * delta_ra**2 + 2.0 * inv12 * delta_ra * delta_dec + inv22 * delta_dec**2
     d2[np.isfinite(d2) & (d2 < 0)] = 0.0  # clamp tiny negatives from floating point
-    return np.where(np.isfinite(d2), d2, np.inf)
+    return np.where((det > 1e-30) & np.isfinite(d2), d2, np.inf)
 
 
 # --------------------------------------------------------------------------- #
@@ -767,7 +783,7 @@ def _skyellipse_pair_filter(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Apply the per-pair 2-D Mahalanobis d² <= max_error² criterion.
 
-    Shared across ``fast``, ``zone``, and ``ray`` so every engine evaluates
+    Shared across the numerical engines so every engine evaluates
     identical error-ellipse geometry and tie-breaking.
     """
     if left_idx.size == 0:
@@ -1164,14 +1180,8 @@ def _apply_pm_drift_prior(
     ``10^{-0.2 (mag - 15)}`` (clipped to [0.3, 3.0]) — brighter stars get
     larger PM dispersion because they are statistically closer.
 
-    Additionally, a per-row ``_pm_drift_arcsec`` column is appended to the
-    DataFrame so that :func:`_pos_sigma_arcsec` and
-    :func:`_pos_covariance` can add the drift in quadrature to each row's
-    astrometric errors (rather than just inflating the source-level floor).
-
     Returns ``(left, right, left_src, right_src)`` — DataFrames may carry
-    a ``_pm_drift_arcsec`` column, sources may have inflated
-    ``default_pos_error_arcsec``.
+    a ``_pm_drift_arcsec`` column; source-level error floors are unchanged.
 
     The empirical dispersion is the existing scalar radial RMS budget, added
     once to ``hypot(ra_err, dec_err)``; it is not a per-axis covariance model.
@@ -1376,47 +1386,27 @@ def _apply_match_filter(
     right: pl.DataFrame,
     left_idx: np.ndarray,
     right_idx: np.ndarray,
-    seps: np.ndarray,
     filter_expr: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Post-filter matched pairs with a polars SQL WHERE clause.
-
-    The *filter_expr* string is evaluated as ``SELECT * FROM tmp WHERE
-    <filter_expr>`` using polars' ``SQLContext``.  Column names from the left
-    side are used as-is; right-side collision columns gain a ``_2`` suffix.
-    Returns the filtered index and separation arrays.
-    """
-    if left_idx.size == 0:
-        return left_idx, right_idx, seps
-
+    right_suffix: str,
+) -> np.ndarray:
+    """Return surviving pair positions after a polars SQL WHERE clause."""
     matched_left = _gather(left, left_idx)
-    right_renamed = _rename_right(right, left.columns, suffix=_RIGHT_SUFFIX)
+    right_renamed = _rename_right(right, left.columns, suffix=right_suffix)
     matched_right = _gather(right_renamed, right_idx)
-
-    # Build a temporary frame with a row-index column so we can recover which
-    # original pairs survive the WHERE clause.
     tmp = matched_left.hstack(matched_right)
-    tmp = tmp.with_row_index(name="_row_id")
-
+    row_id = "_row_id"
+    while row_id in tmp.columns:
+        row_id += "_"
+    tmp = tmp.with_row_index(name=row_id)
     try:
         ctx = pl.SQLContext(tmp=tmp)
-        filtered = ctx.execute(f"SELECT _row_id FROM tmp WHERE {filter_expr}").collect()
-        keep_indices = filtered["_row_id"].to_numpy()
-        keep = np.zeros(tmp.height, dtype=bool)
-        keep[keep_indices] = True
+        filtered = ctx.execute(f"SELECT {row_id} FROM tmp WHERE {filter_expr}").collect()
+        keep_indices = filtered[row_id].to_numpy()
     except Exception as exc:
         raise CrossMatchError(f"Invalid filter_expr {filter_expr!r}: {exc}") from exc
-
-    n_kept = int(np.sum(keep))
-    if n_kept == 0:
-        return (
-            np.array([], dtype=np.int64),
-            np.array([], dtype=np.int64),
-            np.array([], dtype=float),
-        )
-    if n_kept < left_idx.size:
-        logger.info("Filter expression kept %d/%d matched pairs.", n_kept, left_idx.size)
-    return left_idx[keep], right_idx[keep], seps[keep]
+    if keep_indices.size < left_idx.size:
+        logger.info("Filter expression kept %d/%d matched pairs.", keep_indices.size, left_idx.size)
+    return keep_indices
 
 
 # --------------------------------------------------------------------------- #
@@ -2631,6 +2621,8 @@ def _ml_fallback_best_by_sep(
     spec: MatchSpec,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Fallback: pick the spatially-nearest candidate per primary source."""
+    if spec.find == "all":
+        return left_idx, right_idx, seps, 1.0 / (1.0 + seps)
     # Vectorized O(N log N) optimization replacing O(N^2) boolean mask loop
     order = np.lexsort((seps, left_idx))
     best_indices = _first_occurrence_indices(left_idx[order])
@@ -3102,8 +3094,8 @@ def _astropy_match(
     )
 
     # Plain radius match: fast nearest-neighbour path for find="best".
-    if spec.matcher == "sky":
-        if spec.find == "best":
+    if spec.matcher not in {"skyerr", "skyellipse"}:
+        if spec.matcher == "sky" and spec.find == "best":
             idx, sep2d, _ = lcoord.match_to_catalog_sky(rcoord)
             seps = sep2d.arcsec
             within = seps <= spec.radius_arcsec
@@ -3139,79 +3131,19 @@ def _astropy_match(
             rcoord,
             search_radius_arcsec * u.arcsec,
         )
-        seps = sep2d.arcsec
-        # Mahalanobis post-filter.  The RA difference is scaled by the *pair's*
-        # mean declination (not a table-wide scalar), matching the ``fast``,
-        # ``zone`` and ``torchsky`` engines so every engine accepts the same
-        # pairs away from the equator.
-        if left_idx.size > 0:
-            sra2_l, sde2_l, rho_l = cov_l
-            sra2_r, sde2_r, rho_r = cov_r
-            l_dec_pairs = left[left_src.dec_column].to_numpy()[left_idx]
-            r_dec_pairs = right[right_src.dec_column].to_numpy()[right_idx]
-            delta_ra = (
-                (
-                    left[left_src.ra_column].to_numpy()[left_idx]
-                    - right[right_src.ra_column].to_numpy()[right_idx]
-                )
-                * 3600.0
-                * np.cos(np.radians(0.5 * (l_dec_pairs + r_dec_pairs)))
-            )
-            delta_dec = (
-                left[left_src.dec_column].to_numpy()[left_idx]
-                - right[right_src.dec_column].to_numpy()[right_idx]
-            ) * 3600.0
-            d2 = _mahalanobis_pairwise(
-                delta_ra,
-                delta_dec,
-                sra2_l[left_idx],
-                sde2_l[left_idx],
-                rho_l[left_idx],
-                sra2_r[right_idx],
-                sde2_r[right_idx],
-                rho_r[right_idx],
-            )
-            keep = d2 <= spec.max_error**2
-            left_idx, right_idx, seps = left_idx[keep], right_idx[keep], seps[keep]
-
-        if spec.find == "best" and len(left_idx) > 0:
-            # Pick best match by Mahalanobis distance d², not spatial sep.
-            # Recompute d² for the filtered pairs (already computed above).
-            sra2_l2, sde2_l2, rho_l2 = cov_l
-            sra2_r2, sde2_r2, rho_r2 = cov_r
-            mean_dec2 = 0.5 * (
-                left[left_src.dec_column].to_numpy()[left_idx]
-                + right[right_src.dec_column].to_numpy()[right_idx]
-            )
-            cos_dec2 = np.cos(np.radians(mean_dec2))
-            delta_ra2 = (
-                (
-                    left[left_src.ra_column].to_numpy()[left_idx]
-                    - right[right_src.ra_column].to_numpy()[right_idx]
-                )
-                * 3600.0
-                * cos_dec2
-            )
-            delta_dec2 = (
-                left[left_src.dec_column].to_numpy()[left_idx]
-                - right[right_src.dec_column].to_numpy()[right_idx]
-            ) * 3600.0
-            d2 = _mahalanobis_pairwise(
-                delta_ra2,
-                delta_dec2,
-                sra2_l2[left_idx],
-                sde2_l2[left_idx],
-                rho_l2[left_idx],
-                sra2_r2[right_idx],
-                sde2_r2[right_idx],
-                rho_r2[right_idx],
-            )
-            order = np.lexsort((d2, left_idx))
-            first_idx = _first_occurrence_indices(left_idx[order])
-            sel = order[first_idx]
-            sel.sort()
-            left_idx, right_idx, seps = left_idx[sel], right_idx[sel], seps[sel]
-        return left_idx, right_idx, seps
+        return _skyellipse_pair_filter(
+            left_idx,
+            right_idx,
+            sep2d.arcsec,
+            left[left_src.ra_column].to_numpy(),
+            left[left_src.dec_column].to_numpy(),
+            right[right_src.ra_column].to_numpy(),
+            right[right_src.dec_column].to_numpy(),
+            cov_l,
+            cov_r,
+            spec.max_error,
+            find=spec.find,
+        )
 
     lsig = _pos_sigma_arcsec(left, left_src)
     rsig = _pos_sigma_arcsec(right, right_src)
@@ -3607,13 +3539,25 @@ def sky_match(
 
     # --- post-match boolean filter ----------------------------------------
     if spec.filter_expr and l_idx.size > 0:
-        l_idx, r_idx, seps = _apply_match_filter(
+        keep = _apply_match_filter(
             left,
             right,
             l_idx,
             r_idx,
-            seps,
             spec.filter_expr,
+            right_suffix,
+        )
+        l_idx, r_idx, seps = l_idx[keep], r_idx[keep], seps[keep]
+        lr_arr, reliability_arr, ml_score_arr, xgb_score_arr, auf_prob_arr, macauff_prob_arr = (
+            values[keep] if values is not None else None
+            for values in (
+                lr_arr,
+                reliability_arr,
+                ml_score_arr,
+                xgb_score_arr,
+                auf_prob_arr,
+                macauff_prob_arr,
+            )
         )
 
     p_match = _bayesian_qualify(left, right, l_idx, r_idx, seps, left_src, right_src, spec)

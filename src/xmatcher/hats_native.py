@@ -105,6 +105,13 @@ def load_hats_all(src: CatalogueSource) -> pl.DataFrame:
     frames = [_load_pixel_path(p) for _, _, p in list_hats_pixels(root)]
     frames = [f for f in frames if f is not None]
     if not frames:
+        advertised_rows = _read_properties(root).get("hats_nrows")
+        if advertised_rows is not None and int(advertised_rows) > 0:
+            raise CrossMatchError(f"Catalogue '{src.name}' is missing its HATS data partitions.")
+        for base in (root / "dataset", root):
+            metadata = base / "_common_metadata"
+            if metadata.is_file():
+                return pl.DataFrame(schema=pl.read_parquet_schema(metadata))
         return pl.DataFrame()
     return pl.concat(frames, how="diagonal_relaxed")
 

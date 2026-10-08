@@ -132,6 +132,7 @@ def union_match(
 - With all-remote inputs, no cone constraint, `engine="auto"`, and an output path, `union_match` routes to `engine="ray-union"`; this produces a full-sky full-outer HATS tree.
 - `ray-union` supports `sky`, `skyerr`, and `skyellipse` and HATS output only. It rejects region constraints and unsupported filters, ID joins, scores, and extra columns. Compressed interval planning handles mixed-order/RING inputs and distributed tasks apply measured per-source uncertainty or epoch-motion halos; planning may scan additional partitions. The separate pairwise native HATS path materializes globally for adaptive, RING, mixed-order, and epoch-aligned cases. `engine="ray"` distributes pairwise candidate search, while its caller still materializes inputs and collects results on the coordinator.
 - HATS union outputs include non-null `_union_ra` and `_union_dec` routing coordinates from the lowest-indexed catalogue member in each row; output tree metadata declares NESTED ordering and those columns as the spatial coordinates.
+- Valid zero-row HATS inputs retain their advertised schema. The first nonempty input supplies output tiling without changing catalogue order or column suffixes; if every input is empty, the result is still a readable zero-row HATS catalogue.
 
 ---
 
@@ -216,7 +217,7 @@ Defines the algorithm criteria:
 | `target_epoch` | `float | None` | `None` | Julian-year epoch for proper-motion propagation. |
 | `pm_prior` | `bool` | `False` | Enable the assumed, Wilson (2023)-inspired PM drift uncertainty model. |
 | `pm_prior_magnitude_column` | `str | None` | `None` | Magnitude column for Wilson (2023) distance-proxy scaling. |
-| `filter_expr` | `str | None` | `None` | Polars SQL WHERE clause for filtering candidate pairs; malformed expressions and unknown columns raise `CrossMatchError`. |
+| `filter_expr` | `str | None` | `None` | Polars SQL WHERE clause applied after scoring and `find` selection; rejected best matches are not replaced. Uses input column names with the result suffixes and retains survivor scores. Malformed expressions and unknown columns raise `CrossMatchError`. |
 | `extra_distance_cols` | `dict[str, float]` | `{}` | Extra columns & weights for $N$-dimensional `find="best"` ranking; declared columns must exist on both sides and contain numeric finite values, or `CrossMatchError` is raised. |
 | `batch_size` | `int | None` | `None` | Number of HEALPix pixel groups per batch in zone matching; not a general process-memory limit. |
 | `lr_magnitude_column` | `str | None` | `None` | Secondary magnitude column for Likelihood Ratio (`matcher="lr"`). |
@@ -315,7 +316,7 @@ from xmatcher.mirror import mirror_catalogue, TokenBucket
 from xmatcher.storage import open_storage
 ```
 
-- **Remote HATS Replication**: Synchronizes remote HATS directories over HTTP or `vos:` into the local cache (`~/.cache/xmatcher` or `/arc/projects/hats`). It hashes remote partition content for each sync attempt; this detects same-size edits but requires reading partition bytes and can add substantial network I/O. The documented CANFAR working/output directory is `/arc/projects/hats/xmatcher`.
+- **Remote HATS Replication**: Synchronizes remote HATS directories over HTTP or `vos:` into the local cache (`~/.cache/xmatcher` or `/arc/projects/hats`). HTTP sync compares advertised partition sizes with the mirror manifest; use `--force` to detect upstream edits that keep the same size. The documented CANFAR working/output directory is `/arc/projects/hats/xmatcher`.
 - **TAP Keyset Pagination**: Downloads TAP catalogues with local resume manifests (`sync.json`) and requires a unique, non-null stable key. Page-window row counts do not detect same-count edits; `--force` requests a full refresh. Append-only growth is detected using a maximum-key probe.
 - **TokenBucket Rate Limiter**: Thread-safe per-host rate limiting handling HTTP 429/503 responses with exponential backoff.
 

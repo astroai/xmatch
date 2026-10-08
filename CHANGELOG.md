@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-No changes beyond the planned v0.5.1 rename are recorded.
+No changes beyond the pending v0.5.1 release are recorded.
 
 ## [0.5.1] — unreleased
 
@@ -21,6 +21,39 @@ No changes beyond the planned v0.5.1 rename are recorded.
 - **Changed local paths**: the default cache moves to `~/.cache/xmatcher`, and
   the documented CANFAR output root is `/arc/projects/hats/xmatcher`.
 - The persisted `xmatch.*` association schema identifiers remain unchanged.
+
+### Fixed
+
+- FITS writes preserve explicit masks, including the distinction between empty
+  strings and nulls. Reads fall back to Astropy when the fast reader could conceal masked
+  values. CDS XMatch now uses a collision-free local row key, preserving input
+  columns with the previous internal key name.
+- Catalogue names resolve case-insensitively to their configured spelling;
+  configurations with names that differ only by case are rejected. CLI table
+  discovery and schema queries use configured archive authentication, and
+  invalid CLI configuration is reported as a command error.
+- HTTP HATS mirroring distinguishes complete listings from failed lookups,
+  includes partition metadata, and removes stale cached files only after a
+  successful refresh.
+- Astrometric error floors and drift inflation preserve measured cross
+  covariance for ellipse matching, and singular covariance pairs are rejected.
+  Astropy uses the shared ellipse filter; separation-based matcher fallbacks
+  retain every candidate for `find="all"`.
+- Post-match filters apply the same row selection to matcher scores and respect
+  the requested right-column suffix. Candidate normalization checks pair
+  endpoint namespaces against the inventory, rejects contradictory target
+  namespace evidence, and allows an explicitly named empty target population.
+  Candidate-release setup failures also clean up their lock so publication can
+  be retried.
+- HTTP HATS refreshes publish metadata after successful data transfers and use
+  a one-byte range probe when HEAD is unsupported. HTML listing fallback retains
+  CSV partition metadata and empty-catalogue schemas. VOS replica replacement
+  preserves nested paths and existing files when backup reads fail. TAP row
+  limits include short final pages.
+- Native HATS reads and distributed unions retain the schema of valid empty
+  catalogues while rejecting missing partitions from nonempty catalogues.
+  CANFAR scaling validation requires the observed worker count to match the
+  requested count.
 
 PyPI publication is pending.
 

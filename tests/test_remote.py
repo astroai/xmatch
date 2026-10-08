@@ -400,6 +400,42 @@ def test_cds_xmatch_local_remote_rejoins_on_surrogate_id(monkeypatch):
     assert "remote_mag" in out.columns
 
 
+def test_cds_xmatch_local_remote_avoids_local_surrogate_column_collision(monkeypatch):
+    from astropy.table import Table
+
+    import xmatcher.remote_cds as rc
+
+    class FakeXMatch:
+        def query(self, cat1, cat2, max_distance, colRA1, colDec1):
+            key_col = next(c for c in cat1.colnames if c not in {colRA1, colDec1})
+            return Table({key_col: [0], colRA1: [10.0], colDec1: [5.0], "remote_mag": [21.0]})
+
+    fake_module = types.ModuleType("astroquery.xmatch")
+    fake_module.XMatch = FakeXMatch
+    monkeypatch.setitem(sys.modules, "astroquery.xmatch", fake_module)
+
+    local_src = CatalogueSource(name="loc", is_local=True, ra_column="ra", dec_column="dec")
+    remote_src = CatalogueSource(
+        name="viz", is_local=False, access_method="cds_xmatch", access_identifier="I/355/gaiadr3"
+    )
+    local = pl.DataFrame(
+        {
+            "ra": [10.0, 80.0],
+            "dec": [5.0, 5.0],
+            rc._XMATCH_KEY: [777, 888],
+            "my_id": [101, 102],
+        }
+    )
+
+    out = rc.cds_xmatch_local_remote(
+        local_src, remote_src, local.lazy(), MatchSpec(radius_arcsec=2.0, find="all")
+    )
+
+    assert out.height == 1
+    assert out[rc._XMATCH_KEY][0] == 777
+    assert out["my_id"][0] == 101
+
+
 @pytest.mark.parametrize(
     "spec",
     [

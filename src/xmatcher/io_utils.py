@@ -152,10 +152,45 @@ def _read_fits(path: Path) -> pl.DataFrame:
     if torchfits_table is not None:
         for hdu in (1, 0):
             try:
-                return torchfits_table.read_polars(str(path), hdu=hdu).frame
+                frame = torchfits_table.read_polars(str(path), hdu=hdu).frame
+                last_err = None
+                # FITS uses sentinels for some masked cells. Torchfits can
+                # expose masked strings as "" and masked floats as NaN, so
+                # consult Astropy when either value could be a lost mask.
+                from astropy.io import fits
+
+                with fits.open(path, memmap=True) as hdus:
+                    header = hdus[hdu].header
+                    integer_nulls = any(key.startswith("TNULL") or key == "BLANK" for key in header)
+                    # ponytail: fall back for any Astropy-serialized table instead
+                    # of parsing its COMMENT YAML; narrow this if that fallback is
+                    # costly, by detecting only serialized mask mappings.
+                    serialized_columns = any(
+                        card.keyword == "COMMENT"
+                        and card.value.strip() == "--BEGIN-ASTROPY-SERIALIZED-COLUMNS--"
+                        for card in header.cards
+                    )
+                possible_nulls = (
+                    any(
+                        (dtype == pl.String and (frame[name] == "").any())
+                        or (dtype.is_float() and frame[name].is_nan().any())
+                        for name, dtype in frame.schema.items()
+                    )
+                    or integer_nulls
+                    or serialized_columns
+                )
+                if not possible_nulls:
+                    return frame
+                logger.debug(
+                    "Torchfits may have lost FITS masks for %s; falling back to Astropy.", path
+                )
+                break
             except Exception as exc:  # try next HDU, then Astropy fallback
                 last_err = exc
-        logger.debug("Torchfits could not read %s (%s); falling back to Astropy.", path, last_err)
+        if last_err is not None:
+            logger.debug(
+                "Torchfits could not read %s (%s); falling back to Astropy.", path, last_err
+            )
 
     from astropy.table import Table
 
@@ -363,7 +398,7 @@ def write_frame(
     elif suffix in (".tsv", ".tab"):
         lf.sink_csv(out, separator="\t")
     elif suffix in (".fits", ".fit"):
-        polars_to_astropy(lf).write(out, overwrite=True)
+        polars_to_astropy(lf).write(out, overwrite=True, serialize_method="data_mask")
     elif suffix == ".hats":
         write_hats(frame, out, ra_column=ra_column, dec_column=dec_column, threshold=hats_threshold)
         return

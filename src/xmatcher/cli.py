@@ -1624,6 +1624,11 @@ def handle_search(cm: CrossMatch, pattern: str, console: Console) -> int:
                 tables = discover_tables(
                     info["url"],
                     name_filter=effective_pattern if effective_pattern != "%" else None,
+                    auth_session=(
+                        cm.auth_config.get_auth_session(info["archive"])
+                        if info.get("archive")
+                        else None
+                    ),
                 )
         except Exception as exc:
             console.error(f"  [{console.dim('unreachable')}: {exc}]")
@@ -1651,6 +1656,7 @@ def handle_search(cm: CrossMatch, pattern: str, console: Console) -> int:
                     tables = discover_tables(
                         url,
                         name_filter=effective_pattern if effective_pattern != "%" else None,
+                        auth_session=cm.auth_config.get_auth_session(archive_key),
                     )
             except Exception:
                 continue
@@ -1695,10 +1701,40 @@ def handle_discover(
 
     console.info(f"Endpoint: {console.cyan(url)}")
 
+    try:
+        auth_archive, _, _ = endpoint_archive(endpoint)
+    except Exception:
+        auth_archive = None
+    if auth_archive is None:
+        auth_archive = next(
+            (
+                info.get("archive")
+                for info in get_public_endpoints().values()
+                if info.get("url") == url and info.get("archive")
+            ),
+            None,
+        )
+    if auth_archive is None:
+        auth_archive = next(
+            (
+                name
+                for name, archive in cm.archives_config.items()
+                if name.lower() == endpoint.lower()
+                or any(
+                    isinstance(service, dict) and service.get("access_url") == url
+                    for service in archive.values()
+                )
+            ),
+            None,
+        )
+    auth_session = (
+        cm.auth_config.get_auth_session(auth_archive) if auth_archive is not None else None
+    )
+
     if schema_table:
         try:
             with Progress(f"Fetching schema for '{schema_table}' …", enabled=console.enabled):
-                schema = get_table_schema(url, schema_table)
+                schema = get_table_schema(url, schema_table, auth_session=auth_session)
         except Exception as exc:
             console.error(f"Failed to query schema for '{schema_table}': {exc}")
             return 1
@@ -1761,7 +1797,7 @@ def handle_discover(
     else:
         try:
             with Progress(f"Discovering tables on {endpoint} …", enabled=console.enabled):
-                tables = discover_tables(url)
+                tables = discover_tables(url, auth_session=auth_session)
         except Exception as exc:
             console.error(f"Failed to discover tables: {exc}")
             return 1
@@ -2010,12 +2046,22 @@ def _guarded(
         return 1
 
 
+def _load_cli_crossmatch(config_file: str | Path | None, console: Console) -> CrossMatch | None:
+    try:
+        return CrossMatch(config_file=config_file)
+    except ConfigError as exc:
+        console.error(f"Error: {exc}")
+        return None
+
+
 def _run_match_subcommand(argv: Sequence[str]) -> int:
     parser = _build_match_subparser()
     args = parser.parse_args(list(argv))
     setup_logging(args.verbose)
     console = _make_console(no_color=bool(getattr(args, "no_color", False)))
-    cm = CrossMatch(config_file=args.config_file)
+    cm = _load_cli_crossmatch(args.config_file, console)
+    if cm is None:
+        return 1
     return _guarded(cm, console, lambda: _execute_match(args, cm, console))
 
 
@@ -2024,7 +2070,9 @@ def _run_sync_subcommand(argv: Sequence[str]) -> int:
     args = parser.parse_args(list(argv))
     setup_logging(args.verbose)
     console = _make_console(no_color=bool(getattr(args, "no_color", False)))
-    cm = CrossMatch(config_file=args.config_file)
+    cm = _load_cli_crossmatch(args.config_file, console)
+    if cm is None:
+        return 1
 
     def body() -> int:
         from .mirror import SyncStats, sync_catalogue
@@ -2079,7 +2127,9 @@ def _run_simple_describe(argv: Sequence[str]) -> int:
     args = parser.parse_args(list(argv))
     setup_logging(args.verbose)
     console = _make_console(no_color=bool(getattr(args, "no_color", False)))
-    cm = CrossMatch(config_file=args.config_file)
+    cm = _load_cli_crossmatch(args.config_file, console)
+    if cm is None:
+        return 1
     return _guarded(cm, console, lambda: 0 if describe(cm, args.name, console) else 1)
 
 
@@ -2125,7 +2175,9 @@ def _run_adopt_subcommand(argv: Sequence[str]) -> int:
     args = parser.parse_args(list(argv))
     setup_logging(args.verbose)
     console = _make_console(no_color=bool(getattr(args, "no_color", False)))
-    cm = CrossMatch(config_file=args.config_file)
+    cm = _load_cli_crossmatch(args.config_file, console)
+    if cm is None:
+        return 1
     return _guarded(
         cm,
         console,
@@ -2154,7 +2206,9 @@ def _run_no_pos_subcommand(argv: Sequence[str], name: str) -> int:
     args = parser.parse_args(list(argv))
     setup_logging(args.verbose)
     console = _make_console(no_color=bool(getattr(args, "no_color", False)))
-    cm = CrossMatch(config_file=args.config_file)
+    cm = _load_cli_crossmatch(args.config_file, console)
+    if cm is None:
+        return 1
 
     def body() -> int:
         if name == "list":

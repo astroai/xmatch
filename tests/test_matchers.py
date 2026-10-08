@@ -1026,28 +1026,25 @@ def test_filter_expr_invalid_sql_raises(filter_expr):
         sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
 
 
-def test_filter_expr_with_find_best_reduces_after_filter():
-    """filter_expr applied before find='best' reduction: multiple candidates
-    get filtered, then the best among survivors is picked."""
+def test_filter_expr_after_find_best_does_not_rematch():
+    """Rejecting the best pair does not select a farther surviving candidate."""
     left = pl.DataFrame({"ra": [10.0], "dec": [5.0], "mag": [10.0]})
     right = pl.DataFrame(
         {
             "ra": [10.00002, 10.0001],
             "dec": [5.00002, 5.0],
-            "mag": [10.05, 20.0],  # second has bad photometry
+            "mag": [20.0, 10.05],  # nearest has bad photometry
         }
     )
     # Both right stars are within 1 arcsec spatially.
-    # filter_expr removes the bad-photometry match (mag diff = 10.0 > 1.0).
-    # Then find="best" picks the sole survivor.
+    # The post-match filter removes the nearest match; it does not rematch.
     spec = MatchSpec(
         radius_arcsec=1.0,
         find="best",
         filter_expr="abs(mag - mag_2) < 1.0",
     )
     out = sky_match(_src("a"), _src("b"), left.lazy(), right.lazy(), spec, engine="fast").collect()
-    assert out.height == 1
-    assert abs(out["mag_2"][0] - 10.05) < 0.01
+    assert out.height == 0
 
 
 def test_filter_expr_engine_zone_supported():
@@ -1875,7 +1872,9 @@ def test_skyellipse_engine_parity():
     assert out_fast.height == out_zone.height
 
 
-def test_skyellipse_wraps_ra_difference_across_zero():
+@pytest.mark.parametrize("engine", ["fast", "astropy", "zone"])
+@pytest.mark.parametrize("find", ["best", "all"])
+def test_skyellipse_wraps_ra_difference_across_zero(engine, find):
     from astropy import units as u
     from astropy.coordinates import SkyCoord
 
@@ -1891,8 +1890,8 @@ def test_skyellipse_wraps_ra_difference_across_zero():
         _src("right", ra_err_column="rae", dec_err_column="dee"),
         left.lazy(),
         right.lazy(),
-        MatchSpec(radius_arcsec=1.0, matcher="skyellipse", max_error=3.0),
-        engine="fast",
+        MatchSpec(radius_arcsec=1.0, matcher="skyellipse", max_error=3.0, find=find),
+        engine=engine,
     ).collect()
     assert result.height == 1
     assert result["sep_arcsec"][0] == pytest.approx(separation.arcsec)
@@ -3332,3 +3331,158 @@ def test_ray_nway_and_fof_match_parity(_ray_cluster):
     fof_ray = cm.fof_match([cat1, cat2, cat3], radius_arcsec=2.0, engine="ray")
     assert fof_local is not None and fof_ray is not None
     assert fof_ray.sort("bundle_id").equals(fof_local.sort("bundle_id"))
+
+
+@pytest.mark.parametrize("engine", ["fast", "astropy", "zone"])
+@pytest.mark.parametrize("find", ["best", "all"])
+def test_skyellipse_rejects_singular_covariance(engine, find):
+    left = pl.DataFrame({"ra": [10.0], "dec": [0.0], "rae": [1.0], "dee": [1.0], "rho": [1.0]})
+    right = left.with_columns(pl.lit(10.0 + 1 / 3600).alias("ra"), pl.lit(-1 / 3600).alias("dec"))
+    source = _src("singular", ra_err_column="rae", dec_err_column="dee", corr_column="rho")
+    result = sky_match(
+        source,
+        source,
+        left.lazy(),
+        right.lazy(),
+        MatchSpec(matcher="skyellipse", max_error=1.0, find=find),
+        engine=engine,
+    ).collect()
+    assert result.height == 0  # Offset lies outside the rank-one covariance's support.
+
+
+@pytest.mark.parametrize("metadata", ["errors", "five_parameter"])
+@pytest.mark.parametrize("inflation", ["drift", "floor"])
+def test_covariance_inflation_preserves_measured_cross_covariance(metadata, inflation):
+    from xmatcher.matchers import _pos_covariance
+    from xmatcher.sources import ASTROMETRIC_COVARIANCE_KEYS
+
+    if metadata == "errors":
+        frame = pl.DataFrame({"rae": [0.5], "dee": [0.5], "rho": [0.9]})
+        source = _src("errors", ra_err_column="rae", dec_err_column="dee", corr_column="rho")
+    else:
+        row = {
+            key: [1.0] if key.endswith("error") else [0.0] for key in ASTROMETRIC_COVARIANCE_KEYS
+        }
+        row.update({"ra_error": [500.0], "dec_error": [500.0], "ra_dec_corr": [0.9]})
+        frame = pl.DataFrame(row)
+        source = _src(
+            "gaia", astrometric_covariance_columns={key: key for key in ASTROMETRIC_COVARIANCE_KEYS}
+        )
+    if inflation == "drift":
+        frame = frame.with_columns(pl.lit(np.sqrt(2.0)).alias("_pm_drift_arcsec"))
+        expected_variance = 1.25
+    else:
+        source.default_pos_error_arcsec = 1.0
+        expected_variance = 1.0
+    covariance = _pos_covariance(frame, source)
+    assert covariance is not None
+    east, north, rho = covariance
+    np.testing.assert_allclose(east, [expected_variance])
+    np.testing.assert_allclose(north, [expected_variance])
+    # Adding independent axis uncertainty cannot create correlated uncertainty.
+    np.testing.assert_allclose(rho * np.sqrt(east * north), [0.9 * 0.5 * 0.5])
+
+
+@pytest.mark.parametrize("engine", ["fast", "astropy", "zone"])
+@pytest.mark.parametrize("matcher", ["skyerr", "skyellipse"])
+def test_declared_five_parameter_covariance_is_used_by_public_matcher(engine, matcher):
+    from xmatcher.sources import ASTROMETRIC_COVARIANCE_KEYS
+
+    row = {key: [1.0] if key.endswith("error") else [0.0] for key in ASTROMETRIC_COVARIANCE_KEYS}
+    left = pl.DataFrame({"id": [1], "ra": [10.0], "dec": [0.0], **row})
+    right = pl.concat(
+        [
+            left.with_columns(pl.lit(11).alias("id")),
+            left.with_columns(pl.lit(12).alias("id"), pl.lit(10.0 + 0.5 / 3600).alias("ra")),
+        ]
+    )
+    source = _src(
+        "gaia", astrometric_covariance_columns={key: key for key in ASTROMETRIC_COVARIANCE_KEYS}
+    )
+    result = sky_match(
+        source,
+        source,
+        left.lazy(),
+        right.lazy(),
+        MatchSpec(
+            matcher=matcher, radius_arcsec=1.0, max_error=3.0, find="all", fallback_policy="error"
+        ),
+        engine=engine,
+    ).collect()
+    assert result.select("id", "id_2").rows() == [(1, 11)]
+
+
+@pytest.mark.parametrize("matcher", ["ml", "xgb", "lr", "auf", "macauff"])
+def test_astropy_scored_matchers_retrieve_radius_candidates_without_errors(matcher):
+    left = pl.DataFrame({"id": [1], "ra": [10.0], "dec": [0.0], "mag": [18.0]})
+    right = left.with_columns(pl.lit(2).alias("id"))
+    spec = MatchSpec(
+        matcher=matcher, find="all", lr_magnitude_column="mag", ml_color_columns=["mag"]
+    )
+    result = sky_match(
+        _src("left"), _src("right"), left.lazy(), right.lazy(), spec, engine="astropy"
+    ).collect()
+    assert result.select("id", "id_2").rows() == [(1, 2)]
+
+
+@pytest.mark.parametrize("matcher", ["ml", "xgb", "auf", "macauff"])
+def test_separation_fallback_preserves_all_candidates(matcher):
+    left = pl.DataFrame({"id": [1], "ra": [10.0], "dec": [0.0]})
+    right = pl.DataFrame({"id": [2, 3], "ra": [10.0, 10.0 + 0.2 / 3600], "dec": [0.0, 0.0]})
+    result = sky_match(
+        _src("left"),
+        _src("right"),
+        left.lazy(),
+        right.lazy(),
+        MatchSpec(matcher=matcher, find="all"),
+        engine="fast",
+    ).collect()
+    assert result.select("id", "id_2").sort("id_2").rows() == [(1, 2), (1, 3)]
+
+
+@pytest.mark.parametrize("matcher", ["ml", "xgb", "lr", "auf", "macauff"])
+def test_post_filter_retains_scores_for_surviving_pairs(matcher):
+    left = pl.DataFrame({"id": [1], "ra": [10.0], "dec": [0.0], "mag": [18.0]})
+    right = pl.DataFrame(
+        {"id": [2, 3], "ra": [10.0, 10.0 + 0.2 / 3600], "dec": [0.0, 0.0], "mag": [18.0, 18.1]}
+    )
+    spec = MatchSpec(
+        matcher=matcher, ml_color_columns=["mag"], lr_magnitude_column="mag", find="all"
+    )
+    unfiltered = sky_match(
+        _src("left"), _src("right"), left.lazy(), right.lazy(), spec, engine="fast"
+    ).collect()
+    spec.filter_expr = "id_2 = 2"
+    filtered = sky_match(
+        _src("left"), _src("right"), left.lazy(), right.lazy(), spec, engine="fast"
+    ).collect()
+    assert filtered.equals(unfiltered.filter(pl.col("id_2") == 2))
+
+
+def test_post_filter_uses_requested_right_suffix():
+    left = pl.DataFrame({"id": [1], "ra": [10.0], "dec": [0.0]})
+    right = left.with_columns(pl.lit(2).alias("id"))
+    result = sky_match(
+        _src("left"),
+        _src("right"),
+        left.lazy(),
+        right.lazy(),
+        MatchSpec(filter_expr="id_b = 2"),
+        engine="fast",
+        right_suffix="_b",
+    ).collect()
+    assert result.select("id", "id_b").rows() == [(1, 2)]
+
+
+def test_post_filter_preserves_user_row_index_column():
+    left = pl.DataFrame({"id": [1], "ra": [10.0], "dec": [0.0], "_row_id": [77]})
+    right = left.drop("_row_id").with_columns(pl.lit(2).alias("id"))
+    result = sky_match(
+        _src("left"),
+        _src("right"),
+        left.lazy(),
+        right.lazy(),
+        MatchSpec(filter_expr="_row_id = 77"),
+        engine="fast",
+    ).collect()
+    assert result.select("id", "id_2", "_row_id").rows() == [(1, 2, 77)]

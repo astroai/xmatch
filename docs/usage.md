@@ -249,7 +249,7 @@ For repeated analysis or full-sky union operations, `xmatcher` can mirror remote
 # Mirror full remote surveys into local HATS cache
 xmatcher sync gaia allwise twomass
 
-# Re-sync checks TAP page windows or hashes remote HATS partition content.
+# Re-sync checks TAP page windows or advertised remote HATS partition sizes.
 xmatcher sync gaia
 
 # Force full re-download
@@ -264,9 +264,9 @@ xmatcher sync gaia --force
 TAP resume requires a stable, unique, non-null key. The page-window row-count
 check does not detect edits that preserve the page's count; use `--force` after
 such mutations or when expanding the page window. Append-only growth is checked
-with a maximum-key probe. Remote HATS synchronization compares partition
-content hashes on each sync attempt; this detects same-size edits but can
-require reading substantial remote data.
+with a maximum-key probe. Remote HATS synchronization compares advertised
+partition sizes with the mirror manifest. Use `--force` to detect upstream
+edits that keep the same size.
 
 ---
 
@@ -586,6 +586,9 @@ uncertainty or epoch-motion halos. Planning may scan additional partitions and
 can add substantial I/O. `target_epoch`
 requires valid epoch and motion metadata for rows needing propagation. Missing
 motion without declared finite errors requires an explicit `pm_prior` model.
+Valid zero-row HATS inputs retain their advertised schema. The first nonempty
+input supplies output tiling without changing catalogue order or column suffixes;
+when every input is empty, the output is still a readable zero-row HATS catalogue.
 
 The output uses a coherent NESTED partition tree. Input measurements are
 preserved, and `_union_ra` / `_union_dec` provide non-null routing coordinates

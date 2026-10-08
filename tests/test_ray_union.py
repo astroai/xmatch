@@ -17,7 +17,8 @@ import numpy as np
 import polars as pl
 import pytest
 
-from xmatcher import hats_native, matchers, ray_union
+from xmatcher import hats_native, matchers, mirror, ray_union
+from xmatcher.exceptions import CrossMatchError
 from xmatcher.sources import CatalogueSource
 
 HAVE_RAY = importlib.util.find_spec("ray") is not None
@@ -36,6 +37,13 @@ def _catalogue(path: Path, name: str, df: pl.DataFrame) -> CatalogueSource:
         "dataproduct_type=object\nobs_collection=xmatcher-test\n"
         "hats_col_ra=ra\nhats_col_dec=dec\nhats_ordering=NESTED\nhats_nrows=%d\n" % df.height
     )
+    return CatalogueSource(name=name, is_local=True, path=path, ra_column="ra", dec_column="dec")
+
+
+def _empty_catalogue(path: Path, name: str) -> CatalogueSource:
+    """Write a valid zero-row native HATS catalogue with an advertised schema."""
+    frame = pl.DataFrame(schema={"id": pl.Utf8, "ra": pl.Float64, "dec": pl.Float64})
+    mirror._write_hats_native(frame, path, ra_column="ra", dec_column="dec")
     return CatalogueSource(name=name, is_local=True, path=path, ra_column="ra", dec_column="dec")
 
 
@@ -125,6 +133,69 @@ def _assert_matches_oracle(got: list[tuple[str, tuple[str, ...], float]], want: 
         assert (
             (g[2] == w[2]) or (math.isnan(g[2]) and math.isnan(w[2])) or (abs(g[2] - w[2]) < 1e-2)
         ), (g, w)
+
+
+@pytest.mark.parametrize("case", ["empty_hub", "empty_side", "all_empty"])
+def test_ray_union_accepts_valid_empty_hats_catalogues(tmp_path: Path, case: str) -> None:
+    """Valid zero-row HATS inputs retain full-outer rows and output schema."""
+    import hats
+    import pyarrow.parquet as pq
+
+    empty = _empty_catalogue(tmp_path / f"{case}_empty", "empty")
+    nonempty = _catalogue(
+        tmp_path / f"{case}_nonempty",
+        "nonempty",
+        pl.DataFrame({"id": ["kept"], "ra": [10.0], "dec": [5.0]}),
+    )
+    if case == "empty_hub":
+        sources, expected_ids, expected_membership = [empty, nonempty], ["kept"], ["2"]
+    elif case == "empty_side":
+        sources, expected_ids, expected_membership = [nonempty, empty], ["kept"], ["1"]
+    else:
+        second_empty = _empty_catalogue(tmp_path / f"{case}_empty_second", "empty-second")
+        sources, expected_ids, expected_membership = [empty, second_empty], [], []
+
+    out = tmp_path / f"out_{case}"
+    ray_union.ray_union_match(sources, sep_arcsec=2.0, output_file=str(out))
+
+    result = _read_output(out)
+    assert result.height == len(expected_ids)
+    if expected_ids:
+        assert result["_src_cats"].to_list() == expected_membership
+        if case == "empty_hub":
+            assert result["id_2"].to_list() == expected_ids
+        else:
+            assert result["id"].to_list() == expected_ids
+    schema_names = set(pq.read_schema(out / "dataset" / "_common_metadata").names)
+    assert {"id", "ra", "dec", "id_2", "ra_2", "dec_2"} <= schema_names
+    catalogue = hats.read_hats(out)
+    assert catalogue.catalog_info.total_rows == len(expected_ids)
+
+
+def test_union_plan_rejects_missing_partitions_for_nonempty_hats(tmp_path: Path) -> None:
+    """A missing nonempty data partition is not a valid empty catalogue."""
+    source = _catalogue(
+        tmp_path / "broken",
+        "broken",
+        pl.DataFrame({"id": ["row"], "ra": [10.0], "dec": [5.0]}),
+    )
+    for _, _, path in hats_native.list_hats_pixels(source.path):
+        if path.is_dir():
+            for parquet in path.glob("*.parquet"):
+                parquet.unlink()
+        else:
+            path.unlink()
+
+    with pytest.raises(CrossMatchError):
+        ray_union.build_union_plan(
+            [source],
+            sep_arcsec=2.0,
+            hats_threshold=100,
+            task_rows=1000,
+            chunk_memory_gb=1.0,
+            max_tuples=100,
+            out_dir=str(tmp_path / "never-started"),
+        )
 
 
 def test_ray_union_3catalogue_vs_oracle(tmp_path: Path) -> None:

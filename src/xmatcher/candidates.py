@@ -114,8 +114,9 @@ def write_candidate_release(
     output.parent.mkdir(parents=True, exist_ok=True)
     lock = output.parent / f".{output.name}.lock"
     lock.mkdir()
-    temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
+    temporary: Path | None = None
     try:
+        temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
         scratch = temporary / "scratch"
         scratch.mkdir()
         normalized: dict[str, CatalogueSource] = {}
@@ -283,7 +284,7 @@ def write_candidate_release(
         os.rename(temporary, output)
         return manifest
     finally:
-        if temporary.exists():
+        if temporary is not None and temporary.exists():
             shutil.rmtree(temporary)
         lock.rmdir()
 
@@ -427,6 +428,52 @@ def normalize_candidate_hypotheses(
             raise ValueError(
                 "namespaced pairs require complete namespace columns and inventory namespaces"
             )
+        target_in_inventory = (
+            inventory.select((pl.col("release_namespace") == candidate_namespace).any())
+            .collect(engine="streaming")
+            .item()
+        )
+        pair_count = raw_pairs.select(pl.len()).collect(engine="streaming").item()
+        target_in_pairs = (
+            raw_pairs.select(
+                (
+                    (pl.col("source_namespace") == candidate_namespace)
+                    | (pl.col("candidate_namespace") == candidate_namespace)
+                ).any()
+            )
+            .collect(engine="streaming")
+            .item()
+        )
+        if not target_in_inventory and pair_count and not target_in_pairs:
+            raise ValueError("candidate_namespace is absent from the supplied namespace evidence")
+        endpoints = pl.concat(
+            [
+                raw_pairs.select(
+                    pl.col("source_id").alias("endpoint_id"),
+                    pl.col("source_namespace").alias("endpoint_namespace"),
+                ),
+                raw_pairs.select(
+                    pl.col("candidate_id").alias("endpoint_id"),
+                    pl.col("candidate_namespace").alias("endpoint_namespace"),
+                ),
+            ]
+        )
+        actual_namespaces = inventory.select(
+            pl.col("source_id").alias("endpoint_id"),
+            pl.col("release_namespace").alias("actual_namespace"),
+        )
+        if (
+            endpoints.join(actual_namespaces, on="endpoint_id", how="left")
+            .filter(
+                pl.col("endpoint_namespace").is_null()
+                | pl.col("actual_namespace").is_null()
+                | (pl.col("endpoint_namespace") != pl.col("actual_namespace"))
+            )
+            .select(pl.len())
+            .collect(engine="streaming")
+            .item()
+        ):
+            raise ValueError("candidate endpoint namespace differs from its inventory namespace")
         forward = raw_pairs.filter(pl.col("candidate_namespace") == candidate_namespace).select(
             "source_id", "candidate_id", log_weight_column
         )

@@ -78,6 +78,16 @@ def test_cli_unknown_catalogue_returns_error(capsys):
     assert "Error" in capsys.readouterr().err
 
 
+def test_cli_list_reports_missing_config_without_traceback(tmp_path, capsys):
+    missing = tmp_path / "missing.yaml"
+
+    assert main(["list", "--config", str(missing)]) == 1
+
+    err = capsys.readouterr().err
+    assert "Config file not found" in err
+    assert "Traceback" not in err
+
+
 def test_cli_describe(capsys):
     assert main(["describe", "not_real"]) == 1
     err = capsys.readouterr().err
@@ -239,6 +249,93 @@ def test_cli_global_flag_before_subcommand(capsys):
     rc = main(["-v", "list"])
     assert rc == 0
     assert "gaia" in capsys.readouterr().out
+
+
+def test_discover_forwards_configured_archive_auth_session(monkeypatch):
+    import xmatcher.cli as cli
+    from xmatcher import CrossMatch
+
+    cm = CrossMatch()
+    session = object()
+    calls = []
+
+    def get_session(name):
+        assert name == "noao_datalab"
+        return session
+
+    monkeypatch.setattr(cm.auth_config, "get_auth_session", get_session)
+
+    def fake_discover_tables(url, **kwargs):
+        calls.append((url, kwargs.get("auth_session")))
+        assert kwargs.get("auth_session") is session
+        return pl.DataFrame(
+            {"schema_name": ["nsc_dr2"], "table_name": ["object"], "description": [""]}
+        )
+
+    def fake_get_table_schema(url, table_name, auth_session=None):
+        calls.append((url, auth_session))
+        assert auth_session is session
+        return {
+            "columns": pl.DataFrame(
+                {"column_name": ["ra", "dec"], "datatype": ["double", "double"]}
+            ),
+            "ra_column": "ra",
+            "dec_column": "dec",
+            "columns_list": ["ra", "dec"],
+            "access_identifier": table_name,
+        }
+
+    monkeypatch.setattr(cli, "discover_tables", fake_discover_tables)
+    monkeypatch.setattr(cli, "get_table_schema", fake_get_table_schema)
+    console = cli.Console(enabled=False)
+
+    assert cli.handle_discover(cm, "noirlab", None, console) == 0
+    assert cli.handle_discover(cm, "noirlab", "nsc_dr2.object", console) == 0
+    assert len(calls) == 2
+
+
+def test_search_forwards_configured_archive_auth_session(monkeypatch):
+    import xmatcher.cli as cli
+    from xmatcher import CrossMatch
+
+    cm = CrossMatch()
+    session = object()
+    monkeypatch.setattr(
+        cm.auth_config,
+        "get_auth_session",
+        lambda name: session if name == "noao_datalab" else None,
+    )
+    monkeypatch.setattr(
+        cli,
+        "get_public_endpoints",
+        lambda: {
+            "noirlab": {
+                "url": "https://datalab.noirlab.edu/tap",
+                "description": "",
+                "archive": "noao_datalab",
+                "service_id": "tap_service",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        cm,
+        "archives_config",
+        {"noao_datalab": cm.archives_config["noao_datalab"]},
+    )
+
+    calls = []
+
+    def fake_discover_tables(url, **kwargs):
+        calls.append((url, kwargs.get("auth_session")))
+        assert kwargs.get("auth_session") is session
+        return pl.DataFrame(
+            {"schema_name": ["nsc_dr2"], "table_name": ["object"], "description": [""]}
+        )
+
+    monkeypatch.setattr(cli, "discover_tables", fake_discover_tables)
+
+    assert cli.handle_search(cm, "nsc", cli.Console(enabled=False)) == 0
+    assert len(calls) == 2
 
 
 def test_cli_global_flag_after_subcommand(capsys):

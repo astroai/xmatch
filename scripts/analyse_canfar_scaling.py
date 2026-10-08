@@ -28,7 +28,7 @@ def summarise(
             raise ValueError("Positive input/worker counts and a task-free head are required")
         if int(row["failed_attempts"]) != 0:
             raise ValueError("Failed task attempts require separate analysis")
-        if not 1 <= int(row["actual_worker_nodes"]) <= key[1]:
+        if int(row["actual_worker_nodes"]) != key[1]:
             raise ValueError("Executing worker count must agree with the configured cluster")
         if not 0 < int(row["planned_tasks"]) == int(row["finished_tasks"]):
             raise ValueError("Every planned task must have a recorded successful completion")
@@ -104,6 +104,10 @@ def self_check() -> None:
         [{**row, "finished_tasks": "9"} for row in rows],
         [{**row, "output_rows": "149"} for row in rows],
         [{**row, "output_partitions": "4"} if i == 0 else row for i, row in enumerate(rows)],
+        [
+            {**row, "actual_worker_nodes": "1"} if row["configured_workers"] == "2" else row
+            for row in rows
+        ],
     ):
         try:
             summarise(broken)
