@@ -33,6 +33,53 @@ def test_get_catalogue_config_unknown(cm):
         cm.get_catalogue_config("does_not_exist")
 
 
+def test_get_catalogue_config_resolves_mixed_case_canonical_name(cm):
+    cm.catalogues_config["Odd_Case_Catalogue_One"] = cm.catalogues_config["gaia_esa"]
+
+    for name in ("Odd_Case_Catalogue_One", "odd_case_catalogue_one"):
+        cfg = cm.get_catalogue_config(name)
+        assert cfg["_catalogue_name"] == "Odd_Case_Catalogue_One"
+
+
+def test_get_catalogue_config_resolves_mixed_case_alias_key(cm):
+    cm.catalogues_config["Odd_Case_Catalogue_One"] = cm.catalogues_config["gaia_esa"]
+    cm.aliases_config["Odd_Alias"] = "Odd_Case_Catalogue_One"
+
+    for name in ("Odd_Alias", "odd_alias", "ODD_ALIAS"):
+        cfg = cm.get_catalogue_config(name)
+        assert cfg["_catalogue_name"] == "Odd_Case_Catalogue_One"
+
+
+def test_config_rejects_catalogue_names_ambiguous_by_case(tmp_path, cm):
+    import copy
+
+    import yaml
+
+    config = copy.deepcopy(cm.config)
+    config["catalogues"]["Odd_Case_Catalogue_One"] = config["catalogues"]["gaia_esa"]
+    config["catalogues"]["odd_case_catalogue_one"] = config["catalogues"]["gaia_esa"]
+    path = tmp_path / "ambiguous.yaml"
+    path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(ConfigError):
+        CrossMatch(config_file=path)
+
+
+def test_config_rejects_alias_names_ambiguous_by_case(tmp_path, cm):
+    import copy
+
+    import yaml
+
+    config = copy.deepcopy(cm.config)
+    config["catalogue_aliases"]["Alias_Case_Collision"] = "gaia_esa"
+    config["catalogue_aliases"]["alias_case_collision"] = "gaia_cds"
+    path = tmp_path / "ambiguous-aliases.yaml"
+    path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(ConfigError):
+        CrossMatch(config_file=path)
+
+
 def test_validate_rejects_missing_keys(tmp_path):
     bad = tmp_path / "bad.yaml"
     bad.write_text("archives: {}\n")  # missing 'catalogues'

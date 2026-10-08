@@ -221,6 +221,83 @@ def test_hypotheses_orient_pairs_and_do_not_compete_between_surveys():
     assert result["candidate_namespace"].unique().to_list() == ["infrared/v1"]
 
 
+def test_hypotheses_reject_pair_endpoint_in_wrong_inventory_namespace():
+    inventory = pl.DataFrame(
+        {
+            "source_id": ["s", "c", "d"],
+            "release_namespace": ["source/v1", "infrared/v1", "optical/v1"],
+        }
+    )
+    pairs = pl.DataFrame(
+        {
+            "source_id": ["s"],
+            "candidate_id": ["d"],
+            "source_namespace": ["source/v1"],
+            "candidate_namespace": ["infrared/v1"],
+            "log_weight": [0.0],
+        }
+    )
+
+    with pytest.raises(ValueError):
+        normalize_candidate_hypotheses(inventory, pairs, candidate_namespace="infrared/v1")
+
+
+def test_hypotheses_reject_unregistered_candidate_namespace():
+    inventory = pl.DataFrame(
+        {"source_id": ["s", "c"], "release_namespace": ["source/v1", "target/v1"]}
+    )
+    pairs = pl.DataFrame(
+        {
+            "source_id": ["s"],
+            "candidate_id": ["c"],
+            "source_namespace": ["source/v1"],
+            "candidate_namespace": ["target/v1"],
+            "log_weight": [0.0],
+        }
+    )
+
+    with pytest.raises(ValueError):
+        normalize_candidate_hypotheses(inventory, pairs, candidate_namespace="typo/v1")
+
+
+def test_hypotheses_allow_unobserved_empty_target_namespace():
+    inventory = pl.DataFrame({"source_id": ["s"], "release_namespace": ["source/v1"]})
+    pairs = pl.DataFrame(
+        schema={
+            "source_id": pl.String,
+            "candidate_id": pl.String,
+            "source_namespace": pl.String,
+            "candidate_namespace": pl.String,
+            "log_weight": pl.Float64,
+        }
+    )
+
+    result = normalize_candidate_hypotheses(
+        inventory, pairs, candidate_namespace="empty-target/v1"
+    ).collect()
+
+    assert result.select("source_id", "candidate_id", "probability", "hypothesis_kind").rows() == [
+        ("s", None, 1.0, "no_match")
+    ]
+    assert result["candidate_namespace"].unique().to_list() == ["empty-target/v1"]
+
+
+def test_candidate_release_cleans_lock_if_temporary_directory_setup_fails(tmp_path, monkeypatch):
+    output = tmp_path / "release"
+    sources = [_source("one", [0.0], [0.0]), _source("two", [1.0], [1.0])]
+
+    def fail_mkdtemp(*args, **kwargs):
+        raise OSError("injected temporary-directory setup failure")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr("xmatcher.candidates.tempfile.mkdtemp", fail_mkdtemp)
+        with pytest.raises(OSError, match="injected temporary-directory setup failure"):
+            write_candidate_release(output, sources)
+
+    assert not (tmp_path / ".release.lock").exists()
+    assert write_candidate_release(output, sources)["source_count"] == 2
+
+
 def test_frame_overrides_reach_typed_and_params_matching():
     from xmatcher import CrossMatch, MatchRequest, SideOverrides
     from xmatcher.exceptions import CrossMatchError

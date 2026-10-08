@@ -129,12 +129,16 @@ def cds_xmatch_local_remote(
 
     from .io_utils import polars_to_astropy
 
-    local = local_lf.collect().with_row_index(_XMATCH_KEY)
+    local = local_lf.collect()
+    key_col = _XMATCH_KEY
+    while key_col in local.columns:
+        key_col += "_"
+    local = local.with_row_index(key_col)
     ra_col, dec_col = local_src.ra_column, local_src.dec_column
     if ra_col not in local.columns or dec_col not in local.columns:
         raise CrossMatchError(f"RA/Dec columns '{ra_col}'/'{dec_col}' not in local catalogue.")
 
-    upload = polars_to_astropy(local.select([_XMATCH_KEY, ra_col, dec_col]))
+    upload = polars_to_astropy(local.select([key_col, ra_col, dec_col]))
 
     result_table = XMatch().query(
         cat1=upload,
@@ -144,16 +148,16 @@ def cds_xmatch_local_remote(
         colDec1=dec_col,
     )
     if result_table is None or len(result_table) == 0:
-        return local.drop(_XMATCH_KEY).clear()
+        return local.drop(key_col).clear()
 
     matched = astropy_table_to_polars(result_table)
-    if _XMATCH_KEY not in matched.columns:
+    if key_col not in matched.columns:
         raise CrossMatchError(
             "CDS XMatch result lacks its local-row identifier; cannot rejoin rows."
         )
 
     # Join remote match columns back onto the full local rows via the surrogate id.
-    matched = matched.with_columns(pl.col(_XMATCH_KEY).cast(local[_XMATCH_KEY].dtype))
+    matched = matched.with_columns(pl.col(key_col).cast(local[key_col].dtype))
     remote_only = matched.drop([c for c in (ra_col, dec_col) if c in matched.columns])
-    joined = local.join(remote_only, on=_XMATCH_KEY, how="inner", suffix="_remote")
-    return joined.drop(_XMATCH_KEY)
+    joined = local.join(remote_only, on=key_col, how="inner", suffix="_remote")
+    return joined.drop(key_col)

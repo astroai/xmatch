@@ -325,6 +325,16 @@ class CrossMatch:
             if not isinstance(self.config[key], dict):
                 raise ConfigError(f"Top-level key '{key}' must be a mapping.")
 
+        canonical_names: dict[str, str] = {}
+        for name in self.catalogues_config:
+            if not isinstance(name, str):
+                raise ConfigError(f"Catalogue names must be strings, got {name!r}.")
+            folded = name.casefold()
+            previous = canonical_names.get(folded)
+            if previous is not None and previous != name:
+                raise ConfigError(f"Catalogue names '{previous}' and '{name}' differ only by case.")
+            canonical_names[folded] = name
+
         for name, cat in self.catalogues_config.items():
             if not isinstance(cat, dict):
                 raise ConfigError(f"Catalogue '{name}' must be a mapping.")
@@ -368,7 +378,15 @@ class CrossMatch:
                         f"Catalogue '{name}' has empty astrometric covariance column names."
                     )
 
+        alias_names: dict[str, str] = {}
         for alias, target in self.aliases_config.items():
+            if not isinstance(alias, str):
+                raise ConfigError(f"Alias names must be strings, got {alias!r}.")
+            folded = alias.casefold()
+            previous = alias_names.get(folded)
+            if previous is not None and previous != alias:
+                raise ConfigError(f"Alias names '{previous}' and '{alias}' differ only by case.")
+            alias_names[folded] = alias
             if target not in self.catalogues_config:
                 raise ConfigError(f"Alias '{alias}' points to unknown catalogue '{target}'.")
 
@@ -399,7 +417,17 @@ class CrossMatch:
         return resolved
 
     def resolve_name(self, name: str) -> str:
-        return self.aliases_config.get(name.lower(), name.lower())
+        folded = name.casefold()
+        alias = next(
+            (target for key, target in self.aliases_config.items() if key.casefold() == folded),
+            None,
+        )
+        if alias is not None:
+            return alias
+        return next(
+            (canonical for canonical in self.catalogues_config if canonical.casefold() == folded),
+            name.lower(),
+        )
 
     def find_catalogue_by_access_id(self, table_id: str) -> str | None:
         """Return catalogue key whose ``access_identifier``/``table_name`` matches *table_id*.

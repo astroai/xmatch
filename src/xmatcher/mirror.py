@@ -69,6 +69,16 @@ DEFAULT_PAGE_SIZE = 100_000
 DEFAULT_ESTIMATED_SIZE = 500_000
 _TAP_CEILING_FACTOR = 1.5
 _MANIFEST_NAME = "sync.json"
+_HATS_METADATA_NAMES = frozenset(
+    {
+        "properties",
+        "hats.properties",
+        "partition_info.csv",
+        "partition_info.parquet",
+        "_common_metadata",
+        "_metadata",
+    }
+)
 _HTTP_RETRIES = 3
 _HTTP_BACKOFF_CAP_S = 60.0
 _DEFAULT_MIN_FREE_GB = 10.0
@@ -198,6 +208,7 @@ def _http_request(
     bucket: TokenBucket,
     *,
     head: bool = False,
+    range_probe: bool = False,
 ) -> tuple[bytes | None, int | None]:
     """GET (or HEAD) ``url`` under the token bucket with 429/503 backoff.
 
@@ -208,11 +219,20 @@ def _http_request(
     for attempt in range(_HTTP_RETRIES):
         bucket.acquire()
         try:
-            req = urllib.request.Request(url, method="HEAD" if head else "GET")
+            headers = {"Range": "bytes=0-0"} if range_probe else {}
+            req = urllib.request.Request(url, headers=headers, method="HEAD" if head else "GET")
             with urllib.request.urlopen(req, timeout=120) as resp:
                 length = resp.headers.get("Content-Length")
                 size = int(length) if length and length.isdigit() else None
-                return (None, size) if head else (resp.read(), size)
+                if range_probe:
+                    content_range = resp.headers.get("Content-Range", "")
+                    match = re.fullmatch(r"bytes\s+\d+-\d+/(\d+)", content_range)
+                    if match:
+                        size = int(match.group(1))
+                if head:
+                    return None, size
+                body = resp.read(1) if range_probe else resp.read()
+                return body, size
         except urllib.error.HTTPError as exc:
             last_exc = exc
             if exc.code in (429, 503):
@@ -232,14 +252,14 @@ def _http_request(
     raise last_exc
 
 
-def _http_listing(url: str, bucket: TokenBucket) -> list[str]:
-    """Entry names from an HTML directory listing (``[]`` when unavailable)."""
+def _http_listing(url: str, bucket: TokenBucket) -> tuple[list[str], bool]:
+    """Entry names and whether the HTTP directory listing was retrieved."""
     try:
         body, _ = _http_request(url, bucket)
     except (urllib.error.HTTPError, urllib.error.URLError, OSError):
-        return []
+        return [], False
     if not body:
-        return []
+        return [], False
     text = body.decode("utf-8", errors="replace")
     names: list[str] = []
     for m in re.finditer(r'href="([^"?#]+)"', text):
@@ -247,15 +267,68 @@ def _http_listing(url: str, bucket: TokenBucket) -> list[str]:
         if name in (".", ".."):
             continue
         names.append(urllib.parse.unquote(name))
-    return names
+    return names, True
 
 
-def _http_head(url: str, bucket: TokenBucket) -> int | None:
+def _http_probe(url: str, bucket: TokenBucket) -> tuple[bool, int | None]:
+    """Return whether a HEAD request succeeded, even when size is unknown."""
     try:
         _, size = _http_request(url, bucket, head=True)
-        return size
-    except Exception:  # noqa: BLE001
+        return True, size
+    except urllib.error.HTTPError as exc:
+        if exc.code != 405:
+            return False, None
+        try:
+            body, size = _http_request(url, bucket, range_probe=True)
+            return body is not None, size
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+            return False, None
+    except (urllib.error.URLError, OSError):
+        return False, None
+
+
+def _http_hats_properties(root: str, bucket: TokenBucket) -> tuple[dict[str, Any], int] | None:
+    """Find parseable HATS properties, rejecting generic login/error pages."""
+    for rel in ("properties", "dataset/properties", "hats.properties"):
+        try:
+            body, size = _http_request(f"{root}/{rel}", bucket)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+            continue
+        if not body:
+            continue
+        row_count = _hats_property_count(body)
+        if row_count is not None:
+            return {"rel": rel, "size": size}, row_count
+    return None
+
+
+def _hats_property_count(body: bytes) -> int | None:
+    props = {}
+    for line in body.decode("utf-8", errors="replace").splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            props[key.strip().lower()] = value.strip()
+    try:
+        row_count = int(props["hats_nrows"])
+    except (KeyError, ValueError):
         return None
+    return row_count if row_count >= 0 and any(key.startswith("hats_") for key in props) else None
+
+
+def _validate_hats_partition_info(info: pl.DataFrame, row_count: int, rel: str) -> None:
+    """Reject partition tables that cannot account for the advertised rows."""
+    if row_count > 0 and info.height == 0:
+        raise OSError(f"{rel} does not agree with hats_nrows; preserving the existing mirror")
+    if "count" in info.columns:
+        counts = [_as_size(value) for value in info["count"].to_list()]
+        if any(count is None or count < 0 for count in counts):
+            raise OSError(
+                f"{rel} contains invalid partition counts; preserving the existing mirror"
+            )
+        if sum(int(count) for count in counts if count is not None) != row_count:
+            raise OSError(
+                f"{rel} counts do not agree with hats_nrows; preserving the existing mirror"
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -277,7 +350,7 @@ def _remote_hats_listing(
     root = ident.rstrip("/")
     for info_rel in ("dataset/partition_info.parquet", "partition_info.parquet"):
         try:
-            body, _ = _http_request(f"{root}/{info_rel}", bucket)
+            body, info_size = _http_request(f"{root}/{info_rel}", bucket)
         except (urllib.error.HTTPError, urllib.error.URLError, OSError):
             continue
         if not body:
@@ -286,32 +359,104 @@ def _remote_hats_listing(
             info = pl.read_parquet(_io.BytesIO(body))
             if "file_loc" not in info.columns:
                 continue
+            properties_info = _http_hats_properties(root, bucket)
+            if properties_info is None:
+                continue
+            properties, row_count = properties_info
+            _validate_hats_partition_info(info, row_count, info_rel)
             base = "dataset" if info_rel.startswith("dataset/") else ""
-            files: list[dict[str, Any]] = []
+            files: list[dict[str, Any]] = [{"rel": info_rel, "size": info_size}]
             for row in info.rows(named=True):
-                loc = str(row.get("file_loc", "")).strip()
-                if not loc:
-                    continue
+                raw_loc = row.get("file_loc")
+                if not isinstance(raw_loc, str) or not raw_loc.strip():
+                    raise OSError(f"invalid file_loc in {info_rel}; preserving the existing mirror")
+                loc = raw_loc.strip().strip("/")
+                if any(part in (".", "..") for part in loc.split("/")):
+                    raise OSError(f"unsafe file_loc in {info_rel}; preserving the existing mirror")
                 rel = f"{base}/{loc}" if base else loc
                 rel = rel.replace("//", "/")
-                if rel.endswith(".parquet"):
-                    files.append({"rel": rel, "size": _as_size(row.get("file_size"))})
+                nfiles = _as_size(row.get("Nfiles"))
+                if not rel.endswith(".parquet") and nfiles is not None and nfiles > 1:
+                    names, complete = _http_listing(f"{root}/{rel}", bucket)
+                    parts = [name.strip("/") for name in names if name.lower().endswith(".parquet")]
+                    if not complete or len(parts) != nfiles:
+                        raise OSError(
+                            f"partition {loc!r} advertised by {info_rel} is incomplete; "
+                            "preserving the existing mirror"
+                        )
+                    for part in parts:
+                        if Path(part).name != part:
+                            raise OSError(f"unsafe partition filename in {info_rel}")
+                        candidate = f"{rel}/{part}"
+                        found, remote_size = _http_probe(f"{root}/{candidate}", bucket)
+                        if not found:
+                            raise OSError(
+                                f"partition file {candidate!r} advertised by {info_rel} "
+                                "is unavailable; preserving the existing mirror"
+                            )
+                        files.append(
+                            {
+                                "rel": candidate,
+                                "size": (
+                                    remote_size
+                                    if remote_size is not None
+                                    else _as_size(row.get("file_size"))
+                                ),
+                            }
+                        )
                     continue
-                # hats `file_loc` may omit the .parquet suffix (single-file
-                # pixel dirs); resolve the real path by probing both shapes.
-                for cand in (rel, f"{rel}.parquet"):
-                    size = _http_head(f"{root}/{cand}", bucket)
-                    if size is not None:
-                        files.append({"rel": cand, "size": _as_size(row.get("file_size"))})
+                candidates = (rel,) if rel.endswith(".parquet") else (rel, f"{rel}.parquet")
+                for candidate in candidates:
+                    found, remote_size = _http_probe(f"{root}/{candidate}", bucket)
+                    if found:
+                        listed_size = _as_size(row.get("file_size"))
+                        files.append(
+                            {
+                                "rel": candidate,
+                                "size": remote_size if remote_size is not None else listed_size,
+                            }
+                        )
                         break
-            for extra in ("properties", "dataset/properties", "hats.properties"):
-                size = _http_head(f"{root}/{extra}", bucket)
-                if size is not None:
+                else:
+                    raise OSError(
+                        f"partition {loc!r} advertised by {info_rel} is unavailable; "
+                        "preserving the existing mirror"
+                    )
+
+            files.append(properties)
+            metadata_files = (
+                "dataset/partition_info.parquet",
+                "partition_info.parquet",
+                "dataset/_common_metadata",
+                "dataset/_metadata",
+                "_common_metadata",
+                "_metadata",
+            )
+            known = {entry["rel"] for entry in files}
+            for extra in metadata_files:
+                if extra in known:
+                    continue
+                found, size = _http_probe(f"{root}/{extra}", bucket)
+                if found:
                     files.append({"rel": extra, "size": size})
+            schema_files = {
+                "dataset/_common_metadata",
+                "dataset/_metadata",
+                "_common_metadata",
+                "_metadata",
+            }
+            if row_count == 0 and not any(entry["rel"] in schema_files for entry in files):
+                raise OSError(f"empty HATS catalogue {root} has no readable schema metadata")
             return files
         except (ImportError, OSError, ValueError):
-            continue
-    return _http_walk_hats(root, bucket)
+            # A parsed authoritative table with malformed or missing partitions
+            # is incomplete. Falling back to a directory walk could then prune
+            # files the table still advertises.
+            raise
+    files, complete = _http_walk_hats(root, bucket)
+    if complete:
+        return files
+    raise OSError(f"could not obtain a complete HATS listing from {root}")
 
 
 def _as_size(value: Any) -> int | None:
@@ -321,84 +466,232 @@ def _as_size(value: Any) -> int | None:
         return None
 
 
-def _http_walk_hats(root: str, bucket: TokenBucket) -> list[dict[str, Any]]:
-    """Walk HTML listings under ``root``/``dataset`` collecting partition files."""
+def _http_walk_hats(root: str, bucket: TokenBucket) -> tuple[list[dict[str, Any]], bool]:
+    """Walk accessible HTML listings, returning files and listing completeness."""
     out: list[dict[str, Any]] = []
-    for base in ("", "dataset"):
-        url = f"{root}/{base}" if base else root
-        for name in _http_listing(url, bucket):
-            rel = f"{base}/{name}".strip("/")
-            if name.startswith("Norder="):
-                out.extend(_walk_order_dir(f"{url}/{name}", bucket, rel))
-            elif name.endswith(".parquet") or name in ("properties", "hats.properties"):
-                size = _http_head(f"{url}/{name}", bucket)
+    root_names, complete = _http_listing(root, bucket)
+    if not complete:
+        return [], False
+    dataset_listed = False
+    for name in root_names:
+        rel = name.strip("/")
+        if rel == "dataset":
+            dataset_listed = True
+        if rel.startswith("Norder="):
+            entries, complete = _walk_order_dir(f"{root}/{rel}", bucket, rel)
+            out.extend(entries)
+            if not complete:
+                return out, False
+        elif rel.lower().endswith(".parquet") or Path(rel).name in _HATS_METADATA_NAMES:
+            found, size = _http_probe(f"{root}/{rel}", bucket)
+            if not found:
+                return out, False
+            out.append({"rel": rel, "size": size})
+
+    if dataset_listed:
+        dataset_names, complete = _http_listing(f"{root}/dataset", bucket)
+        if not complete:
+            return out, False
+        for name in dataset_names:
+            child = name.strip("/")
+            rel = f"dataset/{child}"
+            if child.startswith("Norder="):
+                entries, complete = _walk_order_dir(f"{root}/dataset/{child}", bucket, rel)
+                out.extend(entries)
+                if not complete:
+                    return out, False
+            elif child.lower().endswith(".parquet") or child in _HATS_METADATA_NAMES:
+                found, size = _http_probe(f"{root}/{rel}", bucket)
+                if not found:
+                    return out, False
                 out.append({"rel": rel, "size": size})
-    return out
+    properties_info = _http_hats_properties(root, bucket)
+    if properties_info is None or not out:
+        return [], False
+    properties, row_count = properties_info
+    out = [
+        entry
+        for entry in out
+        if entry["rel"] not in ("properties", "dataset/properties", "hats.properties")
+    ]
+    out.append(properties)
+    has_pixels = any("Norder=" in entry["rel"] for entry in out)
+    has_partition_info = any(
+        Path(entry["rel"]).name in ("partition_info.parquet", "partition_info.csv") for entry in out
+    )
+    has_schema = any(entry["rel"].endswith(("_common_metadata", "_metadata")) for entry in out)
+    if (row_count > 0 and not has_pixels) or (
+        row_count == 0 and not (has_partition_info and has_schema)
+    ):
+        return [], False
+    return out, True
 
 
-def _walk_order_dir(url: str, bucket: TokenBucket, prefix: str) -> list[dict[str, Any]]:
+def _walk_order_dir(
+    url: str, bucket: TokenBucket, prefix: str
+) -> tuple[list[dict[str, Any]], bool]:
     out: list[dict[str, Any]] = []
-    for name in _http_listing(url, bucket):
-        if name.startswith("Dir="):
-            out.extend(_walk_dir(url + "/" + name, bucket, f"{prefix}/{name}"))
-    return out
+    names, complete = _http_listing(url, bucket)
+    if not complete:
+        return [], False
+    for name in names:
+        child = name.strip("/")
+        if child.startswith("Dir="):
+            entries, complete = _walk_dir(url + "/" + child, bucket, f"{prefix}/{child}")
+            out.extend(entries)
+            if not complete:
+                return out, False
+    return out, True
 
 
-def _walk_dir(url: str, bucket: TokenBucket, prefix: str) -> list[dict[str, Any]]:
+def _walk_dir(url: str, bucket: TokenBucket, prefix: str) -> tuple[list[dict[str, Any]], bool]:
     out: list[dict[str, Any]] = []
-    for name in _http_listing(url, bucket):
-        rel = f"{prefix}/{name}" if prefix else name
-        if name.lower().endswith(".parquet"):
-            size = _http_head(url + "/" + name, bucket)
+    names, complete = _http_listing(url, bucket)
+    if not complete:
+        return [], False
+    for name in names:
+        child = name.strip("/")
+        rel = f"{prefix}/{child}" if prefix else child
+        if child.lower().endswith(".parquet"):
+            found, size = _http_probe(url + "/" + child, bucket)
+            if not found:
+                return out, False
             out.append({"rel": rel, "size": size})
         elif name.endswith("/"):  # multi-file pixel dir (Npix=NN/…)
-            for f in _http_listing(url + "/" + name, bucket):
-                if f.lower().endswith(".parquet"):
-                    size = _http_head(url + "/" + name + "/" + f, bucket)
-                    out.append({"rel": rel + "/" + f, "size": size})
-    return out
+            files, complete = _http_listing(url + "/" + child, bucket)
+            if not complete:
+                return out, False
+            for f in files:
+                child_file = f.strip("/")
+                if child_file.lower().endswith(".parquet"):
+                    found, size = _http_probe(url + "/" + child + "/" + child_file, bucket)
+                    if not found:
+                        return out, False
+                    out.append({"rel": rel + "/" + child_file, "size": size})
+    return out, True
 
 
 def _vos_hats_listing(ident: str) -> list[dict[str, Any]]:
     storage = open_storage(ident)
-    rels: list[str] = []
-    _walk_storage(storage, "", rels)
-    out: list[dict[str, Any]] = []
-    for rel in rels:
-        if rel.endswith("/"):
+    props_rel = next(
+        (
+            rel
+            for rel in ("properties", "dataset/properties", "hats.properties")
+            if storage.exists(rel)
+        ),
+        None,
+    )
+    if props_rel is None:
+        raise OSError(
+            f"could not confirm HATS properties at {ident}; preserving the existing mirror"
+        )
+    with tempfile.TemporaryDirectory(prefix="xmatcher-vos-list-") as directory:
+        props_path = Path(directory) / "properties"
+        storage.stage_in(props_rel, props_path)
+        row_count = _hats_property_count(props_path.read_bytes())
+        if row_count is None:
+            raise OSError(f"invalid HATS properties at {ident}; preserving the existing mirror")
+
+    info_rel = None
+    info = None
+    for candidate in ("dataset/partition_info.parquet", "partition_info.parquet"):
+        if storage.exists(candidate):
+            try:
+                info = storage.read_parquet(candidate)
+            except Exception:  # noqa: BLE001 - try the canonical CSV copy
+                continue
+            info_rel = candidate
+            break
+    if info is None:
+        for candidate in ("dataset/partition_info.csv", "partition_info.csv"):
+            if not storage.exists(candidate):
+                continue
+            try:
+                with tempfile.TemporaryDirectory(prefix="xmatcher-vos-list-") as directory:
+                    local = Path(directory) / "partition_info.csv"
+                    storage.stage_in(candidate, local)
+                    info = pl.read_csv(local)
+            except Exception:  # noqa: BLE001
+                continue
+            info_rel = candidate
+            break
+    if info_rel is None:
+        raise OSError(
+            f"could not confirm a complete HATS listing at {ident}; preserving the existing mirror"
+        )
+    assert info is not None
+    if "file_loc" not in info.columns:
+        column_names = {column.lower(): column for column in info.columns}
+        if "norder" not in column_names or "npix" not in column_names:
+            raise OSError(f"invalid HATS listing at {ident}; preserving the existing mirror")
+        file_locs = []
+        for row in info.rows(named=True):
+            try:
+                order = int(row[column_names["norder"]])
+                pix = int(row[column_names["npix"]])
+            except (TypeError, ValueError, KeyError) as exc:
+                raise OSError(
+                    f"invalid pixel row in HATS listing at {ident}; preserving the existing mirror"
+                ) from exc
+            file_locs.append(f"Norder={order}/Dir={(pix // 10000) * 10000}/Npix={pix}")
+        info = info.with_columns(pl.Series("file_loc", file_locs))
+    if "file_loc" not in info.columns:
+        raise OSError(f"invalid HATS listing at {ident}; preserving the existing mirror")
+    _validate_hats_partition_info(info, row_count, info_rel)
+    base = "dataset" if info_rel.startswith("dataset/") or info_rel.endswith(".csv") else ""
+    out: list[dict[str, Any]] = [
+        {"rel": props_rel, "size": storage.size(props_rel)},
+        {"rel": info_rel, "size": storage.size(info_rel)},
+    ]
+    for row in info.rows(named=True):
+        raw_loc = row.get("file_loc")
+        if not isinstance(raw_loc, str) or not raw_loc.strip():
+            raise OSError(f"invalid file_loc in {info_rel}; preserving the existing mirror")
+        loc = raw_loc.strip().strip("/")
+        if any(part in (".", "..") for part in loc.split("/")):
+            raise OSError(f"unsafe file_loc in {info_rel}; preserving the existing mirror")
+        rel = f"{base}/{loc}" if base else loc
+        nfiles = _as_size(row.get("Nfiles")) or 1
+        if not rel.endswith(".parquet") and nfiles > 1:
+            part_names = storage.list(rel)
+            parts = [name for name in part_names if name.endswith(".parquet")]
+            if len(parts) != nfiles or any("/" in name or name in (".", "..") for name in parts):
+                raise OSError(f"incomplete HATS partition {rel!r}; preserving the existing mirror")
+            for part in parts:
+                candidate = f"{rel}/{part}"
+                if not storage.exists(candidate):
+                    raise OSError(
+                        f"missing HATS partition file {candidate!r}; preserving the existing mirror"
+                    )
+                out.append({"rel": candidate, "size": storage.size(candidate)})
             continue
-        out.append({"rel": rel, "size": storage.size(rel)})
-    return out
-
-
-def _walk_storage(storage: Storage, rel: str, acc: list[str], depth: int = 0) -> None:
-    """Collect every node under ``rel``: files as paths, containers as dirs.
-
-    ``storage.list`` entries have no type marker (some vos clients append
-    ``/`` to directories, LocalStorage does not), so anything that is not a
-    data file is treated as a container and recursed into — including wrapper
-    dirs like ``dataset/``.  Two guards keep the walk honest against real
-    ``vls`` behaviour: a leaf file echoes its own basename when listed, so a
-    listing that returns only the current node's name means "not a
-    directory"; and a depth cap bounds pathological nests.
-    """
-    if depth > 12:
-        return
-    try:
-        children = storage.list(rel)
-    except ValueError:  # traversal-shaped rel from a hostile listing
-        return
-    if not children:
-        return
-    if depth and children == [rel.rsplit("/", 1)[-1]]:
-        return  # vls on a leaf file echoes the file's own basename
-    for name in children:
-        child = f"{rel}/{name}".strip("/")
-        if name.endswith(".parquet") or name in ("properties", "hats.properties"):
-            acc.append(child)
+        candidates = (rel,) if rel.endswith(".parquet") else (rel, f"{rel}.parquet")
+        for candidate in candidates:
+            if storage.exists(candidate):
+                size = storage.size(candidate)
+                out.append(
+                    {
+                        "rel": candidate,
+                        "size": size if size >= 0 else _as_size(row.get("file_size")),
+                    }
+                )
+                break
         else:
-            acc.append(child + "/")
-            _walk_storage(storage, child, acc, depth + 1)
+            raise OSError(f"missing HATS partition {rel!r}; preserving the existing mirror")
+    metadata_files = (
+        "dataset/_common_metadata",
+        "dataset/_metadata",
+        "_common_metadata",
+        "_metadata",
+    )
+    for extra in metadata_files:
+        if storage.exists(extra) and all(entry["rel"] != extra for entry in out):
+            out.append({"rel": extra, "size": storage.size(extra)})
+    if row_count == 0 and not any(
+        entry["rel"].endswith(("_common_metadata", "_metadata")) for entry in out
+    ):
+        raise OSError(f"empty HATS catalogue {ident} has no readable schema metadata")
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -573,13 +866,20 @@ def _mirror_remote_hats(
     version = _version_dir(src)
     prefix = f"{_safe_name(src.name)}/{version}"
     remote = _remote_hats_listing(fetch, bucket=bucket)
+    failed_before = stats.failed
     manifest_rel = f"{prefix}/{_MANIFEST_NAME}"
     manifest = _read_json(cache, manifest_rel)
+    downloaded_before = stats.files_downloaded
 
     def do_fetch(entry: dict[str, Any]) -> None:
         rel = entry["rel"]
         tmpdir = Path(tempfile.mkdtemp(prefix="xmatcher-"))
         local_tmp = tmpdir / Path(rel).name
+        cache_rel = f"{prefix}/{rel}"
+        backup = tmpdir / "previous"
+        had_old = False
+        backup_ready = False
+        upload_started = False
         try:
             if _remote_via_storage(fetch):
                 # vos: nodes have no HTTP endpoint; transfer node → temp → cache.
@@ -590,11 +890,16 @@ def _mirror_remote_hats(
                 if body is None:
                     raise CrossMatchError(f"empty body for {rel}")
                 local_tmp.write_bytes(body)
-            cache.stage_out(local_tmp, f"{prefix}/{rel}")
-            # Record the size actually stored (local stat, or vls -l on vos:);
-            # an unknown remote size (-1) must never poison the manifest into
-            # "unchanged" or the incremental probe goes permanently stale.
-            stored = cache.size(f"{prefix}/{rel}")
+            # LocalStorage publishes each file with os.replace. VOSpace lacks
+            # that guarantee, so keep one prior file beside the staged update
+            # for rollback if its upload fails.
+            had_old = not isinstance(cache, LocalStorage) and cache.exists(cache_rel)
+            if had_old:
+                cache.stage_in(cache_rel, backup)
+                backup_ready = True
+            upload_started = True
+            cache.stage_out(local_tmp, cache_rel)
+            stored = cache.size(cache_rel)
             stats.files_downloaded += 1
             stats.bytes_downloaded += max(0, stored) if stored >= 0 else 0
             manifest.setdefault("files", {})[rel] = {"size": stored}
@@ -603,10 +908,32 @@ def _mirror_remote_hats(
         except Exception as exc:  # noqa: BLE001
             stats.failed += 1
             logger.warning("sync %s: failed to fetch %s: %s", src.name, rel, exc)
+            if backup_ready:
+                try:
+                    cache.stage_out(backup, cache_rel)
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.error(
+                        "sync %s: could not restore previous %s: %s",
+                        src.name,
+                        cache_rel,
+                        rollback_exc,
+                    )
+            elif upload_started and not had_old and not isinstance(cache, LocalStorage):
+                # A failed VOS upload may have created a partial node.
+                try:
+                    cache.rm(cache_rel)
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.error(
+                        "sync %s: could not remove partial %s: %s",
+                        src.name,
+                        cache_rel,
+                        rollback_exc,
+                    )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    todo: list[dict[str, Any]] = []
+    data_todo: list[dict[str, Any]] = []
+    metadata_todo: list[dict[str, Any]] = []
     for entry in remote:
         rel = entry["rel"]
         old = manifest.get("files", {}).get(rel)
@@ -620,20 +947,43 @@ def _mirror_remote_hats(
             and old_size == new_size
         ):
             stats.files_skipped += 1
+        elif Path(rel).name in _HATS_METADATA_NAMES:
+            metadata_todo.append(entry)
         else:
-            todo.append(entry)
+            data_todo.append(entry)
+
+    def fetch_phase(entries: list[dict[str, Any]]) -> None:
+        if workers > 1 and entries:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                list(ex.map(do_fetch, entries))
+        else:
+            for entry in entries:
+                do_fetch(entry)
+
     if progress_cb:
-        progress_cb(f"sync {src.name}: {len(todo)} file(s) to fetch")
-    if workers > 1 and todo:
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            list(ex.map(do_fetch, todo))
-    else:
-        for entry in todo:
-            do_fetch(entry)
-    manifest["version"] = version
-    manifest["source"] = src.access_identifier
-    manifest["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    _write_json(cache, manifest_rel, manifest)
+        progress_cb(f"sync {src.name}: {len(data_todo) + len(metadata_todo)} file(s) to fetch")
+    fetch_phase(data_todo)
+    data_phase_succeeded = stats.failed == failed_before
+    if data_phase_succeeded:
+        fetch_phase(metadata_todo)
+
+    files_manifest = manifest.setdefault("files", {})
+    if stats.failed == failed_before:
+        remote_rels = {entry["rel"] for entry in remote}
+        for stale in set(files_manifest) - remote_rels:
+            cache.rm(f"{prefix}/{stale}")
+            files_manifest.pop(stale, None)
+        manifest["version"] = version
+        manifest["source"] = src.access_identifier
+        manifest["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    elif stats.files_downloaded > downloaded_before:
+        # Keep successful per-file updates discoverable after a partial sync;
+        # metadata and stale-file pruning wait for a complete data phase.
+        manifest["version"] = version
+        manifest["source"] = src.access_identifier
+        manifest.pop("fetched_at", None)
+    if stats.files_downloaded > downloaded_before or stats.failed == failed_before:
+        _write_json(cache, manifest_rel, manifest)
     logger.info(
         "sync %s: %d bytes, %d files (%d skipped, %d failed)",
         src.name,
@@ -839,6 +1189,7 @@ def _mirror_tap(
         if progress_cb:
             progress_cb(f"sync {src.name}: fetching full table")
         offset = 0
+        rows_fetched = 0
         previous_key = None
         while True:
             df = fetch_page(
@@ -848,18 +1199,21 @@ def _mirror_tap(
             )
             if df.is_empty():
                 break
+            rows_fetched += df.height
+            if rows_fetched > ceiling:
+                for filename in fetched_page_files.values():
+                    cache.rm(f"{raw}/pages/{filename}")
+                raise CrossMatchError(
+                    f"TAP table '{src.name}' exceeds the sync ceiling of {ceiling} rows "
+                    f"(fetched at least {rows_fetched}; estimated_size {estimated_size} "
+                    f"x {_TAP_CEILING_FACTOR}). Ingest this catalogue as HATS instead."
+                )
             record_page(offset // page_size, df)
             if key:
                 previous_key = df[key][-1]
-            offset += page_size
-            if offset >= ceiling:
-                raise CrossMatchError(
-                    f"TAP table '{src.name}' exceeds the sync ceiling of {ceiling} rows "
-                    f"(estimated_size {estimated_size} x {_TAP_CEILING_FACTOR}). "
-                    "Ingest this catalogue as HATS instead."
-                )
             if df.height < page_size:
                 break
+            offset += page_size
         changed = True
     else:
         # ---------------- incremental: probe stored windows -------------
@@ -1276,17 +1630,29 @@ def _sync_with_failover(
 
 
 def _replicate_tree(src_storage: Storage, dst_storage: Storage, rel: str) -> None:
-    """Copy the mirrored tree at ``rel`` (files only) onto ``dst_storage``."""
+    """Replace the mirrored tree at ``rel`` after staging a complete source copy."""
     rels: list[str] = []
-    _walk_storage(src_storage, rel, rels)
+    _walk_all_files(src_storage, rel, rels)
+    if not rels:
+        raise OSError(f"source tree {rel!r} has no files; preserving replica")
     tmpdir = Path(tempfile.mkdtemp(prefix="xmatcher-repl-"))
     try:
         for r in rels:
-            if r.endswith("/"):
-                continue
-            local = tmpdir / Path(r).name
+            prefix = rel.rstrip("/")
+            relative = r[len(prefix) :].lstrip("/") if prefix else r
+            local = Path(relative)
+            if local.is_absolute() or ".." in local.parts:
+                raise ValueError(f"replica source contains an unsafe path: {r!r}")
+            local = tmpdir / local
+            local.parent.mkdir(parents=True, exist_ok=True)
             src_storage.stage_in(r, local)
-            dst_storage.stage_out(local, r)
+        if rel:
+            _copy_tree_up(dst_storage, tmpdir, rel)
+        else:
+            # Empty rel means the caller intentionally targets a storage root;
+            # replacing that root could remove unrelated data.
+            for local in sorted(path for path in tmpdir.rglob("*") if path.is_file()):
+                dst_storage.stage_out(local, local.relative_to(tmpdir).as_posix())
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1294,17 +1660,15 @@ def _replicate_tree(src_storage: Storage, dst_storage: Storage, rel: str) -> Non
 def _walk_all_files(storage: Storage, rel: str, acc: list[str], depth: int = 0) -> None:
     """Collect every FILE under ``rel`` (no filename filter).
 
-    :func:`_walk_storage` keeps only parquet/properties files, which is
-    right for mirrored catalogues — but union outputs also carry
-    ``resume.state`` and ``run.jsonl``, and a vos: staging must round-trip
-    those too or resume silently restarts from scratch.
+    Union outputs also carry ``resume.state`` and ``run.jsonl``; staging
+    preserves these alongside catalogue data so a copied union can resume.
     """
     if depth > 12:
-        return
+        raise OSError(f"storage tree is nested too deeply under {rel!r}")
     try:
         children = storage.list(rel)
-    except ValueError:  # traversal-shaped rel from a hostile listing
-        return
+    except ValueError as exc:  # traversal-shaped rel from a hostile listing
+        raise OSError(f"invalid storage listing path {rel!r}") from exc
     if not children:
         return
     if depth and children == [rel.rsplit("/", 1)[-1]]:
@@ -1314,10 +1678,27 @@ def _walk_all_files(storage: Storage, rel: str, acc: list[str], depth: int = 0) 
         if name.endswith("/"):
             _walk_all_files(storage, child, acc, depth + 1)
             continue
-        if isinstance(storage, LocalStorage) and (Path(storage.root) / child).is_dir():
-            _walk_all_files(storage, child, acc, depth + 1)
+        if isinstance(storage, LocalStorage):
+            path = Path(storage.root) / child
+            if path.is_dir():
+                _walk_all_files(storage, child, acc, depth + 1)
+            elif path.is_file():
+                acc.append(child)
+            else:
+                raise OSError(f"listed storage node disappeared: {child!r}")
             continue
-        acc.append(child)
+        node_children = storage.list(child)
+        if node_children == [name]:  # VOS vls may echo the listed leaf's basename.
+            acc.append(child)
+        elif node_children:
+            _walk_all_files(storage, child, acc, depth + 1)
+        elif storage.exists(child):
+            if storage.size(child) >= 0:
+                acc.append(child)
+            else:
+                raise OSError(f"could not classify storage node {child!r}; preserving replica")
+        else:
+            raise OSError(f"listed storage node is unavailable: {child!r}")
 
 
 def _copy_tree_files(src_storage: Storage, dst_storage: Storage, rel: str) -> None:

@@ -15,6 +15,7 @@ Covers the ``xmatcher sync`` data plane behind :func:`xmatcher.mirror.sync_catal
 from __future__ import annotations
 
 import functools
+import shutil
 import threading
 import urllib.error
 from collections.abc import Iterator
@@ -32,6 +33,89 @@ from xmatcher.storage import LocalStorage, Storage
 from .tap_fake import FakeTAPServer, make_rows
 
 PAGE = 100
+
+
+def test_http_probe_uses_range_get_when_head_is_not_allowed(monkeypatch) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    class Response:
+        headers = {"Content-Length": "1", "Content-Range": "bytes 0-0/123"}
+        status = 206
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            assert size == 1
+            return b"x"
+
+    def fake_urlopen(request, *, timeout):
+        method = request.get_method()
+        calls.append((method, request.get_header("Range")))
+        if method == "HEAD":
+            raise urllib.error.HTTPError(request.full_url, 405, "Method Not Allowed", {}, None)
+        return Response()
+
+    monkeypatch.setattr(mirror.urllib.request, "urlopen", fake_urlopen)
+
+    assert mirror._http_probe(
+        "https://example.test/catalogue/part.parquet", mirror.TokenBucket(0)
+    ) == (
+        True,
+        123,
+    )
+    assert calls == [("HEAD", None), ("GET", "bytes=0-0")]
+
+
+@pytest.mark.parametrize("row_count", [0, 1], ids=["empty", "populated"])
+def test_csv_only_http_hats_fallback_mirrors_catalogue_metadata(
+    tmp_path: Path, row_count: int
+) -> None:
+    """HTTP fallback must discover standard CSV partition info and schema files."""
+    frame = pl.DataFrame(
+        {"id": list(range(row_count)), "ra": [10.0] * row_count, "dec": [5.0] * row_count},
+        schema={"id": pl.Int64, "ra": pl.Float64, "dec": pl.Float64},
+    )
+    serve_dir = tmp_path / "serve"
+    serve_dir.mkdir()
+    catalogue = serve_dir / "cat"
+    mirror._write_hats_native(frame, catalogue, ra_column="ra", dec_column="dec")
+    (catalogue / "dataset" / "partition_info.parquet").unlink()
+
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), functools.partial(SimpleHTTPRequestHandler, directory=str(serve_dir))
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        src = CatalogueSource(
+            name="csv-only-hats",
+            is_local=False,
+            access_method="hats",
+            access_identifier=f"http://127.0.0.1:{server.server_port}/cat",
+            ra_column="ra",
+            dec_column="dec",
+        )
+        cache = str(tmp_path / "cache")
+        stats = mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0)
+
+        assert stats.failed == 0
+        local_root, local_rel = mirror.locate_mirrored(src, cache_root=cache)
+        local_cat = Path(local_root) / local_rel
+        assert (local_cat / "dataset" / "partition_info.csv").is_file()
+        assert (local_cat / "dataset" / "_common_metadata").is_file()
+        loaded = hats_native.load_hats_all(
+            CatalogueSource(name="cached", is_local=True, path=local_cat)
+        )
+        assert loaded.height == row_count
+        assert loaded.schema == frame.schema
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 @pytest.mark.parametrize("value", [float("inf"), float("nan"), "inf"])
@@ -145,6 +229,37 @@ def test_tap_cold_then_incremental_zero_download(tmp_path: Path, tap_server) -> 
     assert tap_server.count_queries("COUNT(*)") >= 2
 
 
+def test_tap_short_final_page_may_exceed_estimate_ceiling(tmp_path: Path, tap_server) -> None:
+    """A short final page is valid even when page_size is larger than the ceiling."""
+    tap_server.update(make_rows(1))
+    stats = mirror.sync_catalogue(
+        _tap_source(tap_server),
+        cache_root=str(tmp_path / "cache"),
+        page_size=4,
+        estimated_size=2,
+        rate_limit_rps=0.0,
+    )
+
+    assert stats.pages == 1
+    assert _mirror_rows(str(tmp_path / "cache"), _tap_source(tap_server)).height == 1
+
+
+def test_tap_rejects_rows_above_estimate_ceiling(tmp_path: Path) -> None:
+    """The final short page must still be counted against the actual row ceiling."""
+    server = FakeTAPServer(make_rows(4))
+    try:
+        with pytest.raises(CrossMatchError, match="exceeds the sync ceiling"):
+            mirror.sync_catalogue(
+                _tap_source(server),
+                cache_root=str(tmp_path / "cache"),
+                page_size=2,
+                estimated_size=2,
+                rate_limit_rps=0.0,
+            )
+    finally:
+        server.shutdown()
+
+
 def test_tap_force_refetches(tmp_path: Path, tap_server) -> None:
     src = _tap_source(tap_server)
     cache = str(tmp_path / "cache")
@@ -251,7 +366,10 @@ def test_tap_append_adds_tail_page(tmp_path: Path, tap_server) -> None:
     assert int(rows["id"].max()) == 249
 
 
-def test_hats_over_http_mirror(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "scenario", ["shrink", "missing_partition", "offline_listing", "failed_get", "failed_store"]
+)
+def test_hats_over_http_mirror(tmp_path: Path, monkeypatch, scenario: str) -> None:
     """A HATS catalogue served over plain HTTP mirrors file-for-file."""
     frame = pl.DataFrame(
         {
@@ -262,8 +380,9 @@ def test_hats_over_http_mirror(tmp_path: Path) -> None:
     )
     serve_dir = tmp_path / "serve"
     serve_dir.mkdir()
+    threshold = 50 if scenario in ("shrink", "missing_partition") else 1000
     mirror._write_hats_native(
-        frame, serve_dir / "cat", ra_column="ra", dec_column="dec", threshold=50
+        frame, serve_dir / "cat", ra_column="ra", dec_column="dec", threshold=threshold
     )
     httpd = ThreadingHTTPServer(
         ("127.0.0.1", 0),
@@ -290,9 +409,145 @@ def test_hats_over_http_mirror(tmp_path: Path) -> None:
         st2 = mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=False)
         assert st2.files_skipped == st.files_downloaded
         assert st2.files_downloaded == 0
+
+        serve_cat = serve_dir / "cat"
+        old_local_cat = Path(cache) / src.name / mirror._version_dir(src)
+        local_root, local_rel = mirror.locate_mirrored(src, cache_root=cache)
+        local_cat = Path(local_root) / local_rel
+
+        def snapshot(*, include_manifest: bool = True) -> dict[str, bytes]:
+            return {
+                path.relative_to(local_cat).as_posix(): path.read_bytes()
+                for path in local_cat.rglob("*")
+                if path.is_file() and (include_manifest or path.name != mirror._MANIFEST_NAME)
+            }
+
+        cached_before = snapshot()
+        manifest_rel = f"{src.name}/{mirror._version_dir(src)}/{mirror._MANIFEST_NAME}"
+        manifest_files_before = mirror._read_json(LocalStorage(cache), manifest_rel).get("files")
+        if scenario == "shrink":
+            # A complete partition_info listing after a shrink removes stale pixels.
+            shutil.rmtree(serve_cat)
+            smaller = frame.head(20)
+            mirror._write_hats_native(
+                smaller, serve_cat, ra_column="ra", dec_column="dec", threshold=50
+            )
+            remote_pixels = hats_native.list_hats_pixels(serve_cat)
+            assert len(remote_pixels) < len(hats_native.list_hats_pixels(old_local_cat))
+            mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=False)
+            assert len(hats_native.list_hats_pixels(local_cat)) == len(remote_pixels)
+            assert mirror_rows(cache, src).height == 20
+        elif scenario == "missing_partition":
+            # An advertised but unavailable partition makes the table incomplete.
+            advertised_partition = hats_native.list_hats_pixels(serve_cat)[0][2]
+            advertised_bytes = advertised_partition.read_bytes()
+            advertised_partition.unlink()
+            try:
+                with pytest.raises(OSError, match="advertised by.*unavailable"):
+                    mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=False)
+            finally:
+                advertised_partition.write_bytes(advertised_bytes)
+            assert snapshot() == cached_before
+            assert mirror_rows(cache, src).height == 120
+        elif scenario == "offline_listing":
+            unavailable = serve_dir / "cat.offline"
+            serve_cat.rename(unavailable)
+            try:
+                with pytest.raises(OSError, match="complete HATS listing"):
+                    mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=False)
+            finally:
+                unavailable.rename(serve_cat)
+            assert snapshot() == cached_before
+            assert mirror_rows(cache, src).height == 120
+        elif scenario in ("failed_get", "failed_store"):
+            changed = frame.with_columns((pl.col("id") + 1000).alias("id"))
+            shutil.rmtree(serve_cat)
+            mirror._write_hats_native(
+                changed, serve_cat, ra_column="ra", dec_column="dec", threshold=threshold
+            )
+            if scenario == "failed_get":
+                real_request = mirror._http_request
+
+                def fail_partition_download(url, bucket, *, head=False):
+                    if not head and "/Norder=" in url and url.endswith(".parquet"):
+                        raise urllib.error.URLError("simulated partition download failure")
+                    return real_request(url, bucket, head=head)
+
+                monkeypatch.setattr(mirror, "_http_request", fail_partition_download)
+            else:
+                real_stage_out = LocalStorage.stage_out
+
+                def fail_partition_store(storage, local, rel):
+                    if "/Norder=" in rel and rel.endswith(".parquet"):
+                        raise OSError("simulated partition store failure")
+                    return real_stage_out(storage, local, rel)
+
+                monkeypatch.setattr(LocalStorage, "stage_out", fail_partition_store)
+            with pytest.raises(urllib.error.URLError):
+                mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=True)
+            assert snapshot(include_manifest=False) == {
+                key: value for key, value in cached_before.items() if key != mirror._MANIFEST_NAME
+            }
+            assert (
+                mirror._read_json(LocalStorage(cache), manifest_rel).get("files")
+                == manifest_files_before
+            )
+            max_id = mirror_rows(cache, src)["id"].max()
+            assert max_id is not None
+            assert int(max_id) < 1000
+        else:  # pragma: no cover - parameter list is exhaustive
+            raise AssertionError(f"unknown scenario: {scenario}")
     finally:
         httpd.shutdown()
         httpd.server_close()
+        thread.join(timeout=5)
+
+
+def test_remote_hats_zero_row_partition_is_mirrored_with_schema(tmp_path: Path) -> None:
+    frame = pl.DataFrame({"id": [1], "ra": [12.0], "dec": [-3.0]})
+    serve_dir = tmp_path / "serve"
+    serve_dir.mkdir()
+    catalogue = serve_dir / "cat"
+    mirror._write_hats_native(frame, catalogue, ra_column="ra", dec_column="dec")
+
+    [(order, pixel, partition)] = hats_native.list_hats_pixels(catalogue)
+    expected_pixel = (order, pixel)
+    pl.read_parquet(partition).head(0).write_parquet(partition)
+    info_path = catalogue / "dataset" / "partition_info.parquet"
+    info = pl.read_parquet(info_path).with_columns(
+        pl.lit(0).alias("count"), pl.lit(partition.stat().st_size).alias("file_size")
+    )
+    info.write_parquet(info_path)
+    for properties in (catalogue / "properties", catalogue / "dataset" / "properties"):
+        properties.write_text(properties.read_text().replace("hats_nrows=1", "hats_nrows=0"))
+
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), functools.partial(SimpleHTTPRequestHandler, directory=str(serve_dir))
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        src = CatalogueSource(
+            name="zero-hats",
+            is_local=False,
+            access_method="hats",
+            access_identifier=f"http://127.0.0.1:{server.server_port}/cat",
+            ra_column="ra",
+            dec_column="dec",
+        )
+        cache = str(tmp_path / "cache")
+        stats = mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0)
+
+        assert stats.failed == 0
+        local_root, local_rel = mirror.locate_mirrored(src, cache_root=cache)
+        cached_pixels = hats_native.list_hats_pixels(Path(local_root) / local_rel)
+        assert [(norder, npix) for norder, npix, _ in cached_pixels] == [expected_pixel]
+        rows = mirror_rows(cache, src)
+        assert rows.height == 0
+        assert rows.columns == ["id", "ra", "dec"]
+    finally:
+        server.shutdown()
+        server.server_close()
         thread.join(timeout=5)
 
 
@@ -314,11 +569,16 @@ def test_hats_over_vos_mirror(tmp_path: Path, monkeypatch) -> None:
     mirror._write_hats_native(
         frame, vos_root / "cat", ra_column="ra", dec_column="dec", threshold=50
     )
+    # Exercise the valid CSV-only HATS export shape, where partition paths are
+    # derived from Norder/Npix because file_loc and Parquet metadata are absent.
+    (vos_root / "cat" / "dataset" / "partition_info.parquet").unlink()
+    csv_info = vos_root / "cat" / "dataset" / "partition_info.csv"
+    pl.read_csv(csv_info).drop("file_loc").write_csv(csv_info)
 
     from xmatcher.storage import LocalStorage
 
     class _VlsLikeStorage(LocalStorage):
-        """LocalStorage with the real ``vls`` quirks _walk_storage must handle:
+        """LocalStorage with the real ``vls`` quirks _walk_all_files must handle:
 
         direct-children basenames, no trailing slash on directories, and a
         leaf file echoing its own basename when listed.
@@ -463,6 +723,32 @@ def test_remote_tree_publish_replaces_complete_tree(tmp_path: Path) -> None:
     assert not (live / "dataset/old.parquet").exists()
     assert not (tmp_path / "remote" / "catalogue.tmp").exists()
     assert not (tmp_path / "remote" / "catalogue.old").exists()
+
+
+def test_replica_drops_pixels_removed_from_primary(tmp_path: Path) -> None:
+    """A replicated shrink must not leave stale HATS pixels on the replica."""
+    primary = tmp_path / "primary"
+    replica = tmp_path / "replica"
+    current = {
+        "catalogue/properties": "hats_nrows=1\n",
+        "catalogue/dataset/Norder=0/Dir=0/Npix=0.parquet": "current pixel",
+    }
+    prior = {
+        **current,
+        "catalogue/dataset/Norder=0/Dir=0/Npix=1.parquet": "stale pixel",
+    }
+    _tree_with_files(primary, current)
+    _tree_with_files(replica, prior)
+
+    mirror._replicate_tree(LocalStorage(primary), LocalStorage(replica), "catalogue")
+
+    copied = {
+        path.relative_to(replica).as_posix()
+        for path in (replica / "catalogue").rglob("*")
+        if path.is_file()
+    }
+    assert copied == set(current)
+    assert not (replica / "catalogue/dataset/Norder=0/Dir=0/Npix=1.parquet").exists()
 
 
 def test_ensure_mirrored_local_conversion(tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ import pytest
 from xmatcher.exceptions import ConfigError
 from xmatcher.storage import (
     LocalStorage,
+    Storage,
     VOSpaceStorage,
     all_cache_roots,
     assert_headroom,
@@ -200,6 +201,113 @@ def test_rm_unlinks_internal_symlinks_without_removing_their_targets(tmp_path: P
     assert not dangling.is_symlink()
 
 
+class _VOSLikeStorage(Storage):
+    """Local files with the VOS list/leaf behavior, without LocalStorage identity."""
+
+    def __init__(self, root: Path, *, fail_stage_in: set[str] | None = None) -> None:
+        self.local = LocalStorage(root)
+        self.root = self.local.root
+        self.fail_stage_in = fail_stage_in or set()
+
+    def exists(self, rel: str) -> bool:
+        return self.local.exists(rel)
+
+    def size(self, rel: str) -> int:
+        return self.local.size(rel)
+
+    def list(self, rel: str) -> list[str]:
+        path = self.local._path(rel)
+        if not path.is_dir():
+            return [path.name]  # vls on a leaf can echo the leaf basename.
+        return sorted(child.name for child in path.iterdir())
+
+    def stage_in(self, rel: str, local: Path) -> None:
+        if rel in self.fail_stage_in:
+            raise OSError("injected VOS backup read failure")
+        self.local.stage_in(rel, local)
+
+    def stage_out(self, local: Path, rel: str) -> None:
+        self.local.stage_out(local, rel)
+
+    def rm(self, rel: str) -> None:
+        self.local.rm(rel)
+
+
+def test_vos_replica_walk_descends_into_basename_listed_directories(tmp_path: Path) -> None:
+    """VOS directory basenames must be traversed as directories, not staged as files."""
+    from xmatcher.mirror import _replicate_tree
+
+    source_root = tmp_path / "source"
+    source = LocalStorage(source_root)
+    files = {
+        "catalogue/properties": b"hats_nrows=1\n",
+        "catalogue/dataset/Norder=0/Dir=0/Npix=1.parquet": b"pixel",
+        "catalogue/chunks/resume.state": b"resume",
+    }
+    for rel, content in files.items():
+        path = source.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    _replicate_tree(_VOSLikeStorage(source_root), LocalStorage(tmp_path / "replica"), "catalogue")
+
+    replica = tmp_path / "replica"
+    assert {
+        path.relative_to(replica).as_posix(): path.read_bytes()
+        for path in replica.rglob("*")
+        if path.is_file()
+    } == files
+
+
+def test_vos_backup_read_failure_preserves_existing_mirror_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failed backup read must not trigger cleanup of the pre-existing node."""
+    from xmatcher import mirror
+    from xmatcher.sources import CatalogueSource
+
+    rel = "Norder=0/Dir=0/Npix=1.parquet"
+    source_root = tmp_path / "remote"
+    source_file = source_root / rel
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"new")
+    source = _VOSLikeStorage(source_root)
+
+    cache_root = tmp_path / "cache"
+    src = CatalogueSource(
+        name="catalogue",
+        is_local=False,
+        access_method="hats",
+        access_identifier="vos:example/catalogue",
+    )
+    cache_rel = f"catalogue/{mirror._version_dir(src)}/{rel}"
+    old_file = cache_root / cache_rel
+    old_file.parent.mkdir(parents=True)
+    old_file.write_bytes(b"old")
+    cache = _VOSLikeStorage(cache_root, fail_stage_in={cache_rel})
+
+    monkeypatch.setattr(
+        mirror,
+        "_remote_hats_listing",
+        lambda *_args, **_kwargs: [{"rel": rel, "size": 3}],
+    )
+    monkeypatch.setattr(mirror, "open_storage", lambda _root: source)
+    stats = mirror.SyncStats()
+
+    mirror._mirror_remote_hats(
+        src,
+        cache,
+        bucket=mirror.TokenBucket(0),
+        force=True,
+        workers=1,
+        progress_cb=None,
+        stats=stats,
+    )
+
+    assert stats.failed == 1
+    assert old_file.read_bytes() == b"old"
+
+
 def _fake_vos_binary(monkeypatch, tmp_path: Path, scripts: dict[str, str] | None = None):
     """Install a fake ``vos`` binary with per-URI stdout scripts.
 
@@ -259,7 +367,7 @@ def test_vospace_argv_seam(monkeypatch, tmp_path) -> None:
 
 
 def test_vospace_list_parses_basenames_and_sizes(monkeypatch, tmp_path) -> None:
-    """vls output (basenames, no trailing slash on dirs) feeds _walk_storage."""
+    """vls output (basenames, no trailing slash on dirs) feeds _walk_all_files."""
     long_out = (
         "-rw-r--r--  usr  grp  1234  2024-01-01  Npix=3.parquet\n"
         "-rw-r--r--  usr  grp  0  2024-01-01  dataset\n"

@@ -165,8 +165,8 @@ $$\sigma_\mu(b) = 3 + 7 \exp\left(-\frac{|b|}{20^\circ}\right) \quad [\text{mas/
 $$\sigma_{\text{drift}} = \sigma_\mu(b) \cdot \frac{|\Delta t|}{1000} \cdot S(m) \quad [\text{arcsec}]$$
 where $S(m) = \text{clip}(10^{-0.2(m - 15)}, 0.3, 3.0)$ is an optional magnitude distance-proxy scaling.
 
-Added in quadrature to per-axis uncertainties:
-$$\sigma_{\text{total}}^2 = \sigma_{\text{astrometric}}^2 + \sigma_{\text{drift}}^2$$
+The drift is a radial RMS budget. Half its variance is added to each tangent-plane axis, preserving the measured cross covariance:
+$$\sigma_{\text{axis,total}}^2 = \sigma_{\text{axis,astrometric}}^2 + \tfrac{1}{2}\sigma_{\text{drift}}^2$$
 
 ### 8. Bayesian pairwise qualification and N-way scores
 

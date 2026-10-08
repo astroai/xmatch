@@ -326,7 +326,7 @@ def _partition_index(cat: CataloguePlan, depth: int) -> tuple[np.ndarray, np.nda
         (p.pix << (2 * (depth - p.order)), (p.pix + 1) << (2 * (depth - p.order)), i)
         for i, p in enumerate(cat.partitions)
     )
-    starts, ends, indices = np.asarray(intervals, dtype=np.int64).T
+    starts, ends, indices = np.asarray(intervals, dtype=np.int64).reshape(-1, 3).T
     if np.any(starts[1:] < ends[:-1]):
         raise CrossMatchError(f"Catalogue '{cat.name}' has overlapping HATS partitions")
     return starts, ends, indices
@@ -414,16 +414,36 @@ def build_union_plan(
         root, rel = _catalogue_root(src, cache_root)
         storage = open_storage(root)
         parts = _list_partitions(rel, storage)
+        props = _read_hats_properties(storage, rel)
         if not parts:
-            raise CrossMatchError(
-                f"Catalogue '{src.name}' has no HATS partitions under {root!r}/{rel!r}."
-            )
+            empty_info = False
+            for name in (
+                "dataset/partition_info.parquet",
+                "partition_info.parquet",
+                "partition_info.csv",
+                "dataset/partition_info.csv",
+            ):
+                info_rel = f"{rel}/{name}" if rel else name
+                if not storage.exists(info_rel):
+                    continue
+                if name.endswith(".parquet"):
+                    info = storage.read_parquet(info_rel)
+                else:
+                    with tempfile.TemporaryDirectory(prefix="xmatcher-empty-") as scratch:
+                        local = Path(scratch) / "partition_info.csv"
+                        storage.stage_in(info_rel, local)
+                        info = pl.read_csv(local)
+                empty_info = info.height == 0 and {"Norder", "Npix"} <= set(info.columns)
+                break
+            if props.get("hats_nrows") != "0" or not empty_info:
+                raise CrossMatchError(
+                    f"Catalogue '{src.name}' has no HATS partitions under {root!r}/{rel!r}."
+                )
         # RING-ordered copies (remote mirrors preserve the source's own
         # hats_ordering property) are converted to NESTED in the plan
         # geometry: every downstream pixel computation (_pixel_center_deg,
         # _cone_ranges, the tile interval shifts, the rest
         # tiling) is NESTED, and the output is always NESTED hub tiling.
-        props = _read_hats_properties(storage, rel)
         ordering = next((v for k, v in props.items() if k.lower() == "hats_ordering"), "")
         if ordering.upper() == "RING":
             cds = _cdshealpix()
@@ -440,7 +460,15 @@ def build_union_plan(
         for part in parts:
             _est_rows(part, storage, hats_threshold)
             max_delta = max(max_delta, _pixel_diagonal_deg(part.order, part.pix))
-        schema = _catalogue_schema(storage, parts[0].rel)
+        schema_rel = (
+            parts[0].rel
+            if parts
+            else (f"{rel}/dataset/_common_metadata" if rel else "dataset/_common_metadata")
+        )
+        schema = _catalogue_schema(storage, schema_rel)
+        if not parts and not schema:
+            schema_rel = f"{rel}/_common_metadata" if rel else "_common_metadata"
+            schema = _catalogue_schema(storage, schema_rel)
         if "file_loc" in schema:  # partition_info-style file is not data
             schema = {}
         cols = list(schema)
@@ -452,7 +480,7 @@ def build_union_plan(
             # through Storage.parquet_schema.
             raise CrossMatchError(
                 f"Cannot read the HATS schema of catalogue '{src.name}' "
-                f"({root!r}/{parts[0].rel!r}); the union plan needs each catalogue's "
+                f"({root!r}/{schema_rel!r}); the union plan needs each catalogue's "
                 "column list before it starts. Check the cache copy is readable."
             )
         final_cols: list[str] = []
@@ -1487,7 +1515,10 @@ def _assemble(plan: UnionPlan) -> dict[str, Any]:
         # NOTE: the source chunk parquet is deliberately NOT removed — they
         # are the resume points (a rerun skips existing chunk files).
 
-    hub_parts = plan.catalogues[0].partitions
+    # Keep catalogue labels stable when the first input has no footprint.
+    hub_parts = next(
+        (cat.partitions for cat in plan.catalogues if cat.partitions), [PartitionPlan(0, 0, "")]
+    )
     max_hub_order = max(p.order for p in hub_parts)
     routing_cat = CataloguePlan("union", "", "", "_union_ra", "_union_dec")
     files = [out / "chunks" / f"{chunk.key}.parquet" for chunk in plan.chunks]

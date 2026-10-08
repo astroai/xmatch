@@ -129,6 +129,12 @@ normalization does not establish calibration, global one-to-one consistency,
 or deblending. Joint multi-survey/blend hypotheses need a scientific inference
 model, rather than pooling all detections into one list of competing candidates.
 
+For namespaced pair tables, both endpoint labels are checked against the
+inventory. A nonempty pair table must also contain evidence for the requested
+target namespace, in either the inventory or pair labels. An empty pair table
+can name a target with no inventory rows; inventoried sources then receive only
+the explicit no-match alternative.
+
 Existing association.v1 releases remain authoritative for evaluated pair
 records. `construct_association_components(..., additional_members=inventory)`
 can retain isolated sources under an explicit included-decision policy. Its
