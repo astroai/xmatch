@@ -34,7 +34,8 @@ No changes beyond the pending v0.5.1 release are recorded.
   invalid CLI configuration is reported as a command error.
 - HTTP HATS mirroring distinguishes complete listings from failed lookups,
   includes partition metadata, and removes stale cached files only after a
-  successful refresh.
+  successful refresh. A stale file that cannot be removed fails the sync and
+  keeps its manifest entry, so the next sync retries the removal.
 - Astrometric error floors and drift inflation preserve measured cross
   covariance for ellipse matching, and singular covariance pairs are rejected.
   Astropy uses the shared ellipse filter; separation-based matcher fallbacks

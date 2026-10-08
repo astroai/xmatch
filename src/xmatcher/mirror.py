@@ -968,21 +968,33 @@ def _mirror_remote_hats(
         fetch_phase(metadata_todo)
 
     files_manifest = manifest.setdefault("files", {})
+    pruned = False
     if stats.failed == failed_before:
         remote_rels = {entry["rel"] for entry in remote}
-        for stale in set(files_manifest) - remote_rels:
-            cache.rm(f"{prefix}/{stale}")
+        for stale in sorted(set(files_manifest) - remote_rels):
+            try:
+                cache.rm(f"{prefix}/{stale}")
+            except Exception as exc:  # noqa: BLE001
+                # Keep the manifest entry so the next sync retries the removal,
+                # and still persist the files already pruned or downloaded.
+                stats.failed += 1
+                logger.warning("sync %s: failed to remove stale %s: %s", src.name, stale, exc)
+                continue
             files_manifest.pop(stale, None)
+            pruned = True
         manifest["version"] = version
         manifest["source"] = src.access_identifier
-        manifest["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if stats.failed == failed_before:
+            manifest["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        else:
+            manifest.pop("fetched_at", None)
     elif stats.files_downloaded > downloaded_before:
         # Keep successful per-file updates discoverable after a partial sync;
         # metadata and stale-file pruning wait for a complete data phase.
         manifest["version"] = version
         manifest["source"] = src.access_identifier
         manifest.pop("fetched_at", None)
-    if stats.files_downloaded > downloaded_before or stats.failed == failed_before:
+    if stats.files_downloaded > downloaded_before or stats.failed == failed_before or pruned:
         _write_json(cache, manifest_rel, manifest)
     logger.info(
         "sync %s: %d bytes, %d files (%d skipped, %d failed)",

@@ -367,7 +367,15 @@ def test_tap_append_adds_tail_page(tmp_path: Path, tap_server) -> None:
 
 
 @pytest.mark.parametrize(
-    "scenario", ["shrink", "missing_partition", "offline_listing", "failed_get", "failed_store"]
+    "scenario",
+    [
+        "shrink",
+        "failed_prune",
+        "missing_partition",
+        "offline_listing",
+        "failed_get",
+        "failed_store",
+    ],
 )
 def test_hats_over_http_mirror(tmp_path: Path, monkeypatch, scenario: str) -> None:
     """A HATS catalogue served over plain HTTP mirrors file-for-file."""
@@ -380,7 +388,7 @@ def test_hats_over_http_mirror(tmp_path: Path, monkeypatch, scenario: str) -> No
     )
     serve_dir = tmp_path / "serve"
     serve_dir.mkdir()
-    threshold = 50 if scenario in ("shrink", "missing_partition") else 1000
+    threshold = 50 if scenario in ("shrink", "failed_prune", "missing_partition") else 1000
     mirror._write_hats_native(
         frame, serve_dir / "cat", ra_column="ra", dec_column="dec", threshold=threshold
     )
@@ -435,6 +443,33 @@ def test_hats_over_http_mirror(tmp_path: Path, monkeypatch, scenario: str) -> No
             remote_pixels = hats_native.list_hats_pixels(serve_cat)
             assert len(remote_pixels) < len(hats_native.list_hats_pixels(old_local_cat))
             mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=False)
+            assert len(hats_native.list_hats_pixels(local_cat)) == len(remote_pixels)
+            assert mirror_rows(cache, src).height == 20
+        elif scenario == "failed_prune":
+            # A stale pixel that cannot be removed fails the sync but keeps its
+            # manifest entry, so the next sync retries the removal.
+            shutil.rmtree(serve_cat)
+            mirror._write_hats_native(
+                frame.head(20), serve_cat, ra_column="ra", dec_column="dec", threshold=50
+            )
+            remote_pixels = hats_native.list_hats_pixels(serve_cat)
+            assert len(remote_pixels) < len(hats_native.list_hats_pixels(old_local_cat))
+            real_rm = LocalStorage.rm
+
+            def fail_pixel_rm(storage, rel):
+                if "/Norder=" in rel:
+                    raise OSError("simulated stale pixel removal failure")
+                return real_rm(storage, rel)
+
+            monkeypatch.setattr(LocalStorage, "rm", fail_pixel_rm)
+            with pytest.raises(urllib.error.URLError):
+                mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=False)
+            manifest_after = mirror._read_json(LocalStorage(cache), manifest_rel)
+            assert any("Norder=" in rel for rel in manifest_after["files"])
+            assert "fetched_at" not in manifest_after
+            monkeypatch.setattr(LocalStorage, "rm", real_rm)
+            st_ok = mirror.sync_catalogue(src, cache_root=cache, rate_limit_rps=0.0, force=False)
+            assert st_ok.failed == 0
             assert len(hats_native.list_hats_pixels(local_cat)) == len(remote_pixels)
             assert mirror_rows(cache, src).height == 20
         elif scenario == "missing_partition":
