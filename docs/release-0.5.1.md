@@ -35,23 +35,24 @@ python -m pip install "xmatcher[cds,hats-ray,torchfits,ml]==0.5.1"
 
 ## Verification
 
-The frozen audit source passed the full Pixi suite: 758 passed, 11 skipped,
-and 13 warnings in 235.80 seconds, including 32 benchmark checks. The live
-ESA TAP test skipped because its endpoint was unreachable from this host;
-the preceding rename validation had passed that test, but it is not fresh
-evidence for these changes. Ruff, formatting, typing, and compilation checks
-are clean; the normal pre-push `ci-local` hook runs the offline suite.
+The release source passed the full Pixi suite: 760 passed, 10 skipped, and 13
+warnings in 523.18 seconds, including all 32 benchmark checks. The live ESA
+Gaia TAP integration test passed. The pre-push gate passed with 727 passed,
+10 skipped, and 33 slow/benchmark tests deselected; lint, formatting, typing,
+and compilation checks also passed.
 
 The separate optional-dependency run passed all 70 selected IO, Torchsky,
 native HATS, Healpy, fallback-policy, Astropy scoring, and score-filtering checks,
 using Torchfits 1.0.0 and
 XGBoost 3.4.2. All 16 best/all Ray parity cases passed with the optional ML
 dependencies installed. The scaling analyser self-check passed normally and under
-`python -O`. The published CANFAR scaling measurements remain unchanged.
-The fresh final-wheel smoke with eight independent CANFAR worker sessions
-could not start: session, capacity, and image discovery timed out against
-`ws-uv.canfar.net`, including retries outside the sandbox. This is the same
-endpoint used for the prior scaling run. No new compute was created.
+`python -O`. The [CANFAR scaling report](canfar-scaling-2026-10-07.md) records
+the earlier eight-worker results from the frozen `xmatch` 0.5.0 candidate, not
+this `xmatcher` wheel. A fresh eight-worker smoke, with one independent CANFAR
+session per worker, could not start: `canfar-cluster status` reported no
+manager, and `canfar ps` failed its TLS connection to the CANFAR session
+service. No sessions or jobs were created for this attempt, so the 0.5.1
+release does not claim a new CANFAR run.
 
 ## Audit findings
 
