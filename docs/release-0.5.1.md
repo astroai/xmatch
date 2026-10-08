@@ -1,4 +1,4 @@
-# xmatcher v0.5.1 (unreleased)
+# xmatcher v0.5.1
 
 ## Breaking rename
 
@@ -28,12 +28,9 @@ To reuse the previous local cache, set
 
 ## Installation
 
-PyPI publication is pending. Install from the current source checkout:
-
 ```bash
-git clone https://github.com/astroai/xmatcher.git
-cd xmatcher
-python -m pip install ".[cds,hats-ray,torchfits,ml]"
+python -m pip install "xmatcher==0.5.1"
+python -m pip install "xmatcher[cds,hats-ray,torchfits,ml]==0.5.1"
 ```
 
 ## Verification
@@ -92,5 +89,6 @@ FITS nulls: the writer also needed explicit mask serialization. It also caught
 and corrected intermediate VOS backup and empty-partition regressions before
 the frozen suites ran.
 
-GitHub release CI and published-asset checksums remain pending until the
-v0.5.1 tag is created.
+Pushing the tag `v0.5.1` runs the release workflow. That workflow publishes
+these notes, the tested wheel and sdist, and `SHA256SUMS`, then uploads the
+same archives to PyPI.

@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-No changes beyond the pending v0.5.1 release are recorded.
+## [0.5.1] — 2026-10-08
 
-## [0.5.1] — unreleased
+Published on PyPI as `xmatcher`. The `v0.5.1` tag is the GitHub release.
 
 ### Changed
 
@@ -55,8 +55,6 @@ No changes beyond the pending v0.5.1 release are recorded.
   catalogues while rejecting missing partitions from nonempty catalogues.
   CANFAR scaling validation requires the observed worker count to match the
   requested count.
-
-PyPI publication is pending.
 
 ## [0.5.0] — 2026-10-07
 

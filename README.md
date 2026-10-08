@@ -2,9 +2,9 @@
 
 `xmatcher` matches and joins astronomical catalogues from local files, HATS trees, and configured remote archives. Matching features depend on the selected engine and the metadata supplied for each catalogue; the guides document those limits and the memory trade-offs.
 
-The current source uses the `xmatcher` package and CLI. The released
-[v0.5.0](https://github.com/astroai/xmatch/releases/tag/v0.5.0) keeps the old
-`xmatch` name; the v0.5.1 tag and PyPI publication are pending. See the
+Version 0.5.1 is the PyPI release. The
+[v0.5.0](https://github.com/astroai/xmatch/releases/tag/v0.5.0) GitHub release
+keeps the old `xmatch` name. See the
 [migration notes](docs/release-0.5.1.md).
 
 ```bash
@@ -75,16 +75,20 @@ pixi run preflight-push
 pixi run ci-local
 ```
 
-### Standard: Pip from source
+### Standard: Pip
 
-Install from the current source checkout:
+```bash
+python -m pip install "xmatcher==0.5.1"
+
+# Optional integrations; use only the extras you need
+python -m pip install "xmatcher[cds,hats-ray,torchfits,ml]==0.5.1"
+```
+
+A source checkout uses the same extras from the tree:
 
 ```bash
 git clone https://github.com/astroai/xmatcher.git
 cd xmatcher
-python -m pip install .
-
-# Optional integrations; use only the extras you need
 python -m pip install ".[cds,hats-ray,torchfits,ml]"
 ```
 

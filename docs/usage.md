@@ -8,9 +8,9 @@ A practical, end-to-end user manual for astronomical catalogue crossmatching usi
 
 `xmatcher` requires Python $\ge 3.13$. The checked Pixi environment uses Python 3.13; optional integrations are installed separately for pip users.
 
-The current source uses the `xmatcher` package and CLI. The released
-[v0.5.0](https://github.com/astroai/xmatch/releases/tag/v0.5.0) keeps the old
-`xmatch` name; the v0.5.1 tag and PyPI publication are pending. See the
+Version 0.5.1 is the PyPI release. The
+[v0.5.0](https://github.com/astroai/xmatch/releases/tag/v0.5.0) GitHub release
+keeps the old `xmatch` name. See the
 [migration notes](release-0.5.1.md).
 
 ### Recommended: Pixi Workflow
@@ -28,15 +28,18 @@ pixi install
 pixi run ci-local
 ```
 
-### Pip from source
+### Pip
 
-Install from the current source checkout:
+```bash
+python -m pip install "xmatcher==0.5.1"
+python -m pip install "xmatcher[cds,hats-ray,torchfits,ml]==0.5.1"
+```
+
+A source checkout installs the same extras from the tree:
 
 ```bash
 git clone https://github.com/astroai/xmatcher.git
 cd xmatcher
-
-# Install the core and optional integrations used by this checkout
 python -m pip install ".[cds,hats-ray,torchfits,ml]"
 ```
 
